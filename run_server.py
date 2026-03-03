@@ -13,6 +13,9 @@ from typing import Optional, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parent
 SRC = ROOT / "src"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_API_PORT = 2731
+DEFAULT_CHAINLIT_PORT = 2732
 
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
@@ -57,6 +60,7 @@ def _spawn_children(
         "run",
         str(root / "chainlit_app.py"),
         "-w",
+        "--headless",
         "--host",
         host,
         "--port",
@@ -99,25 +103,60 @@ def _zulip_bot_enabled_from_config(config_path: pathlib.Path) -> bool:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         return False
-    enabled = raw.get("enabled", False)
-    return isinstance(enabled, bool) and enabled
+    zulip_enabled = raw.get("zulip_enabled", False)
+    return isinstance(zulip_enabled, bool) and zulip_enabled
+
+
+def _parse_port(value: object, default: int, key_name: str) -> str:
+    if value is None:
+        return str(default)
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {key_name}: {value!r}") from exc
+    if not (1 <= port <= 65535):
+        raise ValueError(f"{key_name} must be between 1 and 65535: {port}")
+    return str(port)
+
+
+def _load_server_runtime_config(config_path: pathlib.Path) -> tuple[str, str, str]:
+    if not config_path.exists():
+        return DEFAULT_HOST, str(DEFAULT_API_PORT), str(DEFAULT_CHAINLIT_PORT)
+
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Invalid config format in {config_path}: expected JSON object")
+
+    server = raw.get("server", {})
+    if server is None:
+        server = {}
+    if not isinstance(server, dict):
+        raise ValueError(f"Invalid server config in {config_path}: expected object")
+
+    host_raw = server.get("host", DEFAULT_HOST)
+    host = host_raw.strip() if isinstance(host_raw, str) else str(host_raw)
+    if not host:
+        host = DEFAULT_HOST
+
+    api_port = _parse_port(server.get("api_port"), DEFAULT_API_PORT, "server.api_port")
+    chainlit_port = _parse_port(
+        server.get("chainlit_port"),
+        DEFAULT_CHAINLIT_PORT,
+        "server.chainlit_port",
+    )
+    return host, api_port, chainlit_port
 
 
 def main() -> int:
-    api_port = os.getenv("SHEAF_PORT", "2731")
-    ui_port = os.getenv("SHEAF_CHAINLIT_PORT", "2732")
-    host = os.getenv("SHEAF_HOST", "127.0.0.1")
-    zulip_config_path = (ROOT / "zulip_bot.config.json").resolve()
-    start_zulip_bot = _zulip_bot_enabled_from_config(zulip_config_path)
+    config_path = (ROOT / "sheaf_server.config").resolve()
+    host, api_port, ui_port = _load_server_runtime_config(config_path)
+    start_zulip_bot = _zulip_bot_enabled_from_config(config_path)
     runtime_dir = ROOT / ".runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    reboot_file = pathlib.Path(
-        os.getenv("SHEAF_REBOOT_FILE", str(runtime_dir / "reboot.request"))
-    ).resolve()
+    reboot_file = (runtime_dir / "reboot.request").resolve()
 
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{SRC}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
-    env.setdefault("SHEAF_API_BASE_URL", f"http://{host}:{api_port}")
     env["SHEAF_REBOOT_FILE"] = str(reboot_file)
 
     _consume_reboot_request(reboot_file)
@@ -131,7 +170,7 @@ def main() -> int:
     )
     bot_proc: Optional[subprocess.Popen[bytes]] = None
     if start_zulip_bot:
-        bot_proc = _spawn_zulip_bot(root=ROOT, env=env, config_path=zulip_config_path)
+        bot_proc = _spawn_zulip_bot(root=ROOT, env=env, config_path=config_path)
 
     def _shutdown(_signum: int, _frame: object) -> None:
         if bot_proc is not None:
@@ -147,9 +186,9 @@ def main() -> int:
     print(f"chainlit   -> http://{host}:{ui_port}")
     print(f"reboot API -> http://{host}:{api_port}/admin/reboot")
     if start_zulip_bot:
-        print(f"zulip bot  -> enabled ({zulip_config_path})")
+        print(f"zulip bot  -> enabled ({config_path})")
     else:
-        print(f"zulip bot  -> disabled (set \"enabled\": true in {zulip_config_path})")
+        print(f"zulip bot  -> disabled (set \"zulip_enabled\": true in {config_path})")
 
     try:
         while True:
@@ -172,7 +211,7 @@ def main() -> int:
                     bot_proc = _spawn_zulip_bot(
                         root=ROOT,
                         env=env,
-                        config_path=zulip_config_path,
+                        config_path=config_path,
                     )
                 continue
 

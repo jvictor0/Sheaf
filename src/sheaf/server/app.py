@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -129,7 +128,21 @@ def chat(chat_id: str, payload: ChatMessageRequest) -> ChatMessageResponse:
 def main() -> None:
     import uvicorn
 
-    port = int(os.getenv("SHEAF_PORT", "2731"))
+    config_path = Path(__file__).resolve().parents[3] / "sheaf_server.config"
+    port = 2731
+    if config_path.exists():
+        try:
+            import json
+
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                server = raw.get("server", {})
+                if isinstance(server, dict):
+                    parsed = int(server.get("api_port", 2731))
+                    if 1 <= parsed <= 65535:
+                        port = parsed
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
     uvicorn.run("sheaf.server.app:app", host="127.0.0.1", port=port, reload=True)
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
@@ -12,8 +12,39 @@ from urllib.request import Request, urlopen
 import chainlit as cl
 from chainlit.chat_context import chat_context
 
-BASE_URL = os.getenv("SHEAF_API_BASE_URL", "http://127.0.0.1:2731")
-HISTORY_PREVIEW_SIZE = int(os.getenv("SHEAF_CHAT_PREVIEW_MESSAGES", "12"))
+ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "sheaf_server.config"
+DEFAULT_BASE_URL = "http://127.0.0.1:2731"
+HISTORY_PREVIEW_SIZE = 12
+
+
+def _load_api_base_url() -> str:
+    if not CONFIG_PATH.exists():
+        return DEFAULT_BASE_URL
+    try:
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_BASE_URL
+
+    if not isinstance(raw, dict):
+        return DEFAULT_BASE_URL
+
+    server = raw.get("server", {})
+    if isinstance(server, dict):
+        host = server.get("host")
+        api_port = server.get("api_port")
+        if isinstance(host, str) and host.strip():
+            try:
+                port = int(api_port)
+            except (TypeError, ValueError):
+                port = 2731
+            if 1 <= port <= 65535:
+                return f"http://{host.strip()}:{port}"
+
+    return DEFAULT_BASE_URL
+
+
+BASE_URL = _load_api_base_url()
 
 
 def _post_json(url: str, data: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -639,8 +639,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Poll Zulip messages and route them to Sheaf.")
     parser.add_argument(
         "--config",
-        default="zulip_bot.config.json",
-        help="Path to JSON config file (default: zulip_bot.config.json)",
+        default="sheaf_server.config",
+        help="Path to JSON config file (default: sheaf_server.config)",
     )
     args = parser.parse_args()
 

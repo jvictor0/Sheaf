@@ -73,21 +73,36 @@ LangGraph dependencies:
 .venv/bin/python run_server.py
 ```
 
-This starts both:
-- API server on `127.0.0.1:2731`
-- Chainlit UI on `127.0.0.1:2732`
+`run_server.py` reads runtime settings from `sheaf_server.config` under `server`:
+- `server.host`
+- `server.api_port`
+- `server.chainlit_port`
 
-Development reboot:
-- Call `POST http://127.0.0.1:2731/admin/reboot` to restart both processes.
-- The request works when launched via `run_server.py` (it provides the supervisor trigger path).
+Example:
 
-Optional override:
-
-```bash
-SHEAF_PORT=9000 SHEAF_CHAINLIT_PORT=9001 .venv/bin/python run_server.py
+```json
+{
+  "server": {
+    "host": "127.0.0.1",
+    "api_port": 2731,
+    "chainlit_port": 2732
+  }
+}
 ```
 
-To also start the Zulip bot from `run_server.py`, set `"enabled": true` in `zulip_bot.config.json`.
+This starts both using those configured values:
+- API server on `http://<server.host>:<server.api_port>`
+- Chainlit UI on `http://<server.host>:<server.chainlit_port>`
+
+Development reboot:
+- Call `POST http://<server.host>:<server.api_port>/admin/reboot` to restart both processes.
+- The request works when launched via `run_server.py` (it provides the supervisor trigger path).
+
+To also start the Zulip bot from `run_server.py`, set `"zulip_enabled": true` in `sheaf_server.config`.
+
+Server runtime config policy:
+- Use the config file only.
+- Do not use environment variables to set server host/ports.
 
 ## Run CLI loop
 
@@ -117,13 +132,7 @@ Start web UI:
 .venv/bin/chainlit run chainlit_app.py -w --port 2732
 ```
 
-Then open the local URL shown by Chainlit (use `http://127.0.0.1:2732` if using `run_server.py` defaults).
-
-Optional API target override for Chainlit:
-
-```bash
-SHEAF_API_BASE_URL=http://127.0.0.1:2731 .venv/bin/chainlit run chainlit_app.py -w --port 2732
-```
+Then open the local URL shown by Chainlit (or `http://<server.host>:<server.chainlit_port>`).
 
 ## Run Zulip poll bot
 
@@ -139,17 +148,21 @@ Install/setup:
 
 ```bash
 .venv/bin/pip install -e .
-cp zulip_bot.config.example.json zulip_bot.config.json
+cp sheaf_server.config.example sheaf_server.config
 ```
 
 Config file:
-- Default path: `zulip_bot.config.json`
-- Example template: `zulip_bot.config.example.json`
+- Default path: `sheaf_server.config`
+- Example template: `sheaf_server.config.example`
 - Required keys:
-  - `enabled` (set `true` to auto-start bot when using `run_server.py`)
+  - `zulip_enabled` (`true` = Zulip enabled / auto-start with `run_server.py`)
   - `zulip_site`
   - `zulip_bot_email`
   - `zulip_bot_api_key`
+- Required for `run_server.py` network binding:
+  - `server.host`
+  - `server.api_port`
+  - `server.chainlit_port`
 - Optional keys:
   - `sheaf_api_base_url` (default: `http://127.0.0.1:2731`)
   - `sheaf_chat_id` (optional fixed chat override)
@@ -167,7 +180,7 @@ Config file:
 Run:
 
 ```bash
-.venv/bin/python scripts/zulip_poll_bot.py --config zulip_bot.config.json
+.venv/bin/python scripts/zulip_poll_bot.py --config sheaf_server.config
 ```
 
 Reliability behavior:
