@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,11 +44,22 @@ class ChatMessageResponse(BaseModel):
     checkpoint_id: str
 
 
+CHAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
 def _validate_chat_id(chat_id: str) -> None:
+    # Backward compatible: UUIDs are valid.
     try:
         uuid.UUID(chat_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid chat_id: {chat_id}") from exc
+        return
+    except ValueError:
+        pass
+
+    # Allow readable IDs for integrations (for example Zulip stream-scoped chats).
+    if CHAT_ID_PATTERN.match(chat_id):
+        return
+
+    raise HTTPException(status_code=400, detail=f"Invalid chat_id: {chat_id}")
 
 
 @app.get("/health")

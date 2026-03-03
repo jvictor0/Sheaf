@@ -87,6 +87,8 @@ Optional override:
 SHEAF_PORT=9000 SHEAF_CHAINLIT_PORT=9001 .venv/bin/python run_server.py
 ```
 
+To also start the Zulip bot from `run_server.py`, set `"enabled": true` in `zulip_bot.config.json`.
+
 ## Run CLI loop
 
 ```bash
@@ -122,6 +124,59 @@ Optional API target override for Chainlit:
 ```bash
 SHEAF_API_BASE_URL=http://127.0.0.1:2731 .venv/bin/chainlit run chainlit_app.py -w --port 2732
 ```
+
+## Run Zulip poll bot
+
+Script: `scripts/zulip_poll_bot.py`
+
+Purpose:
+- Use Zulip event queues (`/register` + `/events`) for long-poll message delivery
+- Send each message content to Sheaf (`POST /chats/{chat_id}/messages`)
+- Post Sheaf response back to Zulip
+- Persist progress and per-message processing status in SQLite
+
+Install/setup:
+
+```bash
+.venv/bin/pip install -e .
+cp zulip_bot.config.example.json zulip_bot.config.json
+```
+
+Config file:
+- Default path: `zulip_bot.config.json`
+- Example template: `zulip_bot.config.example.json`
+- Required keys:
+  - `enabled` (set `true` to auto-start bot when using `run_server.py`)
+  - `zulip_site`
+  - `zulip_bot_email`
+  - `zulip_bot_api_key`
+- Optional keys:
+  - `sheaf_api_base_url` (default: `http://127.0.0.1:2731`)
+  - `sheaf_chat_id` (optional fixed chat override)
+  - if `sheaf_chat_id` is empty, chat IDs are derived from Zulip context:
+  - streams: `zulip-stream-<stream_id>-<stream-name-slug>`
+  - DMs: `zulip-dm-<recipient_id>`
+  - `state_db_path` (default: `data/zulip_bot_state.sqlite3`)
+  - `poll_seconds` (default: `2.0`, retry/backoff delay after failures)
+  - `batch_size` (default: `100`)
+  - `narrow` (JSON list, default: mention-only)
+  - `process_backlog_on_first_run` (default: `false`)
+  - `false`: first run starts from newest message
+  - `true`: first run starts from oldest available messages
+
+Run:
+
+```bash
+.venv/bin/python scripts/zulip_poll_bot.py --config zulip_bot.config.json
+```
+
+Reliability behavior:
+- `last_message_id` checkpoint is persisted in SQLite.
+- `last_event_id` is tracked for current event queue progress.
+- Every message ID is tracked in `processed_messages` with status (`processing`, `done`, `failed`).
+- On failures, message remains retryable and `last_message_id` is not advanced past it.
+- Event queue expiration is handled by re-registering, then catching up from `last_message_id`.
+- Duplicate processing can still happen in crash windows, but messages are not lost.
 
 Chainlit UI behavior in this repo:
 - `Enter` sends message

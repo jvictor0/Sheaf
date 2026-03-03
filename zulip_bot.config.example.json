@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "zulip_site": "https://acme.zulipchat.com",
+  "zulip_bot_email": "sheaf-bot-bot@acme.zulipchat.com",
+  "zulip_bot_api_key": "1234567890abcdef1234567890abcdef",
+  "sheaf_api_base_url": "http://127.0.0.1:2731",
+  "sheaf_chat_id": "",
+  "state_db_path": "data/zulip_bot_state.sqlite3",
+  "poll_seconds": 2.0,
+  "batch_size": 100,
+  "narrow": [
+    {
+      "operator": "is",
+      "operand": "mentioned"
+    }
+  ],
+  "process_backlog_on_first_run": false
+}

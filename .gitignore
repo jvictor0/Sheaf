@@ -15,6 +15,7 @@ venv/
 
 .pycache/
 .runtime/
+zulip_bot.config.json
 data/*
 !data/.gitkeep
 !data/README.md
