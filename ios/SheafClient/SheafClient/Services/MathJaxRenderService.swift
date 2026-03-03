@@ -16,13 +16,13 @@ actor MathJaxRenderService {
         _ = await MainActor.run { worker }
     }
 
-    func render(tex: String, block: Bool) async -> MathAsset? {
-        let key = MathCacheKey.make(tex: tex, block: block)
+    func render(tex: String, block: Bool, appearance: MathAppearance) async -> MathAsset? {
+        let key = MathCacheKey.make(tex: tex, block: block, appearance: appearance)
         if let cached = await cache.get(key) {
             return cached
         }
 
-        let rendered = await worker.render(tex: tex, block: block)
+        let rendered = await worker.render(tex: tex, block: block, appearance: appearance)
         guard let rendered else { return nil }
         await cache.set(rendered, for: key)
         return rendered
@@ -60,7 +60,7 @@ final class MathJaxWorker: NSObject, WKNavigationDelegate {
         loadWorkerPageIfNeeded()
     }
 
-    func render(tex: String, block: Bool) async -> MathAsset? {
+    func render(tex: String, block: Bool, appearance: MathAppearance) async -> MathAsset? {
         loadWorkerPageIfNeeded()
         for _ in 0..<20 where !isLoaded {
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -71,7 +71,7 @@ final class MathJaxWorker: NSObject, WKNavigationDelegate {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
-        let js = "renderMath(\"\(escaped)\", \(block ? "true" : "false"));"
+        let js = "renderMath(\"\(escaped)\", \(block ? "true" : "false"), \"\(appearance.rawValue)\");"
 
         return await withCheckedContinuation { continuation in
             webView.evaluateJavaScript(js) { value, _ in

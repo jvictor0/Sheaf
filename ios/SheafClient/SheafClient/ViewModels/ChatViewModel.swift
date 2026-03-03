@@ -54,16 +54,16 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func prefetchMath() {
+    func prefetchMath(for appearance: MathAppearance) {
         let snapshot = Array(messages.suffix(20))
         Task(priority: .utility) {
             for message in snapshot {
                 for segment in message.segments {
                     switch segment {
                     case .inlineMath(let tex, _):
-                        _ = await MathJaxRenderService.shared.render(tex: tex, block: false)
+                        _ = await MathJaxRenderService.shared.render(tex: tex, block: false, appearance: appearance)
                     case .blockMath(let tex, _):
-                        _ = await MathJaxRenderService.shared.render(tex: tex, block: true)
+                        _ = await MathJaxRenderService.shared.render(tex: tex, block: true, appearance: appearance)
                     default:
                         continue
                     }

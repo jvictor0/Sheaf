@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ChatView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: AppState
     @StateObject private var viewModel: ChatViewModel
@@ -32,7 +33,7 @@ struct ChatView: View {
                                 proxy.scrollTo(last.id, anchor: .bottom)
                             }
                         }
-                        viewModel.prefetchMath()
+                        viewModel.prefetchMath(for: colorScheme == .dark ? .dark : .light)
                     }
                 }
             }

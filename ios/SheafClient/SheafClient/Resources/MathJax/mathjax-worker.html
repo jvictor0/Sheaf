@@ -32,29 +32,32 @@
   <body>
     <div id="container"></div>
     <script>
-      function renderFallback(tex, block) {
+      function renderFallback(tex, block, appearance) {
+        const color = appearance === 'dark' ? '#FFFFFF' : '#111111';
         const escaped = tex
           .replaceAll('&', '&amp;')
           .replaceAll('<', '&lt;')
           .replaceAll('>', '&gt;');
         return {
-          svg: `<span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #666;">${block ? '$$' : '$'}${escaped}${block ? '$$' : '$'}</span>`,
+          svg: `<span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: ${color};">${block ? '$$' : '$'}${escaped}${block ? '$$' : '$'}</span>`,
           width: 100,
           height: block ? 26 : 20,
           baseline: 0
         };
       }
 
-      function renderMath(tex, block) {
+      function renderMath(tex, block, appearance) {
         try {
           if (!window.MathJax || !MathJax.tex2svg) {
-            return renderFallback(tex, block);
+            return renderFallback(tex, block, appearance);
           }
           const svgNode = MathJax.tex2svg(tex, { display: block });
           const svg = svgNode.querySelector('svg');
           if (!svg) {
             return { svg: '', width: 0, height: 0, baseline: 0 };
           }
+          const color = appearance === 'dark' ? '#FFFFFF' : '#111111';
+          svg.style.color = color;
 
           const html = svg.outerHTML;
           const width = Number(svg.getAttribute('width')?.replace('ex', '')) || 0;
@@ -69,7 +72,7 @@
             baseline: baseline * 8
           };
         } catch (_) {
-          return renderFallback(tex, block);
+          return renderFallback(tex, block, appearance);
         }
       }
     </script>

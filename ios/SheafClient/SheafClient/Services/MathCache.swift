@@ -7,10 +7,19 @@ struct MathAsset: Codable, Hashable {
     let baseline: Double
 }
 
+enum MathAppearance: String, Codable, Hashable {
+    case light
+    case dark
+}
+
 enum MathCacheKey {
     static func make(tex: String, block: Bool) -> String {
+        make(tex: tex, block: block, appearance: .light)
+    }
+
+    static func make(tex: String, block: Bool, appearance: MathAppearance) -> String {
         // Bump this when render metrics/layout logic changes to invalidate stale cached assets.
-        let input = "v2::\(block ? "block" : "inline")::\(tex)"
+        let input = "v3::\(appearance.rawValue)::\(block ? "block" : "inline")::\(tex)"
         return Data(input.utf8).base64EncodedString()
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "+", with: "-")
