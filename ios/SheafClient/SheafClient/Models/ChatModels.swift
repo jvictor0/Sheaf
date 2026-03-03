@@ -26,6 +26,10 @@ struct CreateChatResponse: Decodable {
     }
 }
 
+struct CreateChatRequest: Encodable {
+    let name: String
+}
+
 struct ChatMetadata: Decodable {
     let chatID: String
     let messageCount: Int
@@ -46,8 +50,20 @@ struct ChatMessage: Decodable, Identifiable, Hashable {
     let index: Int?
     let role: String
     let content: String
+    let localID: UUID = UUID()
 
-    var id: String { "\(index ?? -1)-\(role)-\(content.hashValue)" }
+    var id: String {
+        if let index {
+            return "server-\(index)"
+        }
+        return "local-\(localID.uuidString)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case index
+        case role
+        case content
+    }
 }
 
 struct SendMessageRequest: Encodable {

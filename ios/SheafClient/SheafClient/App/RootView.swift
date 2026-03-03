@@ -11,7 +11,7 @@ struct RootView: View {
                     case .conversationList:
                         ConversationListView(viewModel: ConversationListViewModel())
                     case .chat(let chatID):
-                        ChatView(viewModel: ChatViewModel(chatID: chatID))
+                        ChatView(viewModel: ChatViewModel(chatID: chatID, sessionStore: appState.chatSessionStore))
                     }
                 }
         }
