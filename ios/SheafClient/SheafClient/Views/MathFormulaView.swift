@@ -15,8 +15,10 @@ struct MathFormulaView: View {
     var body: some View {
         Group {
             if let asset {
+                let bottomInset = max(0, -asset.baseline)
                 InlineSVGView(svg: asset.svg)
-                    .frame(height: max(18, asset.height))
+                    .frame(width: max(1, asset.width), height: max(18, asset.height + bottomInset), alignment: .leading)
+                    .fixedSize(horizontal: !block, vertical: true)
             } else {
                 Text(block ? "$$\(tex)$$" : "$\(tex)$")
                     .font(.system(.footnote, design: .monospaced))
@@ -72,8 +74,8 @@ private struct InlineSVGView: PlatformWebViewRepresentable {
           <head>
             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
             <style>
-              html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-              svg { width: 100%; height: auto; }
+              html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; display: inline-block; }
+              svg { display: block; width: auto; height: auto; }
             </style>
           </head>
           <body>\(svg)</body>

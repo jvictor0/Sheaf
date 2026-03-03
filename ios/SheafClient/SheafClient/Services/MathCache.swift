@@ -9,7 +9,8 @@ struct MathAsset: Codable, Hashable {
 
 enum MathCacheKey {
     static func make(tex: String, block: Bool) -> String {
-        let input = "\(block ? "block" : "inline")::\(tex)"
+        // Bump this when render metrics/layout logic changes to invalidate stale cached assets.
+        let input = "v2::\(block ? "block" : "inline")::\(tex)"
         return Data(input.utf8).base64EncodedString()
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "+", with: "-")

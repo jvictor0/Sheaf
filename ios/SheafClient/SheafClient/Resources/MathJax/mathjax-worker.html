@@ -32,34 +32,45 @@
   <body>
     <div id="container"></div>
     <script>
-      async function renderMath(tex, block) {
-        if (!window.MathJax || !MathJax.tex2svgPromise) {
-          const escaped = tex
-            .replaceAll('&', '&amp;')
-            .replaceAll('<', '&lt;')
-            .replaceAll('>', '&gt;');
-          return {
-            svg: `<span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #666;">${block ? '$$' : '$'}${escaped}${block ? '$$' : '$'}</span>`,
-            width: 100,
-            height: block ? 26 : 20,
-            baseline: 0
-          };
-        }
-        const svgNode = await MathJax.tex2svgPromise(tex, { display: block });
-        const svg = svgNode.querySelector('svg');
-        if (!svg) {
-          return { svg: '', width: 0, height: 0, baseline: 0 };
-        }
-
-        const html = svg.outerHTML;
-        const width = Number(svg.getAttribute('width')?.replace('ex', '')) || 0;
-        const height = Number(svg.getAttribute('height')?.replace('ex', '')) || 0;
+      function renderFallback(tex, block) {
+        const escaped = tex
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;');
         return {
-          svg: html,
-          width: width * 8,
-          height: height * 8,
+          svg: `<span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #666;">${block ? '$$' : '$'}${escaped}${block ? '$$' : '$'}</span>`,
+          width: 100,
+          height: block ? 26 : 20,
           baseline: 0
         };
+      }
+
+      function renderMath(tex, block) {
+        try {
+          if (!window.MathJax || !MathJax.tex2svg) {
+            return renderFallback(tex, block);
+          }
+          const svgNode = MathJax.tex2svg(tex, { display: block });
+          const svg = svgNode.querySelector('svg');
+          if (!svg) {
+            return { svg: '', width: 0, height: 0, baseline: 0 };
+          }
+
+          const html = svg.outerHTML;
+          const width = Number(svg.getAttribute('width')?.replace('ex', '')) || 0;
+          const height = Number(svg.getAttribute('height')?.replace('ex', '')) || 0;
+          const style = svg.getAttribute('style') || '';
+          const baselineMatch = style.match(/vertical-align:\s*([-+]?\d*\.?\d+)ex/);
+          const baseline = Number(baselineMatch?.[1] || 0) || 0;
+          return {
+            svg: html,
+            width: width * 8,
+            height: height * 8,
+            baseline: baseline * 8
+          };
+        } catch (_) {
+          return renderFallback(tex, block);
+        }
       }
     </script>
   </body>

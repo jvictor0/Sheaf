@@ -215,6 +215,29 @@ Lazy chat creation behavior:
 
 `data/` contents are gitignored.
 
+## iOS LaTeX rendering
+
+The iOS client renders math with MathJax SVG via a hidden WebKit worker:
+
+- Worker file: `ios/SheafClient/SheafClient/Resources/MathJax/mathjax-worker.html`
+- Swift render service: `ios/SheafClient/SheafClient/Services/MathJaxRenderService.swift`
+- Math view/layout: `ios/SheafClient/SheafClient/Views/MathFormulaView.swift`
+
+Recent fixes:
+- The JS bridge uses a synchronous `renderMath(...)` result object (not a Promise) so `evaluateJavaScript` can decode it reliably.
+- SVGs are rendered at intrinsic size (no forced `width: 100%`), reducing oversized/cropped glyphs.
+- Baseline/depth metadata is used to avoid clipping lower portions of inline glyphs.
+- Block math is horizontally scrollable in message bubbles.
+- Math cache keys are versioned (`MathCacheKey`) so layout/render metric changes invalidate stale cached assets.
+
+Supported math delimiters in chat text:
+- Inline: `$...$`, `\\(...\\)`
+- Block: `$$...$$`, `\\[...\\]`
+- Fenced code blocks with math languages: ```` ```math ```` / ```` ```latex ```` / ```` ```tex ````
+
+Note:
+- Expressions not wrapped in supported delimiters are treated as normal text.
+
 ## Next steps
 
 - Tune compaction policy and add tests around summary quality/recall

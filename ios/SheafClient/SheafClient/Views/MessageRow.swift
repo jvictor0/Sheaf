@@ -27,8 +27,10 @@ struct MessageRow: View {
                     MathFormulaView(tex: tex, block: false)
                         .frame(minHeight: 20)
                 case .blockMath(let tex, _):
-                    MathFormulaView(tex: tex, block: true)
-                        .frame(minHeight: 40)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        MathFormulaView(tex: tex, block: true)
+                            .frame(minHeight: 40, alignment: .leading)
+                    }
                 }
             }
         }
