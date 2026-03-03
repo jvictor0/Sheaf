@@ -1,0 +1,88 @@
+#sheaf-sidebar {
+  position: fixed;
+  top: 56px;
+  left: 0;
+  width: 280px;
+  height: calc(100vh - 56px);
+  z-index: 40;
+  border-right: 1px solid hsl(var(--border));
+  background: hsl(var(--sidebar-background));
+  color: hsl(var(--sidebar-foreground));
+  display: flex;
+  flex-direction: column;
+}
+
+#sheaf-sidebar .sheaf-side-header {
+  padding: 10px;
+  border-bottom: 1px solid hsl(var(--sidebar-border));
+}
+
+#sheaf-sidebar .sheaf-side-title {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+#sheaf-sidebar .sheaf-side-actions {
+  display: flex;
+  gap: 8px;
+}
+
+#sheaf-sidebar .sheaf-side-actions button {
+  flex: 1;
+  height: 28px;
+  border: 1px solid hsl(var(--input));
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+#sheaf-sidebar .sheaf-side-body {
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#sheaf-sidebar .sheaf-chat-item {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid hsl(var(--sidebar-border));
+  background: hsl(var(--sidebar-accent));
+  color: hsl(var(--sidebar-accent-foreground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+#sheaf-sidebar .sheaf-chat-item.active {
+  border-color: hsl(var(--ring));
+  background: hsl(var(--secondary));
+}
+
+#sheaf-sidebar .sheaf-empty {
+  font-size: 12px;
+  opacity: 0.8;
+  padding: 8px;
+}
+
+main,
+[data-testid="chat-view"],
+#root {
+  margin-left: 280px;
+}
+
+@media (max-width: 980px) {
+  #sheaf-sidebar {
+    display: none;
+  }
+
+  main,
+  [data-testid="chat-view"],
+  #root {
+    margin-left: 0;
+  }
+}
