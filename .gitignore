@@ -19,3 +19,20 @@ zulip_bot.config.json
 data/*
 !data/.gitkeep
 !data/README.md
+
+# iOS SwiftPM build artifacts
+ios/SheafIOS/.build/
+
+# Xcode user-specific state
+*.xcuserstate
+xcuserdata/
+.swiftpm/xcode/
+**/xcuserdata/
+**/*.xcuserstate
+**/.swiftpm/xcode/
+
+# Xcode build/runtime artifacts
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
