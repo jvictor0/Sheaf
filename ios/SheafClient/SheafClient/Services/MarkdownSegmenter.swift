@@ -24,9 +24,14 @@ struct MarkdownSegmenter {
                 let fenced = String(text[codeRange])
                 let parsed = parseCodeFence(fenced)
                 if isMathFence(language: parsed.language) {
-                    let tex = parsed.code.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !tex.isEmpty {
-                        segments.append(.blockMath(tex: tex, key: MathCacheKey.make(tex: tex, block: true)))
+                    let code = parsed.code.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if shouldRenderAsMath(code: code) {
+                        let tex = normalizedMathFenceContent(code)
+                        if !tex.isEmpty {
+                            segments.append(.blockMath(tex: tex, key: MathCacheKey.make(tex: tex, block: true)))
+                        }
+                    } else if !code.isEmpty {
+                        segments.append(.codeBlock(language: parsed.language, text: parsed.code))
                     }
                 } else {
                     segments.append(.codeBlock(language: parsed.language, text: parsed.code))
@@ -80,6 +85,55 @@ struct MarkdownSegmenter {
         default:
             return false
         }
+    }
+
+    private func shouldRenderAsMath(code: String) -> Bool {
+        if code.isEmpty {
+            return false
+        }
+
+        // Full LaTeX document snippets should remain code blocks.
+        let lowered = code.lowercased()
+        let documentMarkers = [
+            "\\documentclass",
+            "\\begin{document}",
+            "\\end{document}",
+            "\\usepackage",
+            "\\maketitle",
+            "\\section",
+            "\\subsection",
+            "\\paragraph",
+            "\\title{",
+            "\\author{",
+            "\\date{",
+        ]
+        if documentMarkers.contains(where: { lowered.contains($0) }) {
+            return false
+        }
+
+        return true
+    }
+
+    private func normalizedMathFenceContent(_ code: String) -> String {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.hasPrefix("\\[") && trimmed.hasSuffix("\\]") {
+            let start = trimmed.index(trimmed.startIndex, offsetBy: 2)
+            let end = trimmed.index(trimmed.endIndex, offsetBy: -2)
+            if start <= end {
+                return String(trimmed[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        if trimmed.hasPrefix("$$") && trimmed.hasSuffix("$$") {
+            let start = trimmed.index(trimmed.startIndex, offsetBy: 2)
+            let end = trimmed.index(trimmed.endIndex, offsetBy: -2)
+            if start <= end {
+                return String(trimmed[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        return trimmed
     }
 
     private func splitMath(in text: String) -> [MessageSegment] {

@@ -27,8 +27,9 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
-    func createChatAndOpen() async throws -> String {
-        let chatID = try await api.createChat()
+    func createChatAndOpen(name: String? = nil) async throws -> String {
+        let normalizedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chatID = try await api.createChat(name: normalizedName?.isEmpty == false ? normalizedName : nil)
         await loadChats()
         return chatID
     }

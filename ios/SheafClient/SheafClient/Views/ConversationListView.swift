@@ -3,6 +3,9 @@ import SwiftUI
 struct ConversationListView: View {
     @EnvironmentObject private var appState: AppState
     @StateObject private var viewModel: ConversationListViewModel
+    @State private var isShowingNewChatPrompt = false
+    @State private var newChatName = ""
+    @State private var createErrorMessage: String?
 
     init(viewModel: ConversationListViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -36,18 +39,34 @@ struct ConversationListView: View {
         .toolbar {
             ToolbarItem {
                 Button {
-                    Task {
-                        do {
-                            let id = try await viewModel.createChatAndOpen()
-                            appState.openChat(id)
-                        } catch {
-                            // Load errors are already reflected by the next list refresh.
-                        }
-                    }
+                    newChatName = ""
+                    isShowingNewChatPrompt = true
                 } label: {
                     Label("New", systemImage: "plus")
                 }
             }
+        }
+        .alert("New Chat", isPresented: $isShowingNewChatPrompt) {
+            TextField("Chat name", text: $newChatName)
+            Button("Create") {
+                createNamedChat()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Enter a name for the new chat.")
+        }
+        .alert(
+            "Failed to Create Chat",
+            isPresented: Binding(
+                get: { createErrorMessage != nil },
+                set: { if !$0 { createErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                createErrorMessage = nil
+            }
+        } message: {
+            Text(createErrorMessage ?? "")
         }
         .task {
             await viewModel.loadChats()
@@ -61,14 +80,8 @@ struct ConversationListView: View {
                 Text("No conversations yet")
                     .font(.headline)
                 Button("New Chat") {
-                    Task {
-                        do {
-                            let id = try await viewModel.createChatAndOpen()
-                            appState.openChat(id)
-                        } catch {
-                            // covered by load state
-                        }
-                    }
+                    newChatName = ""
+                    isShowingNewChatPrompt = true
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -84,6 +97,23 @@ struct ConversationListView: View {
             }
             .refreshable {
                 await viewModel.loadChats()
+            }
+        }
+    }
+
+    private func createNamedChat() {
+        let trimmed = newChatName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            createErrorMessage = "Please enter a chat name."
+            return
+        }
+
+        Task {
+            do {
+                let id = try await viewModel.createChatAndOpen(name: trimmed)
+                appState.openChat(id)
+            } catch {
+                createErrorMessage = error.localizedDescription
             }
         }
     }

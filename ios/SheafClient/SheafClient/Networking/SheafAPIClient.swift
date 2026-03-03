@@ -26,8 +26,10 @@ actor SheafAPIClient {
         self.encoder = encoder
     }
 
-    func createChat() async throws -> String {
-        let response: CreateChatResponse = try await request(path: "/chats", method: "POST", body: Optional<Data>.none)
+    func createChat(name: String? = nil) async throws -> String {
+        let payload = name.map { CreateChatRequest(name: $0) }
+        let body = try payload.map { try encoder.encode($0) }
+        let response: CreateChatResponse = try await request(path: "/chats", method: "POST", body: body)
         return response.chatID
     }
 

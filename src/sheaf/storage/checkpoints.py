@@ -6,6 +6,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -67,9 +68,17 @@ def _require_chat_initialized(chat_id: str) -> None:
         raise FileNotFoundError(f"Chat not found: {chat_id}")
 
 
-def create_chat() -> str:
+def create_chat(chat_id: Optional[str] = None, *, eager: bool = False) -> str:
+    ensure_data_dirs()
+    resolved_chat_id = chat_id or str(uuid.uuid4())
+
+    if eager:
+        if _chat_meta_path(resolved_chat_id).exists():
+            raise FileExistsError(f"Chat already exists: {resolved_chat_id}")
+        _ensure_chat_initialized(resolved_chat_id)
+
     # Lazy mode: allocate only an ID. Directory/checkpoint DB are created at first message.
-    return str(uuid.uuid4())
+    return resolved_chat_id
 
 
 def list_chats() -> list[dict[str, str]]:

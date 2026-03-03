@@ -201,12 +201,12 @@
 			);
 			mainGroup = AFB2679B2F57463200C3C72A;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
-			productRefGroup = AFB267A52F57463200C3C72A /* Products */;
-			projectDirPath = "";
 			packageReferences = (
 				AFA0D0022F58000100A1B2C3 /* XCRemoteSwiftPackageReference "swift-markdown" */,
 			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = AFB267A52F57463200C3C72A /* Products */;
+			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				AFB267A32F57463200C3C72A /* SheafClient */,

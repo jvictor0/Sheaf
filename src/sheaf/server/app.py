@@ -6,6 +6,8 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+import os
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +37,10 @@ app.add_middleware(
 
 class ChatMessageRequest(BaseModel):
     message: str
+
+
+class CreateChatRequest(BaseModel):
+    name: Optional[str] = None
 
 
 class ChatMessageResponse(BaseModel):
@@ -67,8 +73,19 @@ def health() -> dict[str, str]:
 
 
 @app.post("/chats")
-def create_chat_endpoint() -> dict[str, str]:
-    return {"chat_id": create_chat()}
+def create_chat_endpoint(payload: Optional[CreateChatRequest] = None) -> dict[str, str]:
+    requested_name = (payload.name if payload else None) or ""
+    requested_name = requested_name.strip()
+    if not requested_name:
+        return {"chat_id": create_chat()}
+
+    _validate_chat_id(requested_name)
+    try:
+        chat_id = create_chat(chat_id=requested_name, eager=True)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return {"chat_id": chat_id}
 
 
 @app.get("/chats")

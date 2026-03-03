@@ -60,7 +60,7 @@ final class MathJaxWorker: NSObject, WKNavigationDelegate {
         loadWorkerPageIfNeeded()
     }
 
-    func render(tex: String, block: Bool, appearance: MathAppearance) async -> MathAsset? {
+    func render(tex: String, block: Bool, appearance: MathAppearance) async  -> MathAsset? {
         loadWorkerPageIfNeeded()
         for _ in 0..<20 where !isLoaded {
             try? await Task.sleep(nanoseconds: 100_000_000)
