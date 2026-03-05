@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import SheafClient
 
 struct SheafClientTests {
@@ -171,5 +172,87 @@ struct SheafClientTests {
 
         #expect(start == 1)
         #expect(items.count == 3)
+    }
+
+    @Test func insertTextAtSelectionInEmptyDraft() {
+        var text = ""
+        var selection = NSRange(location: 0, length: 0)
+
+        insertTextAtSelection("hello", text: &text, selection: &selection)
+
+        #expect(text == "hello")
+        #expect(selection.location == 5)
+        #expect(selection.length == 0)
+    }
+
+    @Test func insertTextAtSelectionInMiddle() {
+        var text = "Hello world"
+        var selection = NSRange(location: 6, length: 0)
+
+        insertTextAtSelection("dictated ", text: &text, selection: &selection)
+
+        #expect(text == "Hello dictated world")
+        #expect(selection.location == 15)
+        #expect(selection.length == 0)
+    }
+
+    @Test func insertTextAtSelectionReplacesSelection() {
+        var text = "Hello planet"
+        var selection = NSRange(location: 6, length: 6)
+
+        insertTextAtSelection("world", text: &text, selection: &selection)
+
+        #expect(text == "Hello world")
+        #expect(selection.location == 11)
+        #expect(selection.length == 0)
+    }
+
+    @Test func dictationInsertionUsesRevisedTextOnly() {
+        let response = DictateAudioResponse(
+            rawTranscript: "raw words",
+            revisedText: " polished words ",
+            editSummary: "",
+            uncertaintyFlags: [],
+            transcribeMS: 10,
+            refineMS: 15
+        )
+
+        #expect(dictationInsertionText(from: response) == "polished words")
+    }
+
+    @Test func dictationInsertionRejectsEmptyRevisedText() {
+        let response = DictateAudioResponse(
+            rawTranscript: "raw words",
+            revisedText: "   ",
+            editSummary: "",
+            uncertaintyFlags: [],
+            transcribeMS: 10,
+            refineMS: 15
+        )
+
+        #expect(dictationInsertionText(from: response) == nil)
+    }
+
+    @Test func dictationRequestConstructionUsesExpectedEndpointAndHeaders() throws {
+        let baseURL = try #require(URL(string: "http://192.168.1.56:8787"))
+        let endpoint = DictationAPIClient.endpoint(baseURL: baseURL)
+
+        #expect(endpoint.absoluteString == "http://192.168.1.56:8787/v1/dictate-audio")
+
+        let request = DictationAPIClient.buildRequest(
+            endpoint: endpoint,
+            sampleRate: 16_000,
+            locale: "en-US",
+            sessionID: "session-123",
+            requestID: "req-123"
+        )
+
+        #expect(request.httpMethod == "POST")
+        #expect(request.url?.absoluteString == "http://192.168.1.56:8787/v1/dictate-audio")
+        #expect(request.value(forHTTPHeaderField: "Content-Type") == "audio/wav")
+        #expect(request.value(forHTTPHeaderField: "X-Sample-Rate") == "16000")
+        #expect(request.value(forHTTPHeaderField: "X-Locale") == "en-US")
+        #expect(request.value(forHTTPHeaderField: "X-Session-Id") == "session-123")
+        #expect(request.value(forHTTPHeaderField: "X-Request-Id") == "req-123")
     }
 }

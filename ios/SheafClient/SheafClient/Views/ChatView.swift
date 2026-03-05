@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 struct ChatView: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -6,10 +7,17 @@ struct ChatView: View {
     @EnvironmentObject private var appState: AppState
     @StateObject private var viewModel: ChatViewModel
     @State private var draft = ""
+    @State private var composeSelection = NSRange(location: 0, length: 0)
+    @State private var isComposeFocused = false
     @State private var isRequestingOlder = false
     @State private var previousMessageCount = 0
     @State private var previousFirstMessageID: String?
     @State private var hasInitialBottomFocus = false
+    @State private var dictationState: DictationState = .idle
+    @State private var dictationErrorMessage: String?
+    @State private var dictationSessionID = UUID().uuidString
+
+    private let recorder = AudioSnippetRecorder()
 
     init(viewModel: ChatViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -81,19 +89,48 @@ struct ChatView: View {
             Divider()
 
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Message", text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...6)
-
-                Button("Send") {
-                    let sending = draft
-                    draft = ""
-                    Task {
-                        await viewModel.sendMessage(sending)
-                    }
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color.secondary.opacity(0.35))
+                    CursorTextView(
+                        text: $draft,
+                        selectedRange: $composeSelection,
+                        isFocused: $isComposeFocused,
+                        placeholder: "Message"
+                    )
+                    .frame(minHeight: 36, maxHeight: 140)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                VStack(spacing: 8) {
+                    Button {
+                        Task { await handleDictationTap() }
+                    } label: {
+                        Group {
+                            if dictationState == .uploading {
+                                ProgressView()
+                            } else if dictationState == .recording {
+                                Image(systemName: "stop.circle.fill")
+                            } else {
+                                Image(systemName: "mic")
+                            }
+                        }
+                        .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(dictationState == .recording ? .red : nil)
+                    .disabled(dictationState == .uploading)
+
+                    Button("Send") {
+                        let sending = draft
+                        draft = ""
+                        composeSelection = NSRange(location: 0, length: 0)
+                        Task {
+                            await viewModel.sendMessage(sending)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || dictationState == .uploading)
+                }
             }
             .padding()
         }
@@ -113,7 +150,7 @@ struct ChatView: View {
             appState.selectedChatID = viewModel.currentChatID
         }
         .overlay(alignment: .top) {
-            if let error = viewModel.errorMessage {
+            if let error = dictationErrorMessage ?? viewModel.errorMessage {
                 Text(error)
                     .font(.footnote)
                     .padding(8)
@@ -139,4 +176,105 @@ struct ChatView: View {
             isRequestingOlder = false
         }
     }
+
+    private func handleDictationTap() async {
+        switch dictationState {
+        case .idle:
+            await startDictation()
+        case .recording:
+            await finishDictationAndInsert()
+        case .uploading:
+            return
+        }
+    }
+
+    private func startDictation() async {
+        let granted = await requestMicrophonePermission()
+        guard granted else {
+            dictationErrorMessage = "Microphone access is required for dictation."
+            return
+        }
+
+        do {
+            try recorder.start()
+            dictationErrorMessage = nil
+            dictationState = .recording
+            isComposeFocused = true
+        } catch {
+            dictationErrorMessage = "Mic start failed: \(error.localizedDescription)"
+            dictationState = .idle
+        }
+    }
+
+    private func finishDictationAndInsert() async {
+        dictationState = .uploading
+        let wavData: Data
+        do {
+            wavData = try recorder.stopAndBuildWAV()
+        } catch {
+            dictationErrorMessage = "Mic stop failed: \(error.localizedDescription)"
+            dictationState = .idle
+            return
+        }
+
+        do {
+            let response = try await DictationAPIClient.shared.dictateAudio(
+                wavData: wavData,
+                sampleRate: 16_000,
+                locale: "en-US",
+                sessionID: dictationSessionID
+            )
+            guard let insertion = dictationInsertionText(from: response) else {
+                dictationErrorMessage = "Server returned empty revised text."
+                dictationState = .idle
+                return
+            }
+            insertTextAtSelection(insertion, text: &draft, selection: &composeSelection)
+            dictationErrorMessage = nil
+            dictationState = .idle
+            isComposeFocused = true
+        } catch {
+            dictationErrorMessage = dictationRequestErrorMessage(error)
+            dictationState = .idle
+        }
+    }
+
+    private func requestMicrophonePermission() async -> Bool {
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            return true
+        case .denied:
+            return false
+        case .undetermined:
+            return await withCheckedContinuation { continuation in
+                AVAudioApplication.requestRecordPermission { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        @unknown default:
+            return false
+        }
+    }
+
+    private func dictationRequestErrorMessage(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .notConnectedToInternet:
+                return "Cannot reach Dictator server. Check Local Network access and Wi-Fi."
+            case .cannotConnectToHost:
+                return "Cannot connect to Dictator server. Verify dictation_base_url host and port."
+            case .timedOut:
+                return "Dictation request timed out. Confirm Dictator server is running."
+            default:
+                return "Dictation request failed: \(urlError.localizedDescription)"
+            }
+        }
+        return error.localizedDescription
+    }
+}
+
+private enum DictationState {
+    case idle
+    case recording
+    case uploading
 }

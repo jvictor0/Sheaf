@@ -29,6 +29,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Sheaf connects to your local server on this Wi-Fi network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Sheaf records short audio clips to transcribe your dictated message.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
