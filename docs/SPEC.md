@@ -64,6 +64,9 @@ Current implementation:
 - Write or overwrite files inside `tome_dir/**` via `write_note` tool
 - List directories/files inside `tome_dir/**` via `list_notes` tool
 - Read files (full or line-range) inside `tome_dir/**` via `read_note` tool
+- List named SQLite databases in `<data_dir>/sqlite/` via `list_sqlite_databases`
+- Create named SQLite databases in `<data_dir>/sqlite/` via `create_sqlite_database`
+- Execute arbitrary SQL against named DB files in `<data_dir>/sqlite/` via `run_sql`
 
 Planned next actions:
 - Expand allowlist beyond `tome_dir`
@@ -79,6 +82,8 @@ Guardrails:
 - Per chat:
   - `data/chats/<chat_id>/chat.json`
   - `data/chats/<chat_id>/checkpoints/langgraph.sqlite`
+- Agent SQL database:
+  - Named files under `data/sqlite/` (or `<data_dir>/sqlite/` when `data_dir` is configured)
 
 ## 8. Interface
 

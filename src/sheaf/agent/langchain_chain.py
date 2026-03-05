@@ -47,7 +47,10 @@ def _to_langchain_messages(messages: Iterable[HasRoleContent]) -> list[object]:
 def _base_system_prompt() -> str:
     return (
         "You are sheaf, a pragmatic assistant. Use they/them self-reference when relevant. "
-        "When asked to persist notes or files, prefer using available tools."
+        "When asked to persist notes or files, prefer using available tools. "
+        "For persistent structured data, use list_sqlite_databases to discover DBs, "
+        "create_sqlite_database to create named DBs, and run_sql(database_name, sql) to query them "
+        "under the configured data/sqlite directory."
     )
 
 

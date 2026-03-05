@@ -223,6 +223,9 @@ Tool I/O output:
 - Agent can call `write_note` to write files under the configured `tome_dir`.
 - Agent can call `list_notes` to list directories/files under the configured `tome_dir`.
 - Agent can call `read_note` to read whole files or line ranges under the configured `tome_dir`.
+- Agent can call `list_sqlite_databases` to discover named DB files in `data/sqlite/`.
+- Agent can call `create_sqlite_database` to create a named DB under `data/sqlite/`.
+- Agent can call `run_sql` to execute SQL against a named DB under `data/sqlite/`.
 - Paths escaping `tome_dir` are rejected.
 
 Message indexing model:
@@ -289,3 +292,13 @@ Current tool support:
 - `read_note(relative_path, start_line=0, end_line=0)`
   - Reads UTF-8 file content under `tome_dir`.
   - Supports 1-based line range reads (`start_line` inclusive, `end_line` exclusive).
+- `create_sqlite_database(database_name)`
+  - Creates a named SQLite database in `<data_dir>/sqlite/`.
+  - Names are normalized to `<name>.sqlite3` when no extension is provided.
+- `list_sqlite_databases()`
+  - Lists available `.sqlite3` files under `<data_dir>/sqlite/`.
+  - Returns both normalized database names and filenames.
+- `run_sql(database_name, sql)`
+  - Executes SQL against `<data_dir>/sqlite/<database_name>.sqlite3` (or exact provided filename if it includes an extension).
+  - Supports DDL/DML/SELECT and multi-statement scripts.
+  - Uses `execute` for single statements and falls back to `executescript` for multi-statement SQL.
