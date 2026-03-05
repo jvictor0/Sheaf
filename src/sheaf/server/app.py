@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -59,6 +61,9 @@ class ChatMessageResponse(BaseModel):
 
 
 CHAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+IDEMPOTENCY_TTL_SECONDS = 30 * 60
+_idempotency_lock = threading.Lock()
+_idempotent_responses: dict[tuple[str, str], tuple[float, ChatMessageResponse]] = {}
 
 
 def _validate_chat_id(chat_id: str) -> None:
@@ -74,6 +79,15 @@ def _validate_chat_id(chat_id: str) -> None:
         return
 
     raise HTTPException(status_code=400, detail=f"Invalid chat_id: {chat_id}")
+
+
+def _prune_idempotency_cache(now: float) -> None:
+    stale_keys = [
+        key for key, (timestamp, _) in _idempotent_responses.items()
+        if now - timestamp > IDEMPOTENCY_TTL_SECONDS
+    ]
+    for key in stale_keys:
+        _idempotent_responses.pop(key, None)
 
 
 @app.get("/health")
@@ -137,19 +151,36 @@ def reboot_services_endpoint() -> dict[str, str]:
 
 
 @app.post("/chats/{chat_id}/messages", response_model=ChatMessageResponse)
-def chat(chat_id: str, payload: ChatMessageRequest) -> ChatMessageResponse:
+def chat(chat_id: str, payload: ChatMessageRequest, request: Request) -> ChatMessageResponse:
     _validate_chat_id(chat_id)
+    idempotency_key = request.headers.get("x-idempotency-key")
+    cache_key = (chat_id, idempotency_key) if idempotency_key else None
+    now = time.time()
+
+    if cache_key:
+        with _idempotency_lock:
+            _prune_idempotency_cache(now)
+            cached = _idempotent_responses.get(cache_key)
+            if cached is not None:
+                return cached[1]
+
     try:
         assistant_text, checkpoint_id, tool_calls = run_chat_turn(chat_id, payload.message)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return ChatMessageResponse(
+    response = ChatMessageResponse(
         chat_id=chat_id,
         response=assistant_text,
         checkpoint_id=checkpoint_id,
         tool_calls=tool_calls,
     )
+    if cache_key:
+        with _idempotency_lock:
+            _prune_idempotency_cache(now)
+            _idempotent_responses[cache_key] = (now, response)
+
+    return response
 
 
 def main() -> None:
