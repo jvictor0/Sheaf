@@ -58,7 +58,7 @@ struct MessageRow: View {
             ForEach(Array(message.segments.enumerated()), id: \.offset) { _, segment in
                 switch segment {
                 case .markdownText(let text):
-                    MarkdownText(text: text)
+                    MarkdownBlocksView(text: text)
                 case .codeBlock(let language, let text):
                     CodeBlock(language: language, code: text)
                 case .inlineMath(let tex, _):
@@ -76,23 +76,6 @@ struct MessageRow: View {
         .background(message.role == .user ? Color.blue.opacity(0.12) : Color.gray.opacity(0.14))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .frame(maxWidth: 680, alignment: .leading)
-    }
-}
-
-private struct MarkdownText: View {
-    let text: String
-
-    var body: some View {
-        if let attr = try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
-            Text(attr)
-                .textSelection(.enabled)
-        } else {
-            Text(text)
-                .textSelection(.enabled)
-        }
     }
 }
 

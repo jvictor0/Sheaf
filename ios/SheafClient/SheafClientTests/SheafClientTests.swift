@@ -58,4 +58,59 @@ struct SheafClientTests {
         #expect(blockMath.first == "x^2 + 1 = 0")
     }
 
+    @Test func markdownBlockParserParsesHeadingsAndParagraphs() {
+        let text = """
+        # Title
+
+        ## Section
+        A paragraph with **bold** text.
+        """
+
+        let blocks = MarkdownBlockParser().parse(text)
+
+        #expect(blocks.count == 3)
+        #expect(blocks[0] == .heading(level: 1, text: "Title"))
+        #expect(blocks[1] == .heading(level: 2, text: "Section"))
+        #expect(blocks[2] == .paragraph("A paragraph with **bold** text."))
+    }
+
+    @Test func markdownBlockParserParsesTables() {
+        let text = """
+        | Name | Value |
+        | --- | ---: |
+        | a | 1 |
+        | b | 2 |
+        """
+
+        let blocks = MarkdownBlockParser().parse(text)
+        #expect(blocks.count == 1)
+        #expect(
+            blocks[0] == .table(
+                headers: ["Name", "Value"],
+                rows: [
+                    ["a", "1"],
+                    ["b", "2"],
+                ]
+            )
+        )
+    }
+
+    @Test func markdownBlockParserParsesListsAndQuotes() {
+        let text = """
+        - first
+        - second
+
+        > quoted line
+        > second line
+
+        1. one
+        2. two
+        """
+
+        let blocks = MarkdownBlockParser().parse(text)
+        #expect(blocks.count == 3)
+        #expect(blocks[0] == .unorderedList(["first", "second"]))
+        #expect(blocks[1] == .quote("quoted line\nsecond line"))
+        #expect(blocks[2] == .orderedList(["one", "two"]))
+    }
 }
