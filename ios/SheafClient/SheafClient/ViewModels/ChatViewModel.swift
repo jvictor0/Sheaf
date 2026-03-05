@@ -2,6 +2,7 @@ import Foundation
 
 @MainActor
 final class ChatViewModel: ObservableObject {
+    private static let currentRenderVersion = 3
     @Published private(set) var messages: [RenderedMessage] = []
     @Published private(set) var metadata: ChatMetadata?
     @Published private(set) var isLoading = false
@@ -42,7 +43,8 @@ final class ChatViewModel: ObservableObject {
         if hasLoadedInitial {
             return
         }
-        if let cached = sessionStore.session(for: chatID) {
+        if let cached = sessionStore.session(for: chatID),
+           cached.messages.allSatisfy({ $0.renderVersion == Self.currentRenderVersion }) {
             messages = cached.messages
             metadata = cached.metadata
             oldestLoadedIndex = cached.oldestLoadedIndex
@@ -144,15 +146,12 @@ final class ChatViewModel: ObservableObject {
         let snapshot = Array(messages.suffix(20))
         Task(priority: .utility) {
             for message in snapshot {
-                for segment in message.segments {
-                    switch segment {
-                    case .inlineMath(let tex, _):
-                        _ = await MathJaxRenderService.shared.render(tex: tex, block: false, appearance: appearance)
-                    case .blockMath(let tex, _):
-                        _ = await MathJaxRenderService.shared.render(tex: tex, block: true, appearance: appearance)
-                    default:
-                        continue
-                    }
+                for math in collectMathSegments(in: message.document.blocks) {
+                    _ = await MathJaxRenderService.shared.render(
+                        tex: math.tex,
+                        block: math.block,
+                        appearance: appearance
+                    )
                 }
             }
         }
@@ -188,9 +187,54 @@ final class ChatViewModel: ObservableObject {
         return RenderedMessage(
             id: "tool-\(parentMessageID)-\(sequence)-\(call.id)",
             role: .toolEvent,
-            segments: [.markdownText(summary)],
-            renderVersion: 1
+            document: RenderDocument(blocks: [.paragraph([.text(summary)])]),
+            renderVersion: 3
         )
+    }
+
+    private func collectMathSegments(in blocks: [RenderBlock]) -> [(tex: String, block: Bool)] {
+        var output: [(tex: String, block: Bool)] = []
+
+        for block in blocks {
+            switch block {
+            case .heading(_, let content), .paragraph(let content):
+                output.append(contentsOf: collectInlineMath(in: content))
+            case .unorderedList(let items):
+                for item in items {
+                    output.append(contentsOf: collectInlineMath(in: item))
+                }
+            case .orderedList(_, let items):
+                for item in items {
+                    output.append(contentsOf: collectInlineMath(in: item))
+                }
+            case .table(let headers, let rows):
+                for cell in headers {
+                    output.append(contentsOf: collectInlineMath(in: cell))
+                }
+                for row in rows {
+                    for cell in row {
+                        output.append(contentsOf: collectInlineMath(in: cell))
+                    }
+                }
+            case .quote(let nested):
+                output.append(contentsOf: collectMathSegments(in: nested))
+            case .mathBlock(let tex, _):
+                output.append((tex: tex, block: true))
+            case .codeBlock, .thematicBreak:
+                continue
+            }
+        }
+
+        return output
+    }
+
+    private func collectInlineMath(in nodes: [InlineNode]) -> [(tex: String, block: Bool)] {
+        nodes.compactMap { node in
+            if case .mathInline(let tex, _) = node {
+                return (tex: tex, block: false)
+            }
+            return nil
+        }
     }
 
     private func toolSummary(_ call: ToolCallPayload) -> String {

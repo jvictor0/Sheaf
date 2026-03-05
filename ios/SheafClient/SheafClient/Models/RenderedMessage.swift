@@ -3,7 +3,7 @@ import Foundation
 struct RenderedMessage: Identifiable, Hashable {
     let id: String
     let role: MessageRole
-    let segments: [MessageSegment]
+    let document: RenderDocument
     let renderVersion: Int
 }
 
@@ -27,9 +27,28 @@ enum MessageRole: String, Hashable {
     }
 }
 
-enum MessageSegment: Hashable {
-    case markdownText(String)
+struct RenderDocument: Hashable {
+    let blocks: [RenderBlock]
+}
+
+enum RenderBlock: Hashable {
+    case heading(level: Int, content: [InlineNode])
+    case paragraph([InlineNode])
+    case unorderedList([[InlineNode]])
+    case orderedList(start: Int, items: [[InlineNode]])
+    case table(headers: [[InlineNode]], rows: [[[InlineNode]]])
+    case quote([RenderBlock])
     case codeBlock(language: String?, text: String)
-    case inlineMath(tex: String, key: String)
-    case blockMath(tex: String, key: String)
+    case mathBlock(tex: String, key: String)
+    case thematicBreak
+}
+
+enum InlineNode: Hashable {
+    case text(String)
+    case emphasis(String)
+    case strong(String)
+    case inlineCode(String)
+    case link(text: String, destination: String)
+    case lineBreak
+    case mathInline(tex: String, key: String)
 }
