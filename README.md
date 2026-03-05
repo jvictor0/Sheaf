@@ -19,10 +19,12 @@
 - `GET /chats` lists chats from disk
 - `GET /chats/{chat_id}/metadata` returns per-chat metadata and message count
 - `GET /chats/{chat_id}/messages?start=<int>&end=<int>` returns a message slice (start inclusive, end exclusive)
+  - each assistant message includes `tool_calls` (possibly empty)
 - `POST /chats/{chat_id}/messages` appends user message, calls LLM, stores a new checkpoint, and returns:
   - `chat_id`
   - `response`
   - `checkpoint_id`
+  - `tool_calls` (list of executed tool calls: `id`, `name`, `args`, `result`, `is_error`)
 - `POST /admin/reboot` requests a supervisor reboot of both API + Chainlit (dev use)
 
 ## Secrets (required)

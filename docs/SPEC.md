@@ -18,7 +18,7 @@ The server exposes these APIs:
 2. `POST /chats/{chat_id}/messages`
 - Purpose: continue an existing conversation by sending the next message
 - Input: user message payload
-- Result: returns assistant response and metadata (`chat_id`, `checkpoint_id`)
+- Result: returns assistant response and metadata (`chat_id`, `checkpoint_id`, `tool_calls`)
 
 3. `GET /chats`
 - Purpose: list existing chats
@@ -30,7 +30,7 @@ The server exposes these APIs:
 
 5. `GET /chats/{chat_id}/messages?start=<int>&end=<int>`
 - Purpose: fetch a bounded message slice
-- Result: ordered message list with zero-based indices (`start` inclusive, `end` exclusive)
+- Result: ordered message list with zero-based indices (`start` inclusive, `end` exclusive), including per-assistant `tool_calls`
 
 ## 3. Conversation and context model
 

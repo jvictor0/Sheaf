@@ -131,8 +131,25 @@ def compile_chat_graph(*, saver: SqliteSaver):
                 Message(role="system", content=f"Rolling conversation summary:\n{rolling_summary}"),
                 *history,
             ]
-        text = dispatcher.generate(history)
-        return {"messages": [AIMessage(content=text)]}
+        generation = dispatcher.generate_with_details(history)
+        tool_calls = [
+            {
+                "id": call.id,
+                "name": call.name,
+                "args": call.args,
+                "result": call.result,
+                "is_error": call.is_error,
+            }
+            for call in generation.tool_calls
+        ]
+        return {
+            "messages": [
+                AIMessage(
+                    content=generation.response,
+                    additional_kwargs={"tool_calls_made": tool_calls},
+                )
+            ]
+        }
 
     builder = StateGraph(ChatState)
     builder.add_node("maybe_compact", maybe_compact)

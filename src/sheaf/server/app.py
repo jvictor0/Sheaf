@@ -43,10 +43,19 @@ class CreateChatRequest(BaseModel):
     name: Optional[str] = None
 
 
+class ToolCallResponse(BaseModel):
+    id: str
+    name: str
+    args: dict[str, object]
+    result: str
+    is_error: bool
+
+
 class ChatMessageResponse(BaseModel):
     chat_id: str
     response: str
     checkpoint_id: str
+    tool_calls: list[ToolCallResponse]
 
 
 CHAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -131,11 +140,16 @@ def reboot_services_endpoint() -> dict[str, str]:
 def chat(chat_id: str, payload: ChatMessageRequest) -> ChatMessageResponse:
     _validate_chat_id(chat_id)
     try:
-        assistant_text, checkpoint_id = run_chat_turn(chat_id, payload.message)
+        assistant_text, checkpoint_id, tool_calls = run_chat_turn(chat_id, payload.message)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return ChatMessageResponse(chat_id=chat_id, response=assistant_text, checkpoint_id=checkpoint_id)
+    return ChatMessageResponse(
+        chat_id=chat_id,
+        response=assistant_text,
+        checkpoint_id=checkpoint_id,
+        tool_calls=tool_calls,
+    )
 
 
 def main() -> None:

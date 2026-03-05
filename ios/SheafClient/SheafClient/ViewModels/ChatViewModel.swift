@@ -61,7 +61,7 @@ final class ChatViewModel: ObservableObject {
             newestLoadedExclusiveIndex = metadata.messageCount
             let start = max(0, newestLoadedExclusiveIndex - recentWindowSize)
             let raw = try await api.getMessages(chatID: chatID, start: start, end: newestLoadedExclusiveIndex)
-            messages = raw.map(segmenter.segmented)
+            messages = renderTimeline(raw)
             oldestLoadedIndex = start
             hasMoreOlder = start > 0
             hasLoadedInitial = true
@@ -94,7 +94,7 @@ final class ChatViewModel: ObservableObject {
 
         do {
             let raw = try await api.getMessages(chatID: chatID, start: start, end: end)
-            let prepended = raw.map(segmenter.segmented)
+            let prepended = renderTimeline(raw)
             guard !prepended.isEmpty else {
                 oldestLoadedIndex = start
                 hasMoreOlder = start > 0
@@ -125,8 +125,13 @@ final class ChatViewModel: ObservableObject {
 
         do {
             let response = try await api.sendMessage(chatID: chatID, text: trimmed)
-            let assistantRaw = ChatMessage(index: nil, role: "assistant", content: response.response)
-            messages.append(segmenter.segmented(message: assistantRaw))
+            let assistantRaw = ChatMessage(
+                index: nil,
+                role: "assistant",
+                content: response.response,
+                toolCalls: response.toolCalls
+            )
+            messages.append(contentsOf: renderTimeline([assistantRaw]))
             newestLoadedExclusiveIndex += 1
             persistSession()
             errorMessage = nil
@@ -162,5 +167,60 @@ final class ChatViewModel: ObservableObject {
             hasMoreOlder: hasMoreOlder
         )
         sessionStore.save(session, for: chatID)
+    }
+
+    private func renderTimeline(_ raw: [ChatMessage]) -> [RenderedMessage] {
+        var rendered: [RenderedMessage] = []
+        rendered.reserveCapacity(raw.count * 2)
+        for message in raw {
+            if MessageRole(rawRole: message.role) == .assistant {
+                for (sequence, call) in message.toolCalls.enumerated() {
+                    rendered.append(renderToolEvent(call, parentMessageID: message.id, sequence: sequence))
+                }
+            }
+            rendered.append(segmenter.segmented(message: message))
+        }
+        return rendered
+    }
+
+    private func renderToolEvent(_ call: ToolCallPayload, parentMessageID: String, sequence: Int) -> RenderedMessage {
+        let summary = toolSummary(call)
+        return RenderedMessage(
+            id: "tool-\(parentMessageID)-\(sequence)-\(call.id)",
+            role: .toolEvent,
+            segments: [.markdownText(summary)],
+            renderVersion: 1
+        )
+    }
+
+    private func toolSummary(_ call: ToolCallPayload) -> String {
+        let args = call.args
+        let path = args["relative_path"]?.stringValue
+        let directory = args["relative_dir"]?.stringValue
+
+        let prefix = call.isError ? "Tool call failed" : "Sheaf"
+
+        switch call.name {
+        case "list_notes":
+            if let directory, !directory.isEmpty {
+                return "\(prefix) listed this directory: \(directory)"
+            }
+            return "\(prefix) listed a directory"
+        case "read_note":
+            if let path, !path.isEmpty {
+                return "\(prefix) read this file: \(path)"
+            }
+            return "\(prefix) read a file"
+        case "write_note":
+            if let path, !path.isEmpty {
+                return "\(prefix) wrote this file: \(path)"
+            }
+            return "\(prefix) wrote a file"
+        default:
+            let details = args.isEmpty
+                ? ""
+                : " (\(args.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value.stringValue)" }.joined(separator: ", ")))"
+            return "\(prefix) called \(call.name)\(details)"
+        }
     }
 }

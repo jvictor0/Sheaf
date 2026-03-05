@@ -11,6 +11,7 @@ enum MessageRole: String, Hashable {
     case user
     case assistant
     case system
+    case toolEvent
 
     init(rawRole: String) {
         switch rawRole.lowercased() {
@@ -18,6 +19,8 @@ enum MessageRole: String, Hashable {
             self = .user
         case "assistant":
             self = .assistant
+        case "tool_event":
+            self = .toolEvent
         default:
             self = .system
         }

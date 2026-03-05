@@ -4,6 +4,14 @@ struct MessageRow: View {
     let message: RenderedMessage
 
     var body: some View {
+        if message.role == .toolEvent {
+            toolEventRow
+        } else {
+            bubbleRow
+        }
+    }
+
+    private var bubbleRow: some View {
         HStack {
             if message.role == .assistant || message.role == .system {
                 bubble
@@ -13,6 +21,36 @@ struct MessageRow: View {
                 bubble
             }
         }
+    }
+
+    private var toolEventRow: some View {
+        HStack {
+            Spacer()
+            eventNote
+            Spacer()
+        }
+    }
+
+    private var eventNote: some View {
+        let text = message.segments.compactMap { segment -> String? in
+            if case .markdownText(let value) = segment {
+                return value
+            }
+            return nil
+        }.joined(separator: "\n")
+
+        return HStack(spacing: 6) {
+            Image(systemName: "hammer")
+                .font(.caption)
+            Text(text)
+                .font(.caption)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.gray.opacity(0.12))
+        .clipShape(Capsule())
+        .frame(maxWidth: 680, alignment: .center)
     }
 
     private var bubble: some View {

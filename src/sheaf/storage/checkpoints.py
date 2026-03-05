@@ -126,11 +126,33 @@ def _load_indexed_messages(chat_id: str) -> tuple[list[dict[str, object]], str]:
                 mapped = "assistant"
             else:
                 mapped = "system"
+
+            tool_calls: list[dict[str, object]] = []
+            if mapped == "assistant":
+                raw_kwargs = getattr(msg, "additional_kwargs", {})
+                if isinstance(raw_kwargs, dict):
+                    raw_calls = raw_kwargs.get("tool_calls_made", [])
+                    if isinstance(raw_calls, list):
+                        for item in raw_calls:
+                            if not isinstance(item, dict):
+                                continue
+                            args = item.get("args", {})
+                            tool_calls.append(
+                                {
+                                    "id": str(item.get("id", "")),
+                                    "name": str(item.get("name", "")),
+                                    "args": args if isinstance(args, dict) else {},
+                                    "result": str(item.get("result", "")),
+                                    "is_error": bool(item.get("is_error", False)),
+                                }
+                            )
+
             out.append(
                 {
                     "index": idx,
                     "role": mapped,
                     "content": _message_content_to_text(getattr(msg, "content", "")),
+                    "tool_calls": tool_calls,
                 }
             )
 
@@ -170,7 +192,7 @@ def get_message_range(chat_id: str, start: int, end: int) -> dict[str, object]:
     }
 
 
-def run_chat_turn(chat_id: str, user_message: str) -> tuple[str, str]:
+def run_chat_turn(chat_id: str, user_message: str) -> tuple[str, str, list[dict[str, object]]]:
     _ensure_chat_initialized(chat_id)
 
     db = _db_path(chat_id)
@@ -184,10 +206,28 @@ def run_chat_turn(chat_id: str, user_message: str) -> tuple[str, str]:
 
     messages = out.get("messages", []) if isinstance(out, dict) else []
     assistant_text = ""
+    tool_calls: list[dict[str, object]] = []
     if isinstance(messages, list):
         for msg in reversed(messages):
             if getattr(msg, "type", "") == "ai":
                 assistant_text = _message_content_to_text(getattr(msg, "content", ""))
+                raw_kwargs = getattr(msg, "additional_kwargs", {})
+                if isinstance(raw_kwargs, dict):
+                    raw_calls = raw_kwargs.get("tool_calls_made", [])
+                    if isinstance(raw_calls, list):
+                        for item in raw_calls:
+                            if isinstance(item, dict):
+                                tool_calls.append(
+                                    {
+                                        "id": str(item.get("id", "")),
+                                        "name": str(item.get("name", "")),
+                                        "args": item.get("args", {})
+                                        if isinstance(item.get("args", {}), dict)
+                                        else {},
+                                        "result": str(item.get("result", "")),
+                                        "is_error": bool(item.get("is_error", False)),
+                                    }
+                                )
                 break
 
     if not assistant_text:
@@ -204,4 +244,4 @@ def run_chat_turn(chat_id: str, user_message: str) -> tuple[str, str]:
     raw["updated_at"] = _utc_now()
     meta_file.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
-    return assistant_text, checkpoint_id
+    return assistant_text, checkpoint_id, tool_calls

@@ -6,7 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from sheaf.agent.langchain_chain import invoke_chat_chain
 from sheaf.config.settings import (
@@ -23,12 +23,33 @@ class Message:
     content: str
 
 
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    args: dict[str, Any]
+    result: str
+    is_error: bool
+
+
+@dataclass
+class GenerationResult:
+    response: str
+    tool_calls: list[ToolCall]
+
+
 class LLMDispatcher(ABC):
     """Abstract interface for model dispatch."""
 
     @abstractmethod
     def generate(self, messages: Iterable[Message], *, enable_tools: bool = True) -> str:
         """Generate assistant text from a message sequence."""
+
+    @abstractmethod
+    def generate_with_details(
+        self, messages: Iterable[Message], *, enable_tools: bool = True
+    ) -> GenerationResult:
+        """Generate assistant text plus tool-call metadata."""
 
     @property
     @abstractmethod
@@ -45,11 +66,30 @@ class LangChainOpenAIDispatcher(LLMDispatcher):
         self._model_properties = resolve_model_properties(provider="openai", model=model)
 
     def generate(self, messages: Iterable[Message], *, enable_tools: bool = True) -> str:
-        return invoke_chat_chain(
+        result = self.generate_with_details(messages, enable_tools=enable_tools)
+        return result.response
+
+    def generate_with_details(
+        self, messages: Iterable[Message], *, enable_tools: bool = True
+    ) -> GenerationResult:
+        chain_result = invoke_chat_chain(
             api_key=self._api_key,
             model=self._model,
             messages=messages,
             enable_tools=enable_tools,
+        )
+        return GenerationResult(
+            response=chain_result.response,
+            tool_calls=[
+                ToolCall(
+                    id=item.id,
+                    name=item.name,
+                    args=item.args,
+                    result=item.result,
+                    is_error=item.is_error,
+                )
+                for item in chain_result.tool_calls
+            ],
         )
 
     @property
