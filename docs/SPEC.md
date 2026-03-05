@@ -51,7 +51,8 @@ The server exposes these APIs:
 
 ## 5. Secrets and provider configuration
 
-- Secrets are read from `.secrets.json` (gitignored) or environment variables.
+- Configuration is read from `sheaf_server.config` only.
+- Secrets are read from the configured `secrets_file` path (default `.secrets.json`, gitignored).
 - `.secrets.example.json` documents multi-provider shape.
 - `.secrets.json` must never be committed.
 
@@ -60,12 +61,12 @@ The server exposes these APIs:
 The agent will have constrained access to an allowlisted set of directories.
 
 Current implementation:
-- Write or overwrite files inside `data/notes/**` via `write_note` tool
-- List directories/files inside `data/notes/**` via `list_notes` tool
-- Read files (full or line-range) inside `data/notes/**` via `read_note` tool
+- Write or overwrite files inside `tome_dir/**` via `write_note` tool
+- List directories/files inside `tome_dir/**` via `list_notes` tool
+- Read files (full or line-range) inside `tome_dir/**` via `read_note` tool
 
 Planned next actions:
-- Expand allowlist beyond `data/notes`
+- Expand allowlist beyond `tome_dir`
 
 Guardrails:
 - Deny access outside allowlist

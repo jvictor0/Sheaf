@@ -11,7 +11,7 @@
 - LLM path now defaults to a LangChain chat chain (OpenAI model backend)
 - Runtime conversation state/checkpoints are now managed by LangGraph (SQLite checkpointer)
 - Runtime pre-assistant compaction uses model-specific limits (`ModelProperties`)
-- Tool calling is enabled for controlled note writes under `data/notes`
+- Tool calling is enabled for controlled note writes under the configured tome directory
 
 ## API
 
@@ -38,14 +38,14 @@ Then set your OpenAI key in `.secrets.json`:
 ```json
 {
   "openai": {
-    "api_key": "YOUR_OPENAI_API_KEY"
+    "api_key": "YOUR_KEY_HERE"
   }
 }
 ```
 
 Notes:
 - `.secrets.json` is gitignored and must never be committed.
-- Environment variable `OPENAI_API_KEY` takes precedence over file secrets.
+- API keys are loaded from the `secrets_file` configured in `sheaf_server.config`.
 
 ## Setup
 
@@ -77,6 +77,13 @@ LangGraph dependencies:
 - `server.host`
 - `server.api_port`
 - `server.chainlit_port`
+It also supports:
+- `data_dir` (default: `data`)
+- `secrets_file` (default: `.secrets.json`)
+- `tome_dir` (default: `data/notes`; supports `~` expansion, e.g. `"~/AgentData/Sheaf"`)
+- `llm.provider` (currently `openai`)
+- `llm.openai_model` (default: `gpt-4.1-mini`)
+- `llm.model_limits` and `llm.compaction` tuning blocks
 
 Example:
 
@@ -211,10 +218,10 @@ Checkpoint content:
 - State includes message history plus rolling compaction fields (for example `rolling_summary`).
 
 Tool I/O output:
-- Agent can call `write_note` to write files under `data/notes/<subdirs...>`.
-- Agent can call `list_notes` to list directories/files under `data/notes`.
-- Agent can call `read_note` to read whole files or line ranges under `data/notes`.
-- Paths escaping `data/notes` are rejected.
+- Agent can call `write_note` to write files under the configured `tome_dir`.
+- Agent can call `list_notes` to list directories/files under the configured `tome_dir`.
+- Agent can call `read_note` to read whole files or line ranges under the configured `tome_dir`.
+- Paths escaping `tome_dir` are rejected.
 
 Message indexing model:
 - Messages are read from LangGraph state and exposed with a zero-based `index`.
@@ -259,24 +266,24 @@ Note:
 
 Model limits are resolved from `src/sheaf/llm/model_properties.py` and exposed by the dispatcher.
 
-Useful env overrides:
-- `SHEAF_MODEL_CONTEXT_WINDOW_TOKENS`
-- `SHEAF_MODEL_MAX_OUTPUT_TOKENS`
-- `SHEAF_MODEL_RESERVED_OUTPUT_TOKENS`
-- `SHEAF_MODEL_SAFETY_MARGIN_TOKENS`
-- `SHEAF_COMPACTION_TRIGGER_RATIO`
-- `SHEAF_COMPACTION_TARGET_RATIO`
-- `SHEAF_COMPACTION_RECENT_MESSAGES`
+Configuration-file tuning:
+- `llm.model_limits.context_window_tokens`
+- `llm.model_limits.max_output_tokens`
+- `llm.model_limits.reserved_output_tokens`
+- `llm.model_limits.safety_margin_tokens`
+- `llm.compaction.trigger_ratio`
+- `llm.compaction.target_ratio`
+- `llm.compaction.recent_messages_to_keep`
 
 ## Tools
 
 Current tool support:
 - `write_note(relative_path, content, overwrite=True)`
-  - Writes UTF-8 text under `data/notes`.
+  - Writes UTF-8 text under the configured `tome_dir`.
   - Creates parent directories as needed.
-  - Rejects paths outside `data/notes`.
+  - Rejects paths outside `tome_dir`.
 - `list_notes(relative_dir=".", recursive=False)`
-  - Lists entries under `data/notes` (optionally recursive).
+  - Lists entries under `tome_dir` (optionally recursive).
 - `read_note(relative_path, start_line=0, end_line=0)`
-  - Reads UTF-8 file content under `data/notes`.
+  - Reads UTF-8 file content under `tome_dir`.
   - Supports 1-based line range reads (`start_line` inclusive, `end_line` exclusive).

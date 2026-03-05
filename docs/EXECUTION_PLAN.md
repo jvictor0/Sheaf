@@ -55,7 +55,7 @@ Scope:
 Current status:
 - Initial write tool enabled:
   - `write_note(relative_path, content, overwrite=True)`
-  - allowlist rooted at `data/notes/**`
+  - allowlist rooted at `tome_dir/**`
 
 Acceptance criteria:
 - Writes succeed only within allowed directories.
@@ -70,7 +70,7 @@ Scope:
 - Integrate read outputs into chat responses.
 
 Current status:
-- Initial read/list tool support enabled under `data/notes/**`:
+- Initial read/list tool support enabled under `tome_dir/**`:
   - `read_note(relative_path, start_line=0, end_line=0)`
   - `list_notes(relative_dir='.', recursive=False)`
 

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+
+from sheaf.config.settings import configured_model_tuning
 
 
 @dataclass(frozen=True)
@@ -37,24 +38,18 @@ _FALLBACK_LIMITS = ModelLimits(
 )
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
+def _cfg_int(raw: object, default: int) -> int:
     try:
         parsed = int(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
+def _cfg_ratio(raw: object, default: float) -> float:
     try:
         parsed = float(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return default
     return parsed if 0.05 <= parsed <= 0.95 else default
 
@@ -63,21 +58,41 @@ def resolve_model_properties(*, provider: str, model: str) -> ModelProperties:
     p = provider.strip().lower()
     m = model.strip()
     limits = _KNOWN_LIMITS.get((p, m), _FALLBACK_LIMITS)
+    limits_cfg, compaction_cfg = configured_model_tuning()
 
-    trigger_ratio = _env_float("SHEAF_COMPACTION_TRIGGER_RATIO", limits.compaction_trigger_ratio)
-    target_ratio = _env_float("SHEAF_COMPACTION_TARGET_RATIO", limits.compaction_target_ratio)
+    trigger_ratio = _cfg_ratio(
+        compaction_cfg.get("trigger_ratio"),
+        limits.compaction_trigger_ratio,
+    )
+    target_ratio = _cfg_ratio(
+        compaction_cfg.get("target_ratio"),
+        limits.compaction_target_ratio,
+    )
     if target_ratio >= trigger_ratio:
         target_ratio = max(0.05, trigger_ratio - 0.1)
 
     resolved = ModelLimits(
-        context_window_tokens=_env_int("SHEAF_MODEL_CONTEXT_WINDOW_TOKENS", limits.context_window_tokens),
-        max_output_tokens=_env_int("SHEAF_MODEL_MAX_OUTPUT_TOKENS", limits.max_output_tokens),
-        reserved_output_tokens=_env_int(
-            "SHEAF_MODEL_RESERVED_OUTPUT_TOKENS", limits.reserved_output_tokens
+        context_window_tokens=_cfg_int(
+            limits_cfg.get("context_window_tokens"),
+            limits.context_window_tokens,
         ),
-        safety_margin_tokens=_env_int("SHEAF_MODEL_SAFETY_MARGIN_TOKENS", limits.safety_margin_tokens),
+        max_output_tokens=_cfg_int(
+            limits_cfg.get("max_output_tokens"),
+            limits.max_output_tokens,
+        ),
+        reserved_output_tokens=_cfg_int(
+            limits_cfg.get("reserved_output_tokens"),
+            limits.reserved_output_tokens,
+        ),
+        safety_margin_tokens=_cfg_int(
+            limits_cfg.get("safety_margin_tokens"),
+            limits.safety_margin_tokens,
+        ),
         compaction_trigger_ratio=trigger_ratio,
         compaction_target_ratio=target_ratio,
-        recent_messages_to_keep=_env_int("SHEAF_COMPACTION_RECENT_MESSAGES", limits.recent_messages_to_keep),
+        recent_messages_to_keep=_cfg_int(
+            compaction_cfg.get("recent_messages_to_keep"),
+            limits.recent_messages_to_keep,
+        ),
     )
     return ModelProperties(provider=p, model=m, limits=resolved)

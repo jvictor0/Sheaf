@@ -1,4 +1,4 @@
-"""Tools for listing directories and reading files under data/notes."""
+"""Tools for listing directories and reading files under the configured tome directory."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from sheaf.config.settings import NOTES_DIR
+from sheaf.config.settings import TOME_DIR
 from sheaf.tools.file_write import resolve_note_path
 
 
 def _resolve_dir(relative_dir: str) -> Path:
     path_text = relative_dir.strip()
-    root = NOTES_DIR.resolve()
+    root = TOME_DIR.resolve()
     candidate = root if not path_text else resolve_note_path(path_text)
     if not candidate.exists():
         raise ValueError(f"Path does not exist: {candidate}")
@@ -23,27 +23,35 @@ def _resolve_dir(relative_dir: str) -> Path:
 
 @tool("list_notes")
 def list_notes_tool(relative_dir: str = ".", recursive: bool = False) -> str:
-    """List entries under data/notes.
+    """List entries under the configured tome directory.
 
     Set recursive=true to include files recursively from the selected subdirectory.
     """
 
     target = _resolve_dir("" if relative_dir == "." else relative_dir)
-    root = NOTES_DIR.resolve()
+
+    def _display(path: Path) -> str:
+        resolved = path.resolve()
+        home = Path.home().resolve()
+        try:
+            rel_home = resolved.relative_to(home)
+        except ValueError:
+            return str(resolved)
+        return f"~/{rel_home.as_posix()}"
 
     if recursive:
-        entries = sorted(p.relative_to(root).as_posix() for p in target.rglob("*"))
+        entries = sorted(_display(p) for p in target.rglob("*"))
     else:
-        entries = sorted(p.relative_to(root).as_posix() for p in target.iterdir())
+        entries = sorted(_display(p) for p in target.iterdir())
 
     if not entries:
-        return f"No entries under {target.relative_to(root).as_posix() or '.'}"
-    return "\n".join(entries)
+        return f"No entries under {_display(target)}"
+    return "\n".join([f"Directory: {_display(target)}", *entries])
 
 
 @tool("read_note")
 def read_note_tool(relative_path: str, start_line: int = 0, end_line: int = 0) -> str:
-    """Read a UTF-8 note file under data/notes, optionally by line range.
+    """Read a UTF-8 file under the configured tome directory, optionally by line range.
 
     Line range semantics:
     - If start_line <= 0 and end_line <= 0: return whole file.
@@ -67,4 +75,3 @@ def read_note_tool(relative_path: str, start_line: int = 0, end_line: int = 0) -
     if end_idx < start_idx:
         raise ValueError("end_line must be greater than or equal to start_line")
     return "\n".join(lines[start_idx:end_idx])
-

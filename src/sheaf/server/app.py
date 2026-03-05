@@ -6,7 +6,6 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-import os
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -20,6 +19,7 @@ from sheaf.storage.checkpoints import (
     list_chats,
     run_chat_turn,
 )
+from sheaf.config.settings import REBOOT_REQUEST_FILE
 
 app = FastAPI(title="sheaf", version="0.1.0")
 
@@ -117,11 +117,7 @@ def chat_messages_range_endpoint(chat_id: str, start: int = 0, end: int = 20) ->
 
 @app.post("/admin/reboot")
 def reboot_services_endpoint() -> dict[str, str]:
-    reboot_file = os.getenv("SHEAF_REBOOT_FILE", "").strip()
-    if not reboot_file:
-        raise HTTPException(status_code=503, detail="Reboot is unavailable: no supervisor configured.")
-
-    path = Path(reboot_file)
+    path = REBOOT_REQUEST_FILE
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")

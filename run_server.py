@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import signal
 import subprocess
@@ -20,6 +19,8 @@ DEFAULT_CHAINLIT_PORT = 2732
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from sheaf.config.settings import REBOOT_REQUEST_FILE
+
 
 def _terminate(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
@@ -35,7 +36,6 @@ def _spawn_children(
     *,
     root: pathlib.Path,
     src: pathlib.Path,
-    env: dict[str, str],
     host: str,
     api_port: str,
     ui_port: str,
@@ -66,15 +66,14 @@ def _spawn_children(
         "--port",
         ui_port,
     ]
-    api_proc = subprocess.Popen(api_cmd, cwd=str(root), env=env)
-    ui_proc = subprocess.Popen(ui_cmd, cwd=str(root), env=env)
+    api_proc = subprocess.Popen(api_cmd, cwd=str(root))
+    ui_proc = subprocess.Popen(ui_cmd, cwd=str(root))
     return api_proc, ui_proc
 
 
 def _spawn_zulip_bot(
     *,
     root: pathlib.Path,
-    env: dict[str, str],
     config_path: pathlib.Path,
 ) -> subprocess.Popen[bytes]:
     bot_cmd = [
@@ -83,7 +82,7 @@ def _spawn_zulip_bot(
         "--config",
         str(config_path),
     ]
-    return subprocess.Popen(bot_cmd, cwd=str(root), env=env)
+    return subprocess.Popen(bot_cmd, cwd=str(root))
 
 
 def _consume_reboot_request(path: pathlib.Path) -> bool:
@@ -151,26 +150,20 @@ def main() -> int:
     config_path = (ROOT / "sheaf_server.config").resolve()
     host, api_port, ui_port = _load_server_runtime_config(config_path)
     start_zulip_bot = _zulip_bot_enabled_from_config(config_path)
-    runtime_dir = ROOT / ".runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    reboot_file = (runtime_dir / "reboot.request").resolve()
-
-    env = os.environ.copy()
-    env["PYTHONPATH"] = f"{SRC}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
-    env["SHEAF_REBOOT_FILE"] = str(reboot_file)
+    reboot_file = REBOOT_REQUEST_FILE.resolve()
+    reboot_file.parent.mkdir(parents=True, exist_ok=True)
 
     _consume_reboot_request(reboot_file)
     api_proc, ui_proc = _spawn_children(
         root=ROOT,
         src=SRC,
-        env=env,
         host=host,
         api_port=api_port,
         ui_port=ui_port,
     )
     bot_proc: Optional[subprocess.Popen[bytes]] = None
     if start_zulip_bot:
-        bot_proc = _spawn_zulip_bot(root=ROOT, env=env, config_path=config_path)
+        bot_proc = _spawn_zulip_bot(root=ROOT, config_path=config_path)
 
     def _shutdown(_signum: int, _frame: object) -> None:
         if bot_proc is not None:
@@ -202,7 +195,6 @@ def main() -> int:
                 api_proc, ui_proc = _spawn_children(
                     root=ROOT,
                     src=SRC,
-                    env=env,
                     host=host,
                     api_port=api_port,
                     ui_port=ui_port,
@@ -210,7 +202,6 @@ def main() -> int:
                 if start_zulip_bot:
                     bot_proc = _spawn_zulip_bot(
                         root=ROOT,
-                        env=env,
                         config_path=config_path,
                     )
                 continue
