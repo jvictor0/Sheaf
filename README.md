@@ -83,6 +83,8 @@ It also supports:
 - `data_dir` (default: `data`)
 - `secrets_file` (default: `.secrets.json`)
 - `tome_dir` (default: `data/notes`; supports `~` expansion, e.g. `"~/AgentData/Sheaf"`)
+  - if `<tome_dir>/system_prompt.md` exists and is non-empty, it is used as the runtime system prompt
+  - if missing, unreadable, or empty, sheaf uses the built-in default system prompt
 - `llm.provider` (currently `openai`)
 - `llm.openai_model` (default: `gpt-4.1-mini`)
 - `llm.model_limits` and `llm.compaction` tuning blocks

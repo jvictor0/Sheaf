@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
+from sheaf.config.settings import TOME_DIR
 from sheaf.tools import build_agent_tools
 
 
@@ -54,6 +56,19 @@ def _base_system_prompt() -> str:
     )
 
 
+def _system_prompt() -> str:
+    path = Path(TOME_DIR) / "system_prompt.md"
+    try:
+        if path.exists():
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                return content
+    except OSError:
+        # Fall back to the default prompt if the file cannot be read.
+        pass
+    return _base_system_prompt()
+
+
 def invoke_chat_chain(
     *,
     api_key: str,
@@ -63,7 +78,7 @@ def invoke_chat_chain(
 ) -> ChatChainResult:
     llm = ChatOpenAI(model=model, api_key=api_key)
     history = _to_langchain_messages(messages)
-    system_message = SystemMessage(content=_base_system_prompt())
+    system_message = SystemMessage(content=_system_prompt())
 
     if not enable_tools:
         result = llm.invoke([system_message, *history])
