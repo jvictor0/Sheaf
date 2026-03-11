@@ -12,7 +12,7 @@ actor DictationAPIClient {
             self.baseURL = baseURL
         } else {
             let config = AppConfig.load()
-            self.baseURL = URL(string: config.dictationBaseURL) ?? URL(string: "http://192.168.1.56:8787")!
+            self.baseURL = URL(string: config.dictationBaseURL) ?? URL(string: "http://joyos-mac-mini.tail77a6ef.ts.net:8787")!
         }
 
         if let session {
@@ -22,7 +22,7 @@ actor DictationAPIClient {
             configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
             configuration.timeoutIntervalForRequest = 30
             configuration.timeoutIntervalForResource = 120
-            configuration.waitsForConnectivity = true
+            configuration.waitsForConnectivity = false
             self.session = URLSession(configuration: configuration)
         }
 

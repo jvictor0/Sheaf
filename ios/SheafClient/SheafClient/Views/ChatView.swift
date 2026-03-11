@@ -13,11 +13,17 @@ struct ChatView: View {
     @State private var previousMessageCount = 0
     @State private var previousFirstMessageID: String?
     @State private var hasInitialBottomFocus = false
+    @State private var dismissedKeyboardForCurrentDrag = false
     @State private var dictationState: DictationState = .idle
     @State private var dictationErrorMessage: String?
     @State private var dictationSessionID = UUID().uuidString
 
     private let recorder = AudioSnippetRecorder()
+    private var isComposerExpanded: Bool {
+        isComposeFocused
+            || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || dictationState != .idle
+    }
 
     init(viewModel: ChatViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -53,6 +59,19 @@ struct ChatView: View {
                         }
                         .padding()
                     }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 6)
+                            .onChanged { value in
+                                guard !dismissedKeyboardForCurrentDrag else { return }
+                                guard value.translation.height < -6 else { return }
+                                guard isComposeFocused else { return }
+                                isComposeFocused = false
+                                dismissedKeyboardForCurrentDrag = true
+                            }
+                            .onEnded { _ in
+                                dismissedKeyboardForCurrentDrag = false
+                            }
+                    )
                     .onAppear {
                         guard !hasInitialBottomFocus else { return }
                         if let last = viewModel.messages.last {
@@ -88,51 +107,7 @@ struct ChatView: View {
 
             Divider()
 
-            HStack(alignment: .bottom, spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(Color.secondary.opacity(0.35))
-                    CursorTextView(
-                        text: $draft,
-                        selectedRange: $composeSelection,
-                        isFocused: $isComposeFocused,
-                        placeholder: "Message"
-                    )
-                    .frame(minHeight: 36, maxHeight: 140)
-                }
-
-                VStack(spacing: 8) {
-                    Button {
-                        Task { await handleDictationTap() }
-                    } label: {
-                        Group {
-                            if dictationState == .uploading {
-                                ProgressView()
-                            } else if dictationState == .recording {
-                                Image(systemName: "stop.circle.fill")
-                            } else {
-                                Image(systemName: "mic")
-                            }
-                        }
-                        .frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(dictationState == .recording ? .red : nil)
-                    .disabled(dictationState == .uploading)
-
-                    Button("Send") {
-                        let sending = draft
-                        draft = ""
-                        composeSelection = NSRange(location: 0, length: 0)
-                        Task {
-                            await viewModel.sendMessage(sending)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || dictationState == .uploading)
-                }
-            }
-            .padding()
+            composerSection
         }
         .navigationTitle("Chat")
         .navigationBarBackButtonHidden(true)
@@ -158,6 +133,107 @@ struct ChatView: View {
                     .clipShape(Capsule())
                     .padding(.top, 8)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var composerSection: some View {
+        if isComposerExpanded {
+            expandedComposer
+        } else {
+            collapsedComposer
+        }
+    }
+
+    private var expandedComposer: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.secondary.opacity(0.35))
+                CursorTextView(
+                    text: $draft,
+                    selectedRange: $composeSelection,
+                    isFocused: $isComposeFocused,
+                    placeholder: "Message"
+                )
+                .frame(minHeight: 36, maxHeight: 140)
+            }
+
+            VStack(spacing: 8) {
+                dictationButton
+
+                Button("Send") {
+                    sendCurrentDraft()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || dictationState == .uploading)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 12)
+        .animation(.easeInOut(duration: 0.18), value: isComposerExpanded)
+    }
+
+    private var collapsedComposer: some View {
+        HStack(spacing: 8) {
+            Button {
+                isComposeFocused = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.pencil")
+                        .foregroundStyle(.secondary)
+                    Text("Message")
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color.secondary.opacity(0.35))
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                Task { await handleDictationTap() }
+            } label: {
+                Image(systemName: "mic")
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .animation(.easeInOut(duration: 0.18), value: isComposerExpanded)
+    }
+
+    private var dictationButton: some View {
+        Button {
+            Task { await handleDictationTap() }
+        } label: {
+            Group {
+                if dictationState == .uploading {
+                    ProgressView()
+                } else if dictationState == .recording {
+                    Image(systemName: "stop.circle.fill")
+                } else {
+                    Image(systemName: "mic")
+                }
+            }
+            .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.bordered)
+        .tint(dictationState == .recording ? .red : nil)
+        .disabled(dictationState == .uploading)
+    }
+
+    private func sendCurrentDraft() {
+        let sending = draft
+        draft = ""
+        composeSelection = NSRange(location: 0, length: 0)
+        Task {
+            await viewModel.sendMessage(sending)
         }
     }
 

@@ -12,8 +12,8 @@ struct AppConfig: Decodable {
     static func load() -> AppConfig {
         guard let url = configURL() else {
             return AppConfig(
-                apiBaseURL: "http://127.0.0.1:2731",
-                dictationBaseURL: "http://192.168.1.56:8787"
+                apiBaseURL: "http://joyos-mac-mini.tail77a6ef.ts.net:2731",
+                dictationBaseURL: "http://joyos-mac-mini.tail77a6ef.ts.net:8787"
             )
         }
 
@@ -21,14 +21,14 @@ struct AppConfig: Decodable {
               let config = try? JSONDecoder().decode(AppConfig.self, from: data),
               URL(string: config.apiBaseURL) != nil else {
             return AppConfig(
-                apiBaseURL: "http://127.0.0.1:2731",
-                dictationBaseURL: "http://192.168.1.56:8787"
+                apiBaseURL: "http://joyos-mac-mini.tail77a6ef.ts.net:2731",
+                dictationBaseURL: "http://joyos-mac-mini.tail77a6ef.ts.net:8787"
             )
         }
 
         let dictationBaseURL = URL(string: config.dictationBaseURL) != nil
             ? config.dictationBaseURL
-            : "http://192.168.1.56:8787"
+            : "http://joyos-mac-mini.tail77a6ef.ts.net:8787"
 
         return AppConfig(
             apiBaseURL: config.apiBaseURL,

@@ -1,4 +1,4 @@
 {
-  "api_base_url": "http://192.168.1.56:2731",
-  "dictation_base_url": "http://192.168.1.56:8787"
+  "api_base_url": "http://joyos-mac-mini.tail77a6ef.ts.net:2731",
+  "dictation_base_url": "http://joyos-mac-mini.tail77a6ef.ts.net:8787"
 }
