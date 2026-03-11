@@ -45,6 +45,13 @@ struct ConversationListView: View {
                     Label("New", systemImage: "plus")
                 }
             }
+            ToolbarItem {
+                Button {
+                    appState.openSettings()
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+            }
         }
         .alert("New Chat", isPresented: $isShowingNewChatPrompt) {
             TextField("Chat name", text: $newChatName)

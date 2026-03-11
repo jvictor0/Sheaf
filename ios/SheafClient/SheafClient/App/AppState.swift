@@ -13,4 +13,8 @@ final class AppState: ObservableObject {
         selectedChatID = chatID
         path.append(.chat(chatID: chatID))
     }
+
+    func openSettings() {
+        path.append(.settings)
+    }
 }

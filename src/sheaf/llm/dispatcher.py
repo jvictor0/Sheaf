@@ -60,7 +60,7 @@ class LLMDispatcher(ABC):
 class LangChainOpenAIDispatcher(LLMDispatcher):
     """LangChain-backed OpenAI dispatcher using a chat chain."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4.1-mini") -> None:
+    def __init__(self, api_key: str, model: str = "gpt-5-mini") -> None:
         self._api_key = api_key
         self._model = model
         self._model_properties = resolve_model_properties(provider="openai", model=model)
@@ -115,11 +115,11 @@ def _openai_api_key_from_file() -> str:
     raise RuntimeError("Missing OpenAI API key. Add openai.api_key in .secrets.json")
 
 
-def build_dispatcher() -> LLMDispatcher:
+def build_dispatcher(model_override: str | None = None) -> LLMDispatcher:
     provider = configured_llm_provider()
     if provider != "openai":
         raise RuntimeError(f"Unsupported LLM provider: {provider}")
 
     api_key = _openai_api_key_from_file()
-    model = configured_openai_model()
+    model = (model_override or "").strip() or configured_openai_model()
     return LangChainOpenAIDispatcher(api_key=api_key, model=model)

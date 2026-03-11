@@ -13,7 +13,7 @@ actor SheafAPIClient {
             self.baseURL = baseURL
         } else {
             let config = AppConfig.load()
-            self.baseURL = URL(string: config.apiBaseURL) ?? URL(string: "http://127.0.0.1:2731")!
+            self.baseURL = URL(string: config.apiBaseURL) ?? URL(string: "http://joyos-mac-mini.tail77a6ef.ts.net:2731")!
         }
         if let session {
             self.session = session
@@ -22,7 +22,7 @@ actor SheafAPIClient {
             configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
             configuration.timeoutIntervalForRequest = 20
             configuration.timeoutIntervalForResource = 120
-            configuration.waitsForConnectivity = true
+            configuration.waitsForConnectivity = false
             self.session = URLSession(configuration: configuration)
         }
 
@@ -81,7 +81,8 @@ actor SheafAPIClient {
     }
 
     func sendMessage(chatID: String, text: String) async throws -> SendMessageResponse {
-        let payload = try encoder.encode(SendMessageRequest(message: text))
+        let selectedModel = await MainActor.run { ClientSettingsStore.shared.selectedModel.rawValue }
+        let payload = try encoder.encode(SendMessageRequest(message: text, model: selectedModel))
         let idempotencyKey = UUID().uuidString
         return try await request(
             path: "/chats/\(chatID)/messages",

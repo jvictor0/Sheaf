@@ -50,8 +50,8 @@ def _estimate_token_count(*, limits: ModelLimits, messages: list[BaseMessage], s
     return total
 
 
-def compile_chat_graph(*, saver: SqliteSaver):
-    dispatcher = build_dispatcher()
+def compile_chat_graph(*, saver: SqliteSaver, model: str | None = None):
+    dispatcher = build_dispatcher(model_override=model)
     limits = dispatcher.model_properties.limits
 
     def maybe_compact(state: ChatState) -> dict[str, object]:

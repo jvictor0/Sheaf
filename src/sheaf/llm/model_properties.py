@@ -26,9 +26,21 @@ class ModelProperties:
 
 
 _KNOWN_LIMITS: dict[tuple[str, str], ModelLimits] = {
-    ("openai", "gpt-4.1-mini"): ModelLimits(
-        context_window_tokens=1_047_576,
-        max_output_tokens=32_768,
+    ("openai", "gpt-5-mini"): ModelLimits(
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+    ),
+    ("openai", "gpt-5.2"): ModelLimits(
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+    ),
+    ("openai", "gpt-5.3-codex"): ModelLimits(
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+    ),
+    ("openai", "gpt-5.4"): ModelLimits(
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
     ),
 }
 

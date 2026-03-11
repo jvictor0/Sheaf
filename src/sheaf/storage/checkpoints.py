@@ -192,7 +192,12 @@ def get_message_range(chat_id: str, start: int, end: int) -> dict[str, object]:
     }
 
 
-def run_chat_turn(chat_id: str, user_message: str) -> tuple[str, str, list[dict[str, object]]]:
+def run_chat_turn(
+    chat_id: str,
+    user_message: str,
+    *,
+    model: str,
+) -> tuple[str, str, list[dict[str, object]]]:
     _ensure_chat_initialized(chat_id)
 
     db = _db_path(chat_id)
@@ -200,7 +205,7 @@ def run_chat_turn(chat_id: str, user_message: str) -> tuple[str, str, list[dict[
     cfg = {"configurable": {"thread_id": chat_id}}
 
     with SqliteSaver.from_conn_string(conn) as saver:
-        graph = compile_chat_graph(saver=saver)
+        graph = compile_chat_graph(saver=saver, model=model)
         out = graph.invoke({"messages": [HumanMessage(content=user_message)]}, cfg)
         snapshot = graph.get_state(cfg)
 

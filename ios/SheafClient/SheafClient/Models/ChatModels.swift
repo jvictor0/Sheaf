@@ -163,6 +163,7 @@ struct ChatMessage: Decodable, Identifiable, Hashable {
 
 struct SendMessageRequest: Encodable {
     let message: String
+    let model: String
 }
 
 struct SendMessageResponse: Decodable {

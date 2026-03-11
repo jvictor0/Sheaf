@@ -55,7 +55,7 @@ def configured_openai_model() -> str:
         model = llm.get("openai_model")
         if isinstance(model, str) and model.strip():
             return model.strip()
-    return "gpt-4.1-mini"
+    return "gpt-5-mini"
 
 
 def configured_model_tuning() -> tuple[dict[str, object], dict[str, object]]:

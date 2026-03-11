@@ -234,10 +234,10 @@ struct SheafClientTests {
     }
 
     @Test func dictationRequestConstructionUsesExpectedEndpointAndHeaders() throws {
-        let baseURL = try #require(URL(string: "http://192.168.1.56:8787"))
+        let baseURL = try #require(URL(string: "http://joyos-mac-mini.tail77a6ef.ts.net:8787"))
         let endpoint = DictationAPIClient.endpoint(baseURL: baseURL)
 
-        #expect(endpoint.absoluteString == "http://192.168.1.56:8787/v1/dictate-audio")
+        #expect(endpoint.absoluteString == "http://joyos-mac-mini.tail77a6ef.ts.net:8787/v1/dictate-audio")
 
         let request = DictationAPIClient.buildRequest(
             endpoint: endpoint,
@@ -248,11 +248,43 @@ struct SheafClientTests {
         )
 
         #expect(request.httpMethod == "POST")
-        #expect(request.url?.absoluteString == "http://192.168.1.56:8787/v1/dictate-audio")
+        #expect(request.url?.absoluteString == "http://joyos-mac-mini.tail77a6ef.ts.net:8787/v1/dictate-audio")
         #expect(request.value(forHTTPHeaderField: "Content-Type") == "audio/wav")
         #expect(request.value(forHTTPHeaderField: "X-Sample-Rate") == "16000")
         #expect(request.value(forHTTPHeaderField: "X-Locale") == "en-US")
         #expect(request.value(forHTTPHeaderField: "X-Session-Id") == "session-123")
         #expect(request.value(forHTTPHeaderField: "X-Request-Id") == "req-123")
+    }
+
+    @Test func sendMessageRequestEncodesSelectedModel() throws {
+        let request = SendMessageRequest(message: "hello", model: ClientModel.gpt53Codex.rawValue)
+        let encoded = try JSONEncoder().encode(request)
+        let jsonObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: String])
+
+        #expect(jsonObject["message"] == "hello")
+        #expect(jsonObject["model"] == "gpt-5.3-codex")
+    }
+
+    @MainActor
+    @Test func clientSettingsStoreDefaultsToGpt5Mini() {
+        let suiteName = "SheafClientTests.default.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let store = ClientSettingsStore(defaults: defaults, modelKey: "selected_model")
+        #expect(store.selectedModel == .gpt5Mini)
+    }
+
+    @MainActor
+    @Test func clientSettingsStoreLoadsPersistedModel() {
+        let suiteName = "SheafClientTests.persisted.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        var store = ClientSettingsStore(defaults: defaults, modelKey: "selected_model")
+        store.selectedModel = .gpt52
+        store = ClientSettingsStore(defaults: defaults, modelKey: "selected_model")
+
+        #expect(store.selectedModel == .gpt52)
     }
 }

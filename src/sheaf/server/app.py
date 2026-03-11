@@ -21,7 +21,7 @@ from sheaf.storage.checkpoints import (
     list_chats,
     run_chat_turn,
 )
-from sheaf.config.settings import REBOOT_REQUEST_FILE
+from sheaf.config.settings import REBOOT_REQUEST_FILE, configured_openai_model
 
 app = FastAPI(title="sheaf", version="0.1.0")
 
@@ -39,6 +39,7 @@ app.add_middleware(
 
 class ChatMessageRequest(BaseModel):
     message: str
+    model: Optional[str] = None
 
 
 class CreateChatRequest(BaseModel):
@@ -62,8 +63,9 @@ class ChatMessageResponse(BaseModel):
 
 CHAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 IDEMPOTENCY_TTL_SECONDS = 30 * 60
+ALLOWED_OPENAI_MODELS = ("gpt-5-mini", "gpt-5.2", "gpt-5.3-codex", "gpt-5.4")
 _idempotency_lock = threading.Lock()
-_idempotent_responses: dict[tuple[str, str], tuple[float, ChatMessageResponse]] = {}
+_idempotent_responses: dict[tuple[str, str, str], tuple[float, ChatMessageResponse]] = {}
 
 
 def _validate_chat_id(chat_id: str) -> None:
@@ -88,6 +90,17 @@ def _prune_idempotency_cache(now: float) -> None:
     ]
     for key in stale_keys:
         _idempotent_responses.pop(key, None)
+
+
+def _resolve_requested_model(requested_model: Optional[str]) -> str:
+    resolved = (requested_model or "").strip()
+    if not resolved:
+        resolved = configured_openai_model()
+    if resolved in ALLOWED_OPENAI_MODELS:
+        return resolved
+
+    allowed = ", ".join(ALLOWED_OPENAI_MODELS)
+    raise HTTPException(status_code=400, detail=f"Unsupported model '{resolved}'. Allowed models: {allowed}")
 
 
 @app.get("/health")
@@ -153,8 +166,9 @@ def reboot_services_endpoint() -> dict[str, str]:
 @app.post("/chats/{chat_id}/messages", response_model=ChatMessageResponse)
 def chat(chat_id: str, payload: ChatMessageRequest, request: Request) -> ChatMessageResponse:
     _validate_chat_id(chat_id)
+    requested_model = _resolve_requested_model(payload.model)
     idempotency_key = request.headers.get("x-idempotency-key")
-    cache_key = (chat_id, idempotency_key) if idempotency_key else None
+    cache_key = (chat_id, requested_model, idempotency_key) if idempotency_key else None
     now = time.time()
 
     if cache_key:
@@ -165,7 +179,11 @@ def chat(chat_id: str, payload: ChatMessageRequest, request: Request) -> ChatMes
                 return cached[1]
 
     try:
-        assistant_text, checkpoint_id, tool_calls = run_chat_turn(chat_id, payload.message)
+        assistant_text, checkpoint_id, tool_calls = run_chat_turn(
+            chat_id,
+            payload.message,
+            model=requested_model,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
