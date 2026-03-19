@@ -80,8 +80,19 @@ actor SheafAPIClient {
         return response.messages
     }
 
+    func listAvailableModels() async throws -> [ClientModel] {
+        let response: ModelListResponse = try await request(
+            path: "/models",
+            method: "GET",
+            body: Optional<Data>.none,
+            retryable: true,
+            idempotencyKey: nil
+        )
+        return response.models
+    }
+
     func sendMessage(chatID: String, text: String) async throws -> SendMessageResponse {
-        let selectedModel = await MainActor.run { ClientSettingsStore.shared.selectedModel.rawValue }
+        let selectedModel = await MainActor.run { ClientSettingsStore.shared.selectedModelName }
         let payload = try encoder.encode(SendMessageRequest(message: text, model: selectedModel))
         let idempotencyKey = UUID().uuidString
         return try await request(

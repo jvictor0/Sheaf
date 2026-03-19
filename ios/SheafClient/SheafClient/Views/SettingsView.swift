@@ -6,14 +6,17 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Client Settings") {
-                Picker("Model", selection: $settingsStore.selectedModel) {
-                    ForEach(ClientModel.allCases) { model in
-                        Text(model.displayName).tag(model)
+                Picker("Model", selection: $settingsStore.selectedModelName) {
+                    ForEach(settingsStore.availableModels) { model in
+                        Text(model.displayName).tag(model.name)
                     }
                 }
                 .pickerStyle(.menu)
             }
         }
         .navigationTitle("Settings")
+        .task {
+            await settingsStore.refreshAvailableModels()
+        }
     }
 }

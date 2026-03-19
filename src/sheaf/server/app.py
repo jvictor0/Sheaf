@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from sheaf.llm.model_registry import ModelDescriptor, get_model_registry
 from sheaf.storage.checkpoints import (
     create_chat,
     get_chat_metadata,
@@ -21,7 +22,7 @@ from sheaf.storage.checkpoints import (
     list_chats,
     run_chat_turn,
 )
-from sheaf.config.settings import REBOOT_REQUEST_FILE, configured_openai_model
+from sheaf.config.settings import REBOOT_REQUEST_FILE, configured_default_model
 
 app = FastAPI(title="sheaf", version="0.1.0")
 
@@ -61,11 +62,23 @@ class ChatMessageResponse(BaseModel):
     tool_calls: list[ToolCallResponse]
 
 
+class ModelResponse(BaseModel):
+    name: str
+    provider: str
+    source: str
+    metadata: dict[str, object]
+    is_default: bool = False
+
+
+class ModelListResponse(BaseModel):
+    models: list[ModelResponse]
+
+
 CHAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 IDEMPOTENCY_TTL_SECONDS = 30 * 60
-ALLOWED_OPENAI_MODELS = ("gpt-5-mini", "gpt-5.2", "gpt-5.3-codex", "gpt-5.4")
 _idempotency_lock = threading.Lock()
 _idempotent_responses: dict[tuple[str, str, str], tuple[float, ChatMessageResponse]] = {}
+_model_registry = get_model_registry()
 
 
 def _validate_chat_id(chat_id: str) -> None:
@@ -92,20 +105,29 @@ def _prune_idempotency_cache(now: float) -> None:
         _idempotent_responses.pop(key, None)
 
 
-def _resolve_requested_model(requested_model: Optional[str]) -> str:
+def _resolve_requested_model(requested_model: Optional[str]) -> ModelDescriptor:
     resolved = (requested_model or "").strip()
     if not resolved:
-        resolved = configured_openai_model()
-    if resolved in ALLOWED_OPENAI_MODELS:
-        return resolved
+        resolved = configured_default_model()
 
-    allowed = ", ".join(ALLOWED_OPENAI_MODELS)
+    descriptor = _model_registry.resolve_model(resolved, allow_refresh=True)
+    if descriptor is not None:
+        return descriptor
+
+    allowed = ", ".join(model.name for model in _model_registry.list_models())
     raise HTTPException(status_code=400, detail=f"Unsupported model '{resolved}'. Allowed models: {allowed}")
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/models", response_model=ModelListResponse)
+def list_models_endpoint() -> ModelListResponse:
+    models = [ModelResponse(**item.as_dict()) for item in _model_registry.list_models()]
+    return ModelListResponse(models=models)
+
 
 
 @app.post("/chats")
@@ -168,7 +190,7 @@ def chat(chat_id: str, payload: ChatMessageRequest, request: Request) -> ChatMes
     _validate_chat_id(chat_id)
     requested_model = _resolve_requested_model(payload.model)
     idempotency_key = request.headers.get("x-idempotency-key")
-    cache_key = (chat_id, requested_model, idempotency_key) if idempotency_key else None
+    cache_key = (chat_id, requested_model.name, idempotency_key) if idempotency_key else None
     now = time.time()
 
     if cache_key:
@@ -182,7 +204,7 @@ def chat(chat_id: str, payload: ChatMessageRequest, request: Request) -> ChatMes
         assistant_text, checkpoint_id, tool_calls = run_chat_turn(
             chat_id,
             payload.message,
-            model=requested_model,
+            model=requested_model.name,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

@@ -1,23 +1,20 @@
 import Foundation
 
-enum ClientModel: String, CaseIterable, Identifiable, Codable {
-    case gpt5Mini = "gpt-5-mini"
-    case gpt52 = "gpt-5.2"
-    case gpt53Codex = "gpt-5.3-codex"
-    case gpt54 = "gpt-5.4"
+struct ClientModel: Identifiable, Decodable, Hashable {
+    let name: String
+    let provider: String
+    let source: String
+    let metadata: [String: JSONValue]
+    let isDefault: Bool
 
-    var id: String { rawValue }
+    var id: String { name }
+    var displayName: String { name }
 
-    var displayName: String {
-        switch self {
-        case .gpt5Mini:
-            return "gpt-5-mini"
-        case .gpt52:
-            return "gpt-5.2"
-        case .gpt53Codex:
-            return "gpt-5.3-codex"
-        case .gpt54:
-            return "gpt-5.4"
-        }
+    enum CodingKeys: String, CodingKey {
+        case name
+        case provider
+        case source
+        case metadata
+        case isDefault = "is_default"
     }
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -56,6 +57,48 @@ def configured_openai_model() -> str:
         if isinstance(model, str) and model.strip():
             return model.strip()
     return "gpt-5-mini"
+
+
+def configured_default_model() -> str:
+    cfg = load_server_config()
+    llm = cfg.get("llm")
+    if isinstance(llm, dict):
+        model = llm.get("default_model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+    return configured_openai_model()
+
+
+def configured_ollama_base_url() -> str:
+    env_value = os.environ.get("OLLAMA_HOST")
+    if isinstance(env_value, str) and env_value.strip():
+        raw = env_value.strip()
+    else:
+        cfg = load_server_config()
+        llm = cfg.get("llm")
+        raw = "http://127.0.0.1:11434"
+        if isinstance(llm, dict):
+            value = llm.get("ollama_base_url")
+            if isinstance(value, str) and value.strip():
+                raw = value.strip()
+
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return f"http://{raw}"
+
+
+def configured_ollama_cache_ttl_seconds() -> int:
+    cfg = load_server_config()
+    llm = cfg.get("llm")
+    if isinstance(llm, dict):
+        raw = llm.get("ollama_cache_ttl_seconds")
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+    return 30
 
 
 def configured_model_tuning() -> tuple[dict[str, object], dict[str, object]]:

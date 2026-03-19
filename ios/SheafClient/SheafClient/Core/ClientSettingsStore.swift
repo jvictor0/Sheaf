@@ -4,11 +4,12 @@ import Foundation
 final class ClientSettingsStore: ObservableObject {
     static let shared = ClientSettingsStore()
 
-    @Published var selectedModel: ClientModel {
+    @Published var selectedModelName: String {
         didSet {
-            defaults.set(selectedModel.rawValue, forKey: modelKey)
+            defaults.set(selectedModelName, forKey: modelKey)
         }
     }
+    @Published private(set) var availableModels: [ClientModel] = []
 
     private let defaults: UserDefaults
     private let modelKey: String
@@ -17,11 +18,38 @@ final class ClientSettingsStore: ObservableObject {
         self.defaults = defaults
         self.modelKey = modelKey
 
-        if let stored = defaults.string(forKey: modelKey),
-           let parsed = ClientModel(rawValue: stored) {
-            selectedModel = parsed
-        } else {
-            selectedModel = .gpt5Mini
+        selectedModelName = defaults.string(forKey: modelKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if selectedModelName.isEmpty {
+            selectedModelName = "gpt-5-mini"
+        }
+    }
+
+    func refreshAvailableModels(client: SheafAPIClient = .shared) async {
+        do {
+            let models = try await client.listAvailableModels()
+            availableModels = models
+            alignSelectedModel(with: models)
+        } catch {
+            if availableModels.isEmpty {
+                let fallback = ClientModel(
+                    name: "gpt-5-mini",
+                    provider: "openai",
+                    source: "fallback",
+                    metadata: [:],
+                    isDefault: true
+                )
+                availableModels = [fallback]
+                alignSelectedModel(with: [fallback])
+            }
+        }
+    }
+
+    private func alignSelectedModel(with models: [ClientModel]) {
+        if models.contains(where: { $0.name == selectedModelName }) {
+            return
+        }
+        if let model = models.first(where: \.isDefault) ?? models.first {
+            selectedModelName = model.name
         }
     }
 }

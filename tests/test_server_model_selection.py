@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 import sheaf.server.app as server_app
+from sheaf.llm.model_registry import ModelDescriptor
 
 
 def test_chat_endpoint_accepts_gpt_5_mini_and_forwards_model(monkeypatch) -> None:
@@ -110,7 +111,7 @@ def test_chat_endpoint_uses_config_default_when_model_omitted(monkeypatch) -> No
         return "ok", "cp-4", []
 
     monkeypatch.setattr(server_app, "run_chat_turn", _fake_run_chat_turn)
-    monkeypatch.setattr(server_app, "configured_openai_model", lambda: "gpt-5-mini")
+    monkeypatch.setattr(server_app, "configured_default_model", lambda: "gpt-5-mini")
     client = TestClient(server_app.app)
 
     response = client.post(
@@ -120,3 +121,69 @@ def test_chat_endpoint_uses_config_default_when_model_omitted(monkeypatch) -> No
 
     assert response.status_code == 200
     assert calls == [{"chat_id": "test-chat", "user_message": "hello", "model": "gpt-5-mini"}]
+
+
+def test_models_endpoint_returns_model_objects(monkeypatch) -> None:
+    class _FakeRegistry:
+        def list_models(self):
+            return [
+                ModelDescriptor(
+                    name="gpt-5-mini",
+                    provider="openai",
+                    source="builtin",
+                    metadata={},
+                    is_default=True,
+                ),
+                ModelDescriptor(
+                    name="llama3.2:latest",
+                    provider="ollama",
+                    source="ollama",
+                    metadata={"size": "2.0 GB"},
+                    is_default=False,
+                ),
+            ]
+
+    monkeypatch.setattr(server_app, "_model_registry", _FakeRegistry())
+    client = TestClient(server_app.app)
+
+    response = client.get("/models")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["models"][0]["name"] == "gpt-5-mini"
+    assert payload["models"][0]["provider"] == "openai"
+    assert payload["models"][1]["name"] == "llama3.2:latest"
+    assert payload["models"][1]["provider"] == "ollama"
+
+
+def test_unknown_model_refreshes_cache_once_before_reject(monkeypatch) -> None:
+    class _FakeRegistry:
+        def __init__(self) -> None:
+            self.resolve_calls: list[tuple[str, bool]] = []
+
+        def resolve_model(self, name: str, *, allow_refresh: bool = True):
+            self.resolve_calls.append((name, allow_refresh))
+            return None
+
+        def list_models(self):
+            return [
+                ModelDescriptor(
+                    name="gpt-5-mini",
+                    provider="openai",
+                    source="builtin",
+                    metadata={},
+                    is_default=True,
+                )
+            ]
+
+    fake_registry = _FakeRegistry()
+    monkeypatch.setattr(server_app, "_model_registry", fake_registry)
+    monkeypatch.setattr(server_app, "configured_default_model", lambda: "gpt-5-mini")
+    client = TestClient(server_app.app)
+
+    response = client.post(
+        "/chats/test-chat/messages",
+        json={"message": "hello", "model": "not-real"},
+    )
+
+    assert response.status_code == 400
+    assert fake_registry.resolve_calls == [("not-real", True)]

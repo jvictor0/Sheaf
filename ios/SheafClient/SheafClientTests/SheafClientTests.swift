@@ -257,7 +257,7 @@ struct SheafClientTests {
     }
 
     @Test func sendMessageRequestEncodesSelectedModel() throws {
-        let request = SendMessageRequest(message: "hello", model: ClientModel.gpt53Codex.rawValue)
+        let request = SendMessageRequest(message: "hello", model: "gpt-5.3-codex")
         let encoded = try JSONEncoder().encode(request)
         let jsonObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: String])
 
@@ -272,7 +272,7 @@ struct SheafClientTests {
         defaults.removePersistentDomain(forName: suiteName)
 
         let store = ClientSettingsStore(defaults: defaults, modelKey: "selected_model")
-        #expect(store.selectedModel == .gpt5Mini)
+        #expect(store.selectedModelName == "gpt-5-mini")
     }
 
     @MainActor
@@ -282,9 +282,9 @@ struct SheafClientTests {
         defaults.removePersistentDomain(forName: suiteName)
 
         var store = ClientSettingsStore(defaults: defaults, modelKey: "selected_model")
-        store.selectedModel = .gpt52
+        store.selectedModelName = "gpt-5.2"
         store = ClientSettingsStore(defaults: defaults, modelKey: "selected_model")
 
-        #expect(store.selectedModel == .gpt52)
+        #expect(store.selectedModelName == "gpt-5.2")
     }
 }

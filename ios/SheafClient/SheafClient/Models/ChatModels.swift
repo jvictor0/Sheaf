@@ -96,6 +96,10 @@ struct ChatListResponse: Decodable {
     let chats: [ChatSummary]
 }
 
+struct ModelListResponse: Decodable {
+    let models: [ClientModel]
+}
+
 struct CreateChatResponse: Decodable {
     let chatID: String
 
