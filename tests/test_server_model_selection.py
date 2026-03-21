@@ -1,189 +1,113 @@
 from __future__ import annotations
 
+import sys
+import types
+
 from fastapi.testclient import TestClient
 
 import sheaf.server.app as server_app
-from sheaf.llm.model_registry import ModelDescriptor
 
 
-def test_chat_endpoint_accepts_gpt_5_mini_and_forwards_model(monkeypatch) -> None:
-    calls: list[dict[str, str]] = []
-
-    def _fake_run_chat_turn(chat_id: str, user_message: str, *, model: str):
-        calls.append({"chat_id": chat_id, "user_message": user_message, "model": model})
-        return "ok", "cp-1", []
-
-    monkeypatch.setattr(server_app, "run_chat_turn", _fake_run_chat_turn)
+def test_create_and_list_threads_round_trip() -> None:
     client = TestClient(server_app.app)
 
+    created = client.post("/threads", json={"name": "Roadmap Thread"})
+    assert created.status_code == 200
+    thread_id = created.json()["thread_id"]
+
+    listed = client.get("/threads")
+    assert listed.status_code == 200
+    payload = listed.json()
+    threads = payload["threads"]
+    thread_ids = {item["thread_id"] for item in threads}
+    assert thread_id in thread_ids
+    created_thread = next(item for item in threads if item["thread_id"] == thread_id)
+    assert created_thread["name"] == "Roadmap Thread"
+
+
+def test_enter_chat_rejects_bad_protocol_version() -> None:
+    client = TestClient(server_app.app)
+    created = client.post("/threads", json={})
+    thread_id = created.json()["thread_id"]
+
     response = client.post(
-        "/chats/test-chat/messages",
-        json={"message": "hello", "model": "gpt-5-mini"},
+        f"/threads/{thread_id}/enter-chat",
+        json={"protocol_version": 999, "known_tail_turn_id": None},
+    )
+
+    assert response.status_code == 409
+    assert "Unsupported protocol_version" in response.json()["detail"]
+
+
+def test_enter_chat_returns_session_for_supported_protocol() -> None:
+    client = TestClient(server_app.app)
+    created = client.post("/threads", json={})
+    thread_id = created.json()["thread_id"]
+
+    response = client.post(
+        f"/threads/{thread_id}/enter-chat",
+        json={"protocol_version": 1, "known_tail_turn_id": None},
     )
 
     assert response.status_code == 200
-    assert calls == [{"chat_id": "test-chat", "user_message": "hello", "model": "gpt-5-mini"}]
+    body = response.json()
+    assert body["session_id"]
+    assert body["websocket_url"].startswith("/ws/chat/")
+    assert body["accepted_protocol_version"] == 1
 
 
-def test_chat_endpoint_accepts_gpt_53_codex_and_forwards_model(monkeypatch) -> None:
-    calls: list[dict[str, str]] = []
-
-    def _fake_run_chat_turn(chat_id: str, user_message: str, *, model: str):
-        calls.append({"chat_id": chat_id, "user_message": user_message, "model": model})
-        return "ok", "cp-2", []
-
-    monkeypatch.setattr(server_app, "run_chat_turn", _fake_run_chat_turn)
+def test_create_thread_response_uses_canonical_thread_id_only() -> None:
     client = TestClient(server_app.app)
-
-    response = client.post(
-        "/chats/test-chat/messages",
-        json={"message": "hello", "model": "gpt-5.3-codex"},
-    )
-
+    response = client.post("/threads", json={"name": "Canonical"})
     assert response.status_code == 200
-    assert calls == [{"chat_id": "test-chat", "user_message": "hello", "model": "gpt-5.3-codex"}]
+    payload = response.json()
+    assert "thread_id" in payload
+    assert "chat_id" not in payload
 
 
-def test_chat_endpoint_accepts_gpt_52_and_forwards_model(monkeypatch) -> None:
-    calls: list[dict[str, str]] = []
-
-    def _fake_run_chat_turn(chat_id: str, user_message: str, *, model: str):
-        calls.append({"chat_id": chat_id, "user_message": user_message, "model": model})
-        return "ok", "cp-2b", []
-
-    monkeypatch.setattr(server_app, "run_chat_turn", _fake_run_chat_turn)
-    client = TestClient(server_app.app)
-
-    response = client.post(
-        "/chats/test-chat/messages",
-        json={"message": "hello", "model": "gpt-5.2"},
-    )
-
-    assert response.status_code == 200
-    assert calls == [{"chat_id": "test-chat", "user_message": "hello", "model": "gpt-5.2"}]
-
-
-def test_chat_endpoint_accepts_gpt_54_and_forwards_model(monkeypatch) -> None:
-    calls: list[dict[str, str]] = []
-
-    def _fake_run_chat_turn(chat_id: str, user_message: str, *, model: str):
-        calls.append({"chat_id": chat_id, "user_message": user_message, "model": model})
-        return "ok", "cp-2c", []
-
-    monkeypatch.setattr(server_app, "run_chat_turn", _fake_run_chat_turn)
-    client = TestClient(server_app.app)
-
-    response = client.post(
-        "/chats/test-chat/messages",
-        json={"message": "hello", "model": "gpt-5.4"},
-    )
-
-    assert response.status_code == 200
-    assert calls == [{"chat_id": "test-chat", "user_message": "hello", "model": "gpt-5.4"}]
-
-
-def test_chat_endpoint_rejects_invalid_model(monkeypatch) -> None:
-    def _fake_run_chat_turn(chat_id: str, user_message: str, *, model: str):
-        return "ok", "cp-3", []
-
-    monkeypatch.setattr(server_app, "run_chat_turn", _fake_run_chat_turn)
-    client = TestClient(server_app.app)
-
-    response = client.post(
-        "/chats/test-chat/messages",
-        json={"message": "hello", "model": "bad-model"},
-    )
-
-    assert response.status_code == 400
-    detail = str(response.json().get("detail", ""))
-    assert "Unsupported model" in detail
-    assert "gpt-5-mini" in detail
-    assert "gpt-5.2" in detail
-    assert "gpt-5.3-codex" in detail
-    assert "gpt-5.4" in detail
-
-
-def test_chat_endpoint_uses_config_default_when_model_omitted(monkeypatch) -> None:
-    calls: list[dict[str, str]] = []
-
-    def _fake_run_chat_turn(chat_id: str, user_message: str, *, model: str):
-        calls.append({"chat_id": chat_id, "user_message": user_message, "model": model})
-        return "ok", "cp-4", []
-
-    monkeypatch.setattr(server_app, "run_chat_turn", _fake_run_chat_turn)
-    monkeypatch.setattr(server_app, "configured_default_model", lambda: "gpt-5-mini")
-    client = TestClient(server_app.app)
-
-    response = client.post(
-        "/chats/test-chat/messages",
-        json={"message": "hello"},
-    )
-
-    assert response.status_code == 200
-    assert calls == [{"chat_id": "test-chat", "user_message": "hello", "model": "gpt-5-mini"}]
-
-
-def test_models_endpoint_returns_model_objects(monkeypatch) -> None:
-    class _FakeRegistry:
-        def list_models(self):
-            return [
-                ModelDescriptor(
-                    name="gpt-5-mini",
-                    provider="openai",
-                    source="builtin",
-                    metadata={},
-                    is_default=True,
-                ),
-                ModelDescriptor(
-                    name="llama3.2:latest",
-                    provider="ollama",
-                    source="ollama",
-                    metadata={"size": "2.0 GB"},
-                    is_default=False,
-                ),
-            ]
-
-    monkeypatch.setattr(server_app, "_model_registry", _FakeRegistry())
+def test_models_endpoint_returns_model_objects() -> None:
     client = TestClient(server_app.app)
 
     response = client.get("/models")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["models"][0]["name"] == "gpt-5-mini"
-    assert payload["models"][0]["provider"] == "openai"
-    assert payload["models"][1]["name"] == "llama3.2:latest"
-    assert payload["models"][1]["provider"] == "ollama"
+    assert isinstance(payload.get("models"), list)
+    assert any(item.get("name") == "gpt-5-mini" for item in payload["models"])
+    first = payload["models"][0]
+    assert isinstance(first.get("metadata_json"), (str, type(None)))
 
 
-def test_unknown_model_refreshes_cache_once_before_reject(monkeypatch) -> None:
-    class _FakeRegistry:
-        def __init__(self) -> None:
-            self.resolve_calls: list[tuple[str, bool]] = []
+def test_list_threads_endpoint_calls_runtime_once(monkeypatch) -> None:
+    calls = {"count": 0}
 
-        def resolve_model(self, name: str, *, allow_refresh: bool = True):
-            self.resolve_calls.append((name, allow_refresh))
-            return None
+    def _fake_list_threads():
+        calls["count"] += 1
+        return [{"thread_id": "t1", "name": "Thread 1"}]
 
-        def list_models(self):
-            return [
-                ModelDescriptor(
-                    name="gpt-5-mini",
-                    provider="openai",
-                    source="builtin",
-                    metadata={},
-                    is_default=True,
-                )
-            ]
+    monkeypatch.setattr(server_app.runtime, "list_threads", _fake_list_threads)
+    payload = server_app.list_threads_endpoint()
 
-    fake_registry = _FakeRegistry()
-    monkeypatch.setattr(server_app, "_model_registry", fake_registry)
-    monkeypatch.setattr(server_app, "configured_default_model", lambda: "gpt-5-mini")
-    client = TestClient(server_app.app)
+    assert calls["count"] == 1
+    assert payload["threads"] == [{"thread_id": "t1", "name": "Thread 1"}]
+    assert "chats" not in payload
 
-    response = client.post(
-        "/chats/test-chat/messages",
-        json={"message": "hello", "model": "not-real"},
+
+def test_app_main_uses_configured_host_and_port(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_run(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=_fake_run))
+    monkeypatch.setattr(
+        server_app,
+        "load_server_config",
+        lambda: {"server": {"host": "0.0.0.0", "api_port": 3842}},
     )
 
-    assert response.status_code == 400
-    assert fake_registry.resolve_calls == [("not-real", True)]
+    server_app.main()
+
+    kwargs = seen["kwargs"]
+    assert kwargs["host"] == "0.0.0.0"
+    assert kwargs["port"] == 3842

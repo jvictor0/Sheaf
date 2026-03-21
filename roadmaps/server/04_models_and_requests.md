@@ -12,7 +12,6 @@ CREATE TABLE models (
     provider TEXT NOT NULL,                 -- e.g. openai, anthropic
     api_model_id TEXT NOT NULL,             -- provider-specific model id
     is_local INTEGER NOT NULL DEFAULT 0,    -- 0=false, 1=true
-    local_url TEXT NULL,                    -- endpoint for local model runtime
     context_window_tokens INTEGER NULL,
     max_output_tokens INTEGER NULL,
     metadata_json TEXT NULL,                -- provider/model extras

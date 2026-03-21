@@ -39,7 +39,7 @@ actor SheafAPIClient {
         let payload = name.map { CreateChatRequest(name: $0) }
         let body = try payload.map { try encoder.encode($0) }
         let response: CreateChatResponse = try await request(
-            path: "/chats",
+            path: "/threads",
             method: "POST",
             body: body,
             retryable: false,
@@ -50,7 +50,7 @@ actor SheafAPIClient {
 
     func listChats() async throws -> [ChatSummary] {
         let response: ChatListResponse = try await request(
-            path: "/chats",
+            path: "/threads",
             method: "GET",
             body: Optional<Data>.none,
             retryable: true,
@@ -61,7 +61,7 @@ actor SheafAPIClient {
 
     func getMetadata(chatID: String) async throws -> ChatMetadata {
         try await request(
-            path: "/chats/\(chatID)/metadata",
+            path: "/threads/\(chatID)/metadata",
             method: "GET",
             body: Optional<Data>.none,
             retryable: true,
@@ -71,7 +71,7 @@ actor SheafAPIClient {
 
     func getMessages(chatID: String, start: Int, end: Int) async throws -> [ChatMessage] {
         let response: MessageEnvelope = try await request(
-            path: "/chats/\(chatID)/messages?start=\(start)&end=\(end)",
+            path: "/threads/\(chatID)/messages?start=\(start)&end=\(end)",
             method: "GET",
             body: Optional<Data>.none,
             retryable: true,
@@ -91,16 +91,19 @@ actor SheafAPIClient {
         return response.models
     }
 
-    func sendMessage(chatID: String, text: String) async throws -> SendMessageResponse {
-        let selectedModel = await MainActor.run { ClientSettingsStore.shared.selectedModelName }
-        let payload = try encoder.encode(SendMessageRequest(message: text, model: selectedModel))
-        let idempotencyKey = UUID().uuidString
+    func enterChat(threadID: String, knownTailTurnID: String?) async throws -> EnterChatResponse {
+        let payload = try encoder.encode(
+            EnterChatRequest(
+                protocolVersion: ChatTransportClient.protocolVersion,
+                knownTailTurnID: knownTailTurnID
+            )
+        )
         return try await request(
-            path: "/chats/\(chatID)/messages",
+            path: "/threads/\(threadID)/enter-chat",
             method: "POST",
             body: payload,
-            retryable: true,
-            idempotencyKey: idempotencyKey
+            retryable: false,
+            idempotencyKey: nil
         )
     }
 
@@ -277,4 +280,253 @@ actor SheafAPIClient {
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXXXX"
         return formatter
     }()
+}
+import Foundation
+
+struct ChatTransportFrame {
+    let type: String
+    let payload: [String: Any]
+}
+
+enum ChatTransportEvent {
+    case handshakeBegin
+    case handshakeReady
+    case durableAck(queueID: Int, clientMessageID: String?)
+    case assistantToken(queueID: Int, chunk: String)
+    case committedTurn(CommittedTurn)
+    case finalized(queueID: Int, turnID: String)
+    case conflict(queueID: Int)
+    case heartbeat
+    case error(String)
+}
+
+actor ChatTransportClient {
+    static let protocolVersion = 1
+
+    private let api: SheafAPIClient
+    private let baseURL: URL
+    private let session: URLSession
+
+    private var socket: URLSessionWebSocketTask?
+    private var sessionID: String?
+    private var listenTask: Task<Void, Never>?
+    private var onEvent: ((ChatTransportEvent) async -> Void)?
+
+    init(api: SheafAPIClient = .shared, session: URLSession = .shared) {
+        self.api = api
+        self.session = session
+        let config = AppConfig.load()
+        self.baseURL = URL(string: config.apiBaseURL) ?? URL(string: "http://127.0.0.1:2731")!
+    }
+
+    func connect(
+        threadID: String,
+        knownTailTurnID: String?,
+        onEvent: @escaping (ChatTransportEvent) async -> Void
+    ) async throws {
+        self.onEvent = onEvent
+        let enter = try await api.enterChat(threadID: threadID, knownTailTurnID: knownTailTurnID)
+        sessionID = enter.sessionID
+        let wsURL = websocketURL(path: enter.websocketURL)
+
+        let task = session.webSocketTask(with: wsURL)
+        socket = task
+        task.resume()
+
+        listenTask?.cancel()
+        listenTask = Task {
+            await receiveLoop()
+        }
+    }
+
+    func reconnect(threadID: String, knownTailTurnID: String?) async throws {
+        await disconnect()
+        try await connect(threadID: threadID, knownTailTurnID: knownTailTurnID) { [weak self] event in
+            guard let self else { return }
+            await self.onEvent?(event)
+        }
+    }
+
+    func disconnect() {
+        listenTask?.cancel()
+        listenTask = nil
+        socket?.cancel(with: .normalClosure, reason: nil)
+        socket = nil
+        sessionID = nil
+    }
+
+    func submitMessage(
+        threadID: String,
+        text: String,
+        modelName: String,
+        inResponseToTurnID: String?,
+        clientMessageID: String
+    ) async throws {
+        guard let socket else {
+            throw SheafError.networkError("Not connected")
+        }
+        let payload: [String: Any?] = [
+            "protocol_version": Self.protocolVersion,
+            "type": "submit_message",
+            "thread_id": threadID,
+            "text": text,
+            "model_name": modelName,
+            "in_response_to_turn_id": inResponseToTurnID,
+            "client_message_id": clientMessageID,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload.compactMapValues { $0 }, options: [])
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw SheafError.badResponse
+        }
+        try await socket.send(.string(string))
+    }
+
+    private func websocketURL(path: String) -> URL {
+        if let absolute = URL(string: path), absolute.scheme?.hasPrefix("ws") == true {
+            return absolute
+        }
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        components?.scheme = baseURL.scheme == "https" ? "wss" : "ws"
+        components?.path = path
+        return components?.url ?? URL(string: "ws://127.0.0.1:2731\(path)")!
+    }
+
+    private func receiveLoop() async {
+        while !Task.isCancelled {
+            guard let socket else { return }
+            do {
+                let message = try await socket.receive()
+                let raw: Data
+                switch message {
+                case .string(let text):
+                    raw = Data(text.utf8)
+                case .data(let data):
+                    raw = data
+                @unknown default:
+                    continue
+                }
+                guard let obj = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
+                      let type = obj["type"] as? String else {
+                    await onEvent?(.error("Malformed websocket frame"))
+                    continue
+                }
+                await handleFrame(type: type, payload: obj)
+            } catch {
+                if Task.isCancelled { return }
+                await onEvent?(.error(error.localizedDescription))
+                return
+            }
+        }
+    }
+
+    private func handleFrame(type: String, payload: [String: Any]) async {
+        var merged = payload
+        merged["type"] = type
+        guard let event = Self.decodeEvent(from: merged) else { return }
+        await onEvent?(event)
+    }
+
+    static func decodeEvent(from payload: [String: Any]) -> ChatTransportEvent? {
+        guard let type = payload["type"] as? String else {
+            return nil
+        }
+        switch type {
+        case "handshake_snapshot_begin":
+            return .handshakeBegin
+        case "handshake_ready":
+            return .handshakeReady
+        case "message_durable_ack":
+            return .durableAck(
+                queueID: payload["queue_id"] as? Int ?? -1,
+                clientMessageID: payload["client_message_id"] as? String
+            )
+        case "assistant_token":
+            return .assistantToken(
+                queueID: payload["queue_id"] as? Int ?? -1,
+                chunk: payload["chunk"] as? String ?? ""
+            )
+        case "committed_turn":
+            guard let turnObj = payload["turn"] as? [String: Any],
+                  let turn = decodeCommittedTurn(turnObj) else {
+                return nil
+            }
+            return .committedTurn(turn)
+        case "turn_finalized":
+            return .finalized(
+                queueID: payload["queue_id"] as? Int ?? -1,
+                turnID: payload["turn_id"] as? String ?? ""
+            )
+        case "execution_conflict":
+            return .conflict(queueID: payload["queue_id"] as? Int ?? -1)
+        case "heartbeat":
+            return .heartbeat
+        case "error":
+            return .error(payload["message"] as? String ?? "Unknown error")
+        default:
+            return nil
+        }
+    }
+
+    static func decodeCommittedTurn(_ value: [String: Any]) -> CommittedTurn? {
+        guard let id = value["id"] as? String,
+              let threadID = value["thread_id"] as? String,
+              let speaker = value["speaker"] as? String,
+              let messageText = value["message_text"] as? String else {
+            return nil
+        }
+
+        let toolCallsRaw = value["tool_calls"] as? [[String: Any]] ?? []
+        let toolCalls = toolCallsRaw.compactMap { raw -> ToolCallPayload? in
+            guard let id = raw["id"] as? String,
+                  let name = raw["name"] as? String,
+                  let result = raw["result"] as? String else {
+                return nil
+            }
+            let args = decodeJSONValueObject(raw["args"]) ?? [:]
+            let isError = raw["is_error"] as? Bool ?? false
+            return ToolCallPayload(id: id, name: name, args: args, result: result, isError: isError)
+        }
+
+        return CommittedTurn(
+            id: id,
+            threadID: threadID,
+            prevTurnID: value["prev_turn_id"] as? String,
+            speaker: speaker,
+            messageText: messageText,
+            modelName: value["model_name"] as? String,
+            createdAt: value["created_at"] as? String,
+            toolCalls: toolCalls
+        )
+    }
+
+    static func decodeJSONValueObject(_ value: Any?) -> [String: JSONValue]? {
+        guard let object = value as? [String: Any] else { return nil }
+        var out: [String: JSONValue] = [:]
+        for (key, raw) in object {
+            out[key] = decodeJSONValue(raw)
+        }
+        return out
+    }
+
+    static func decodeJSONValue(_ value: Any) -> JSONValue {
+        switch value {
+        case let string as String:
+            return .string(string)
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return .bool(number.boolValue)
+            }
+            return .number(number.doubleValue)
+        case let dict as [String: Any]:
+            var mapped: [String: JSONValue] = [:]
+            for (key, raw) in dict {
+                mapped[key] = decodeJSONValue(raw)
+            }
+            return .object(mapped)
+        case let array as [Any]:
+            return .array(array.map { decodeJSONValue($0) })
+        default:
+            return .null
+        }
+    }
 }

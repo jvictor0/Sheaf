@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from sheaf.llm.dispatcher import OpenAIDispatcher
 from sheaf.tools import build_agent_tools
 from sheaf.tools.sqlite_query import (
     create_sqlite_database_tool,
@@ -28,6 +29,7 @@ def _parse_result(text: str) -> dict[str, str]:
 def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data_dir = tmp_path / "data"
     monkeypatch.setattr(sqlite_query, "DATA_DIR", data_dir)
+    monkeypatch.setattr(sqlite_query, "USER_DBS_DIR", data_dir / "user_dbs")
     return data_dir
 
 
@@ -37,7 +39,7 @@ def test_run_sql_creates_database_file(isolated_data_dir: Path) -> None:
     )
     parsed = _parse_result(result)
     assert parsed["mode"] == "statement"
-    assert (isolated_data_dir / "sqlite" / "things_db.sqlite3").exists()
+    assert (isolated_data_dir / "user_dbs" / "things_db.sqlite3").exists()
 
 
 def test_run_sql_select_returns_columns_and_rows(isolated_data_dir: Path) -> None:
@@ -129,7 +131,7 @@ def test_create_sqlite_database_tool_creates_named_db_under_sqlite_dir(isolated_
     assert result["mode"] == "create_database"
     assert result["database_name"] == "named_db"
     assert result["created"] == "true"
-    assert (isolated_data_dir / "sqlite" / "named_db.sqlite3").exists()
+    assert (isolated_data_dir / "user_dbs" / "named_db.sqlite3").exists()
 
 
 def test_create_sqlite_database_removes_legacy_generic_db(isolated_data_dir: Path) -> None:
@@ -158,3 +160,28 @@ def test_run_sql_is_registered_in_tool_registry() -> None:
     assert "run_sql" in names
     assert "create_sqlite_database" in names
     assert "list_sqlite_databases" in names
+
+
+def test_registered_tools_expose_description_and_parameters_schema() -> None:
+    tools = build_agent_tools()
+    assert tools
+    for item in tools:
+        assert isinstance(item.description, str)
+        assert item.description.strip()
+        assert isinstance(item.parameters_schema, dict)
+        assert item.parameters_schema.get("type") == "object"
+        assert isinstance(item.parameters_schema.get("properties"), dict)
+
+
+def test_openai_tool_definitions_are_derived_from_tool_metadata() -> None:
+    dispatcher = OpenAIDispatcher(api_key="test-key", model="gpt-5-mini")
+    definitions = dispatcher._openai_tool_definitions()
+    by_name = {item["function"]["name"]: item for item in definitions}
+
+    assert "write_note" in by_name
+    write_tool = by_name["write_note"]["function"]
+    assert "Write UTF-8 text to a path allowed by visible_directories policy." in write_tool["description"]
+    assert write_tool["parameters"]["properties"]["relative_path"]["type"] == "string"
+    assert write_tool["parameters"]["properties"]["content"]["type"] == "string"
+    assert write_tool["parameters"]["properties"]["overwrite"]["type"] == "boolean"
+    assert write_tool["parameters"]["required"] == ["relative_path", "content"]

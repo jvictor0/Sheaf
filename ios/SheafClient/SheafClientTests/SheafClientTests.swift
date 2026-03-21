@@ -287,4 +287,103 @@ struct SheafClientTests {
 
         #expect(store.selectedModelName == "gpt-5.2")
     }
+
+    @Test func websocketFrameDecodeDurableAck() {
+        let payload: [String: Any] = [
+            "type": "message_durable_ack",
+            "queue_id": 42,
+            "client_message_id": "cm-1",
+        ]
+        let event = ChatTransportClient.decodeEvent(from: payload)
+        guard case .durableAck(let queueID, let clientMessageID) = event else {
+            Issue.record("Expected durableAck event")
+            return
+        }
+        #expect(queueID == 42)
+        #expect(clientMessageID == "cm-1")
+    }
+
+    @Test func websocketFrameDecodeAssistantToken() {
+        let payload: [String: Any] = [
+            "type": "assistant_token",
+            "queue_id": 7,
+            "chunk": "hel",
+        ]
+        let event = ChatTransportClient.decodeEvent(from: payload)
+        guard case .assistantToken(let queueID, let chunk) = event else {
+            Issue.record("Expected assistantToken event")
+            return
+        }
+        #expect(queueID == 7)
+        #expect(chunk == "hel")
+    }
+
+    @Test func websocketFrameDecodeCommittedTurn() {
+        let payload: [String: Any] = [
+            "type": "committed_turn",
+            "turn": [
+                "id": "t-1",
+                "thread_id": "th-1",
+                "prev_turn_id": "t-0",
+                "speaker": "assistant",
+                "message_text": "hello",
+                "model_name": "gpt-5-mini",
+                "created_at": "2026-03-19T00:00:00Z",
+                "tool_calls": [
+                    [
+                        "id": "call-1",
+                        "name": "read_note",
+                        "args": ["relative_path": "a.txt"],
+                        "result": "ok",
+                        "is_error": false,
+                    ]
+                ]
+            ],
+        ]
+        let event = ChatTransportClient.decodeEvent(from: payload)
+        guard case .committedTurn(let turn) = event else {
+            Issue.record("Expected committedTurn event")
+            return
+        }
+        #expect(turn.id == "t-1")
+        #expect(turn.threadID == "th-1")
+        #expect(turn.toolCalls.count == 1)
+        #expect(turn.toolCalls[0].name == "read_note")
+        #expect(turn.toolCalls[0].args["relative_path"]?.stringValue == "a.txt")
+    }
+
+    @Test func websocketFrameDecodeHeartbeat() {
+        let payload: [String: Any] = ["type": "heartbeat"]
+        let event = ChatTransportClient.decodeEvent(from: payload)
+        guard case .heartbeat = event else {
+            Issue.record("Expected heartbeat event")
+            return
+        }
+    }
+
+    @Test func websocketFrameDecodeRejectsMalformedCommittedTurn() {
+        let payload: [String: Any] = [
+            "type": "committed_turn",
+            "turn": ["id": "missing-fields"],
+        ]
+        let event = ChatTransportClient.decodeEvent(from: payload)
+        #expect(event == nil)
+    }
+
+    @Test func chatSummaryDecodesThreadName() throws {
+        let json = """
+        {
+          "thread_id": "abc123",
+          "name": "My Thread",
+          "created_at": "2026-03-19T00:00:00Z",
+          "updated_at": "2026-03-19T00:00:00Z"
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let summary = try decoder.decode(ChatSummary.self, from: json)
+        #expect(summary.chatID == "abc123")
+        #expect(summary.name == "My Thread")
+    }
 }

@@ -1,95 +1,40 @@
-# Sheaf Product and Technical Spec
+# Sheaf Spec (Rewrite)
 
-## 1. Agent identity
+## Thread and Turn Ledger
 
-- Name: `sheaf`
-- Pronouns: they/them
-- Runtime model: server-based conversational agent
+- Threads are stored in `threads`
+- Messages are stored as immutable `turns`
+- Thread consistency uses CAS on `threads.tail_turn_id`
 
-## 2. Core API requirements
+## Queue Execution
 
-The server exposes these APIs:
+1. Client submits websocket message
+2. Server persists queue row and sends durable ack
+3. Worker claims runnable row
+4. Worker executes model call and streams tokens/events
+   - Deterministic pre-LLM compaction runs when estimated context exceeds model trigger ratio
+   - Worker emits `turn_event` with `event=context_compaction` when compaction occurs
+5. Worker commits user+assistant turns atomically
+6. Queue row deleted on success
 
-1. `POST /chats`
-- Purpose: create a new chat session
-- Result: returns a unique `chat_id`
-- Persistence note: chat directories are created lazily on first message
+## Failure Model
 
-2. `POST /chats/{chat_id}/messages`
-- Purpose: continue an existing conversation by sending the next message
-- Input: user message payload
-- Result: returns assistant response and metadata (`chat_id`, `checkpoint_id`, `tool_calls`)
+- Non-fatal execution failures retry forever with exponential backoff capped at 10 seconds
+- Fatal execution failures are moved to `queue_errors`
+- Mid-stream disconnects rely on reconnect and ledger replay
 
-3. `GET /chats`
-- Purpose: list existing chats
-- Result: collection of chat descriptors (`chat_id`, created/updated timestamps)
+## Stream Delivery
 
-4. `GET /chats/{chat_id}/metadata`
-- Purpose: fetch chat metadata for UI/session restore
-- Result: metadata including `message_count` and `latest_checkpoint_id`
+- Stream output is best-effort
+- Ledger commit determines truth
+- Reconnect provisioning restores canonical state
 
-5. `GET /chats/{chat_id}/messages?start=<int>&end=<int>`
-- Purpose: fetch a bounded message slice
-- Result: ordered message list with zero-based indices (`start` inclusive, `end` exclusive), including per-assistant `tool_calls`
+## Context Compaction
 
-## 3. Conversation and context model
-
-- Context is scoped per chat.
-- No context sharing across different chats.
-- Each chat persists its own transcript and metadata.
-- Checkpoints are stored under each chat directory.
-- Messages are indexed per chat as zero-based positions in the transcript.
-- LangGraph manages runtime state checkpoints (SQLite checkpointer per chat thread).
-- Runtime state supports context compaction via rolling summary fields when token budget is high.
-
-## 4. LLM dispatch architecture
-
-- LLM calls are isolated behind an abstract dispatcher interface.
-- Non-LLM modules do not call provider SDKs directly.
-- Current concrete provider: OpenAI `gpt-4.1-mini`.
-- Design supports future provider/model swaps without changing API handlers.
-
-## 5. Secrets and provider configuration
-
-- Configuration is read from `sheaf_server.config` only.
-- Secrets are read from the configured `secrets_file` path (default `.secrets.json`, gitignored).
-- `.secrets.example.json` documents multi-provider shape.
-- `.secrets.json` must never be committed.
-
-## 6. Filesystem tool capabilities (planned, restricted)
-
-The agent will have constrained access to an allowlisted set of directories.
-
-Current implementation:
-- Write or overwrite files inside `tome_dir/**` via `write_note` tool
-- List directories/files inside `tome_dir/**` via `list_notes` tool
-- Read files (full or line-range) inside `tome_dir/**` via `read_note` tool
-- List named SQLite databases in `<data_dir>/sqlite/` via `list_sqlite_databases`
-- Create named SQLite databases in `<data_dir>/sqlite/` via `create_sqlite_database`
-- Execute arbitrary SQL against named DB files in `<data_dir>/sqlite/` via `run_sql`
-
-Planned next actions:
-- Expand allowlist beyond `tome_dir`
-
-Guardrails:
-- Deny access outside allowlist
-- Validate and normalize paths before access
-- Emit clear errors for unauthorized paths or invalid ranges
-
-## 7. Storage layout
-
-- Runtime data directory: `data/` (tracked, contents ignored)
-- Per chat:
-  - `data/chats/<chat_id>/chat.json`
-  - `data/chats/<chat_id>/checkpoints/langgraph.sqlite`
-- Agent SQL database:
-  - Named files under `data/sqlite/` (or `<data_dir>/sqlite/` when `data_dir` is configured)
-
-## 8. Interface
-
-- Primary interface: HTTP server APIs
-- Secondary interface: simple Python CLI loop that creates/selects chat and sends messages
-
-## 9. Delivery approach
-
-Implementation proceeds in phased increments (see `docs/EXECUTION_PLAN.md`).
+- Context usage is estimated deterministically from message content length
+- Per-model compaction limits are sourced from `ModelProperties` and config tuning
+- If usage exceeds trigger threshold:
+  - Older messages are collapsed into one deterministic summary system message
+  - Recent messages are retained based on `recent_messages_to_keep`
+  - Summary may be trimmed to reach compaction target ratio
+- On commit, a `turn_events` row with `event_type=context_compaction` is persisted for auditability

@@ -1,306 +1,105 @@
 # sheaf
 
-`sheaf` is a Python server-hosted conversational agent using they/them pronouns.
+Sheaf is a local-first chat server with a queue-backed worker, websocket streaming, and a turn-ledger database.
 
-## Current architecture
+## Current Architecture
 
-- FastAPI web server
-- Chat state persisted on disk per chat
-- Checkpoint snapshots stored under each chat directory
-- LLM dispatch isolated behind an abstract interface
-- LLM path now defaults to a LangChain chat chain (OpenAI model backend)
-- Runtime conversation state/checkpoints are now managed by LangGraph (SQLite checkpointer)
-- Runtime pre-assistant compaction uses model-specific limits (`ModelProperties`)
-- Tool calling is enabled for controlled note writes under the configured tome directory
+- FastAPI API + websocket transport
+- SQLite ledger for threads, turns, queue, request logs, events, and errors
+- Single background worker loop (no worker concurrency)
+- Exponential retry with no max attempts for non-fatal failures
+- Fatal queue failures moved to `queue_errors`
+- Client reconnect model: ledger is source of truth
 
-## API
+## Core APIs
 
-- `POST /chats` allocates a new `chat_id` (chat directory is created lazily on first message)
-- `GET /chats` lists chats from disk
-- `GET /chats/{chat_id}/metadata` returns per-chat metadata and message count
-- `GET /chats/{chat_id}/messages?start=<int>&end=<int>` returns a message slice (start inclusive, end exclusive)
-  - each assistant message includes `tool_calls` (possibly empty)
-- `POST /chats/{chat_id}/messages` appends user message, calls LLM, stores a new checkpoint, and returns:
-  - `chat_id`
-  - `response`
-  - `checkpoint_id`
-  - `tool_calls` (list of executed tool calls: `id`, `name`, `args`, `result`, `is_error`)
-- `POST /admin/reboot` requests a supervisor reboot of both API + Chainlit (dev use)
+- `GET /health`
+- `GET /models`
+- `POST /models/updateLocalModelList`
+- `POST /threads`
+- `GET /threads`
+- `POST /threads/{thread_id}/archive`
+- `POST /threads/{thread_id}/unarchive`
+- `POST /threads/{thread_id}/enter-chat`
+- `WS /ws/chat/{session_id}`
 
-## Secrets (required)
+## Websocket Protocol
 
-Create a local secrets file from the example:
+All frames include:
 
-```bash
-cp .secrets.example.json .secrets.json
-```
+- `protocol_version`
+- `type`
+- `session_id`
+- `server_time`
 
-Then set your OpenAI key in `.secrets.json`:
+Client -> server:
 
-```json
-{
-  "openai": {
-    "api_key": "YOUR_KEY_HERE"
-  }
-}
-```
+- `submit_message`
 
-Notes:
-- `.secrets.json` is gitignored and must never be committed.
-- API keys are loaded from the `secrets_file` configured in `sheaf_server.config`.
+Server -> client:
 
-## Setup
+- `handshake_snapshot_begin`
+- `committed_turn`
+- `message_durable_ack`
+- `assistant_token`
+- `turn_event`
+- `context_budget`
+- `heartbeat`
+- `turn_finalized`
+- `execution_conflict`
+- `error`
+
+## Worker and Queue Semantics
+
+- Worker claims one runnable queue row at a time (`locked_by/locked_at`)
+- Non-fatal errors:
+  - `attempts += 1`
+  - exponential backoff
+  - capped at 10 seconds
+  - retried indefinitely
+- Fatal errors:
+  - moved to `queue_errors`
+  - removed from live queue
+
+## Data Layout
+
+- `data/server.sqlite3` primary server DB
+- `data/user_dbs/` user SQLite databases
+- `data/system_prompts/` prompt files
+- `data_archive/` archived legacy data snapshots
+
+## Agent Tool Calls
+
+Tools are agent-internal and not exposed via public server endpoints.
+
+Current agent tools:
+
+- `write_note`
+- `list_notes`
+- `read_note`
+- `list_sqlite_databases`
+- `create_sqlite_database`
+- `run_sql`
+
+When the model emits function/tool calls, the dispatcher executes these tools
+and feeds tool results back into the model loop before final assistant output.
+
+## Local Setup
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install fastapi uvicorn pydantic openai
+.venv/bin/python -m pip install -e .[dev]
 ```
 
-LangChain dependencies:
-
-```bash
-.venv/bin/pip install langchain langchain-openai
-```
-
-LangGraph dependencies:
-
-```bash
-.venv/bin/pip install langgraph langgraph-checkpoint-sqlite
-```
-
-## Run server
+Run server:
 
 ```bash
 .venv/bin/python run_server.py
 ```
 
-`run_server.py` reads runtime settings from `sheaf_server.config` under `server`:
-- `server.host`
-- `server.api_port`
-- `server.chainlit_port`
-It also supports:
-- `data_dir` (default: `data`)
-- `secrets_file` (default: `.secrets.json`)
-- `tome_dir` (default: `data/notes`; supports `~` expansion, e.g. `"~/AgentData/Sheaf"`)
-  - if `<tome_dir>/system_prompt.md` exists and is non-empty, it is used as the runtime system prompt
-  - if missing, unreadable, or empty, sheaf uses the built-in default system prompt
-- `llm.provider` (currently `openai`)
-- `llm.openai_model` (default: `gpt-4.1-mini`)
-- `llm.model_limits` and `llm.compaction` tuning blocks
-
-Example:
-
-```json
-{
-  "server": {
-    "host": "127.0.0.1",
-    "api_port": 2731,
-    "chainlit_port": 2732
-  }
-}
-```
-
-This starts both using those configured values:
-- API server on `http://<server.host>:<server.api_port>`
-- Chainlit UI on `http://<server.host>:<server.chainlit_port>`
-
-Development reboot:
-- Call `POST http://<server.host>:<server.api_port>/admin/reboot` to restart both processes.
-- The request works when launched via `run_server.py` (it provides the supervisor trigger path).
-
-To also start the Zulip bot from `run_server.py`, set `"zulip_enabled": true` in `sheaf_server.config`.
-
-Server runtime config policy:
-- Use the config file only.
-- Do not use environment variables to set server host/ports.
-
-## Run CLI loop
+Run tests:
 
 ```bash
-.venv/bin/python cli/chat_loop.py
+PYTHONPATH=src .venv/bin/python -m pytest -q
 ```
-
-Default target: `http://127.0.0.1:2731`
-
-CLI commands:
-- `/new` create and switch to a new chat
-- `/list` list existing chats
-- `/use <chat_id>` switch active chat
-- `/quit` exit the loop
-
-## Run Chainlit UI
-
-Install Chainlit in your venv:
-
-```bash
-.venv/bin/pip install chainlit
-```
-
-Start web UI:
-
-```bash
-.venv/bin/chainlit run chainlit_app.py -w --port 2732
-```
-
-Then open the local URL shown by Chainlit (or `http://<server.host>:<server.chainlit_port>`).
-
-## Run Zulip poll bot
-
-Script: `scripts/zulip_poll_bot.py`
-
-Purpose:
-- Use Zulip event queues (`/register` + `/events`) for long-poll message delivery
-- Send each message content to Sheaf (`POST /chats/{chat_id}/messages`)
-- Post Sheaf response back to Zulip
-- Persist progress and per-message processing status in SQLite
-
-Install/setup:
-
-```bash
-.venv/bin/pip install -e .
-cp sheaf_server.config.example sheaf_server.config
-```
-
-Config file:
-- Default path: `sheaf_server.config`
-- Example template: `sheaf_server.config.example`
-- Required keys:
-  - `zulip_enabled` (`true` = Zulip enabled / auto-start with `run_server.py`)
-  - `zulip_site`
-  - `zulip_bot_email`
-  - `zulip_bot_api_key`
-- Required for `run_server.py` network binding:
-  - `server.host`
-  - `server.api_port`
-  - `server.chainlit_port`
-- Optional keys:
-  - `sheaf_api_base_url` (default: `http://127.0.0.1:2731`)
-  - `sheaf_chat_id` (optional fixed chat override)
-  - if `sheaf_chat_id` is empty, chat IDs are derived from Zulip context:
-  - streams: `zulip-stream-<stream_id>-<stream-name-slug>`
-  - DMs: `zulip-dm-<recipient_id>`
-  - `state_db_path` (default: `data/zulip_bot_state.sqlite3`)
-  - `poll_seconds` (default: `2.0`, retry/backoff delay after failures)
-  - `batch_size` (default: `100`)
-  - `narrow` (JSON list, default: mention-only)
-  - `process_backlog_on_first_run` (default: `false`)
-  - `false`: first run starts from newest message
-  - `true`: first run starts from oldest available messages
-
-Run:
-
-```bash
-.venv/bin/python scripts/zulip_poll_bot.py --config sheaf_server.config
-```
-
-Reliability behavior:
-- `last_message_id` checkpoint is persisted in SQLite.
-- `last_event_id` is tracked for current event queue progress.
-- Every message ID is tracked in `processed_messages` with status (`processing`, `done`, `failed`).
-- On failures, message remains retryable and `last_message_id` is not advanced past it.
-- Event queue expiration is handled by re-registering, then catching up from `last_message_id`.
-- Duplicate processing can still happen in crash windows, but messages are not lost.
-
-Chainlit UI behavior in this repo:
-- `Enter` sends message
-- `Shift+Enter` inserts newline
-- Left sidebar lists chats from the API and lets you click to switch chats
-  - Switching is handled server-side via Chainlit window messages (more reliable than simulated typing)
-- Sidebar includes a `Reboot` button that triggers `POST /admin/reboot`
-  - Reboot is one-click (no confirmation prompt)
-
-## Data layout
-
-Runtime chat/checkpoint data is written under `data/`:
-
-- `data/chats/<chat_id>/chat.json`
-- `data/chats/<chat_id>/checkpoints/langgraph.sqlite`
-
-Checkpoint content:
-- LangGraph stores state snapshots in SQLite for each chat `thread_id`.
-- State includes message history plus rolling compaction fields (for example `rolling_summary`).
-
-Tool I/O output:
-- Agent can call `write_note` to write files under the configured `tome_dir`.
-- Agent can call `list_notes` to list directories/files under the configured `tome_dir`.
-- Agent can call `read_note` to read whole files or line ranges under the configured `tome_dir`.
-- Agent can call `list_sqlite_databases` to discover named DB files in `data/sqlite/`.
-- Agent can call `create_sqlite_database` to create a named DB under `data/sqlite/`.
-- Agent can call `run_sql` to execute SQL against a named DB under `data/sqlite/`.
-- Paths escaping `tome_dir` are rejected.
-
-Message indexing model:
-- Messages are read from LangGraph state and exposed with a zero-based `index`.
-- Index `0` is the first message in that chat transcript.
-- `latest_checkpoint_id` comes from the current LangGraph checkpoint for that `thread_id`.
-- Range API uses indices (`start` inclusive, `end` exclusive).
-
-Lazy chat creation behavior:
-- Empty chats are not persisted to `data/chats/` immediately.
-- A chat appears in `GET /chats` after its first message is sent and checkpointed.
-
-`data/` contents are gitignored.
-
-## iOS LaTeX rendering
-
-The iOS client renders math with MathJax SVG via a hidden WebKit worker:
-
-- Worker file: `ios/SheafClient/SheafClient/Resources/MathJax/mathjax-worker.html`
-- Swift render service: `ios/SheafClient/SheafClient/Services/MathJaxRenderService.swift`
-- Math view/layout: `ios/SheafClient/SheafClient/Views/MathFormulaView.swift`
-
-Recent fixes:
-- The JS bridge uses a synchronous `renderMath(...)` result object (not a Promise) so `evaluateJavaScript` can decode it reliably.
-- SVGs are rendered at intrinsic size (no forced `width: 100%`), reducing oversized/cropped glyphs.
-- Baseline/depth metadata is used to avoid clipping lower portions of inline glyphs.
-- Block math is horizontally scrollable in message bubbles.
-- Math cache keys are versioned (`MathCacheKey`) so layout/render metric changes invalidate stale cached assets.
-
-Supported math delimiters in chat text:
-- Inline: `$...$`, `\\(...\\)`
-- Block: `$$...$$`, `\\[...\\]`
-- Fenced code blocks with math languages: ```` ```math ```` / ```` ```latex ```` / ```` ```tex ````
-
-Note:
-- Expressions not wrapped in supported delimiters are treated as normal text.
-
-## Next steps
-
-- Tune compaction policy and add tests around summary quality/recall
-
-## Model properties and compaction tuning
-
-Model limits are resolved from `src/sheaf/llm/model_properties.py` and exposed by the dispatcher.
-
-Configuration-file tuning:
-- `llm.model_limits.context_window_tokens`
-- `llm.model_limits.max_output_tokens`
-- `llm.model_limits.reserved_output_tokens`
-- `llm.model_limits.safety_margin_tokens`
-- `llm.compaction.trigger_ratio`
-- `llm.compaction.target_ratio`
-- `llm.compaction.recent_messages_to_keep`
-
-## Tools
-
-Current tool support:
-- `write_note(relative_path, content, overwrite=True)`
-  - Writes UTF-8 text under the configured `tome_dir`.
-  - Creates parent directories as needed.
-  - Rejects paths outside `tome_dir`.
-- `list_notes(relative_dir=".", recursive=False)`
-  - Lists entries under `tome_dir` (optionally recursive).
-- `read_note(relative_path, start_line=0, end_line=0)`
-  - Reads UTF-8 file content under `tome_dir`.
-  - Supports 1-based line range reads (`start_line` inclusive, `end_line` exclusive).
-- `create_sqlite_database(database_name)`
-  - Creates a named SQLite database in `<data_dir>/sqlite/`.
-  - Names are normalized to `<name>.sqlite3` when no extension is provided.
-- `list_sqlite_databases()`
-  - Lists available `.sqlite3` files under `<data_dir>/sqlite/`.
-  - Returns both normalized database names and filenames.
-- `run_sql(database_name, sql)`
-  - Executes SQL against `<data_dir>/sqlite/<database_name>.sqlite3` (or exact provided filename if it includes an extension).
-  - Supports DDL/DML/SELECT and multi-statement scripts.
-  - Uses `execute` for single statements and falls back to `executescript` for multi-statement SQL.

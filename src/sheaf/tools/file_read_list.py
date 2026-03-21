@@ -1,19 +1,16 @@
-"""Tools for listing directories and reading files under the configured tome directory."""
+"""Filesystem read/list tools constrained by visible_directories policy."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_core.tools import tool
-
-from sheaf.config.settings import TOME_DIR
-from sheaf.tools.file_write import resolve_note_path
+from sheaf.tools.simple_tool import tool
+from sheaf.tools.visibility import ensure_visible, resolve_input_path
 
 
-def _resolve_dir(relative_dir: str) -> Path:
-    path_text = relative_dir.strip()
-    root = TOME_DIR.resolve()
-    candidate = root if not path_text else resolve_note_path(path_text)
+def _resolve_dir(path_text: str) -> Path:
+    candidate = resolve_input_path(path_text, default_to_repo_root=True)
+    ensure_visible(candidate)
     if not candidate.exists():
         raise ValueError(f"Path does not exist: {candidate}")
     if not candidate.is_dir():
@@ -23,9 +20,9 @@ def _resolve_dir(relative_dir: str) -> Path:
 
 @tool("list_notes")
 def list_notes_tool(relative_dir: str = ".", recursive: bool = False) -> str:
-    """List entries under the configured tome directory.
+    """List entries under a visible directory path.
 
-    Set recursive=true to include files recursively from the selected subdirectory.
+    Set recursive=true to include entries recursively.
     """
 
     target = _resolve_dir("" if relative_dir == "." else relative_dir)
@@ -40,9 +37,9 @@ def list_notes_tool(relative_dir: str = ".", recursive: bool = False) -> str:
         return f"~/{rel_home.as_posix()}"
 
     if recursive:
-        entries = sorted(_display(p) for p in target.rglob("*"))
+        entries = sorted(_display(p) for p in target.rglob("*") if _is_visible_entry(p))
     else:
-        entries = sorted(_display(p) for p in target.iterdir())
+        entries = sorted(_display(p) for p in target.iterdir() if _is_visible_entry(p))
 
     if not entries:
         return f"No entries under {_display(target)}"
@@ -51,14 +48,15 @@ def list_notes_tool(relative_dir: str = ".", recursive: bool = False) -> str:
 
 @tool("read_note")
 def read_note_tool(relative_path: str, start_line: int = 0, end_line: int = 0) -> str:
-    """Read a UTF-8 file under the configured tome directory, optionally by line range.
+    """Read a visible UTF-8 file, optionally by line range.
 
     Line range semantics:
     - If start_line <= 0 and end_line <= 0: return whole file.
     - Otherwise, start_line is 1-based inclusive; end_line is 1-based exclusive.
     """
 
-    target = resolve_note_path(relative_path)
+    target = resolve_input_path(relative_path)
+    ensure_visible(target)
     if not target.exists():
         raise ValueError(f"File does not exist: {target}")
     if not target.is_file():
@@ -75,3 +73,11 @@ def read_note_tool(relative_path: str, start_line: int = 0, end_line: int = 0) -
     if end_idx < start_idx:
         raise ValueError("end_line must be greater than or equal to start_line")
     return "\n".join(lines[start_idx:end_idx])
+
+
+def _is_visible_entry(path: Path) -> bool:
+    try:
+        ensure_visible(path)
+        return True
+    except ValueError:
+        return False

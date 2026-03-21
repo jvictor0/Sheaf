@@ -7,12 +7,10 @@ import re
 import sqlite3
 from pathlib import Path
 
-from langchain_core.tools import tool
+from sheaf.config.settings import DATA_DIR, USER_DBS_DIR
+from sheaf.tools.simple_tool import tool
 
-from sheaf.config.settings import DATA_DIR
 
-
-DATABASE_SUBDIR = "sqlite"
 _VALID_DB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -21,10 +19,8 @@ def _legacy_database_path() -> Path:
 
 
 def _database_root() -> Path:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    root = DATA_DIR / DATABASE_SUBDIR
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    USER_DBS_DIR.mkdir(parents=True, exist_ok=True)
+    return USER_DBS_DIR
 
 
 def _remove_legacy_database_if_present() -> None:
@@ -50,13 +46,13 @@ def _database_path(database_name: str) -> Path:
     return _database_root() / f"{safe_name}{suffix}"
 
 
-def _is_multi_statement_error(exc: sqlite3.Error) -> bool:
+def _is_multi_statement_error(exc: Exception) -> bool:
     return "one statement at a time" in str(exc).lower()
 
 
 @tool("list_sqlite_databases")
 def list_sqlite_databases_tool() -> str:
-    """List available SQLite databases under the configured data/sqlite directory."""
+    """List available SQLite databases under the configured data/user_dbs directory."""
 
     _remove_legacy_database_if_present()
     root = _database_root()
@@ -79,7 +75,7 @@ def list_sqlite_databases_tool() -> str:
 
 @tool("create_sqlite_database")
 def create_sqlite_database_tool(database_name: str) -> str:
-    """Create a named SQLite database file under the configured data/sqlite directory."""
+    """Create a named SQLite database file under the configured data/user_dbs directory."""
 
     _remove_legacy_database_if_present()
     db_path = _database_path(database_name)
@@ -122,7 +118,7 @@ def run_sql_tool(database_name: str, sql: str) -> str:
         cursor = conn.cursor()
         try:
             cursor.execute(sql_text)
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, sqlite3.Warning) as exc:
             if _is_multi_statement_error(exc):
                 conn.executescript(sql_text)
                 conn.commit()

@@ -19,6 +19,7 @@ Documents:
 - `09_tooling_surface.md`
 - `10_rest_api_catalog.md`
 - `11_operational_decisions.md`
+- `impl_notes.md`
 
 Assumptions currently encoded in schema:
 - UUID values are stored as `TEXT` in SQLite.

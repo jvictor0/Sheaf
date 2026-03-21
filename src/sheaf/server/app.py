@@ -1,30 +1,35 @@
-"""FastAPI app entrypoint for sheaf server."""
+"""FastAPI app entrypoint for rewritten sheaf server."""
 
 from __future__ import annotations
 
-import re
-import threading
-import time
-import uuid
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from sheaf.llm.model_registry import ModelDescriptor, get_model_registry
-from sheaf.storage.checkpoints import (
-    create_chat,
-    get_chat_metadata,
-    get_message_range,
-    list_chats,
-    run_chat_turn,
+from sheaf.server.runtime import (
+    HEARTBEAT_SECONDS,
+    PROTOCOL_VERSION,
+    ProtocolError,
+    runtime,
 )
-from sheaf.config.settings import REBOOT_REQUEST_FILE, configured_default_model
+from sheaf.config.settings import load_server_config
 
-app = FastAPI(title="sheaf", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    runtime.initialize()
+    await runtime.start_worker()
+    try:
+        yield
+    finally:
+        await runtime.stop_worker()
+
+
+app = FastAPI(title="sheaf", version="0.2.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,84 +43,26 @@ app.add_middleware(
 )
 
 
-class ChatMessageRequest(BaseModel):
-    message: str
-    model: Optional[str] = None
-
-
-class CreateChatRequest(BaseModel):
+class CreateThreadRequest(BaseModel):
     name: Optional[str] = None
+    thread_id: Optional[str] = None
+    prev_thread_id: Optional[str] = None
+    start_turn_id: Optional[str] = None
 
 
-class ToolCallResponse(BaseModel):
-    id: str
-    name: str
-    args: dict[str, object]
-    result: str
-    is_error: bool
+class EnterChatRequest(BaseModel):
+    protocol_version: int
+    known_tail_turn_id: Optional[str] = None
 
 
-class ChatMessageResponse(BaseModel):
-    chat_id: str
-    response: str
-    checkpoint_id: str
-    tool_calls: list[ToolCallResponse]
+class EnterChatResponse(BaseModel):
+    session_id: str
+    websocket_url: str
+    accepted_protocol_version: int
 
 
-class ModelResponse(BaseModel):
-    name: str
-    provider: str
-    source: str
-    metadata: dict[str, object]
-    is_default: bool = False
-
-
-class ModelListResponse(BaseModel):
-    models: list[ModelResponse]
-
-
-CHAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-IDEMPOTENCY_TTL_SECONDS = 30 * 60
-_idempotency_lock = threading.Lock()
-_idempotent_responses: dict[tuple[str, str, str], tuple[float, ChatMessageResponse]] = {}
-_model_registry = get_model_registry()
-
-
-def _validate_chat_id(chat_id: str) -> None:
-    # Backward compatible: UUIDs are valid.
-    try:
-        uuid.UUID(chat_id)
-        return
-    except ValueError:
-        pass
-
-    # Allow readable IDs for integrations (for example Zulip stream-scoped chats).
-    if CHAT_ID_PATTERN.match(chat_id):
-        return
-
-    raise HTTPException(status_code=400, detail=f"Invalid chat_id: {chat_id}")
-
-
-def _prune_idempotency_cache(now: float) -> None:
-    stale_keys = [
-        key for key, (timestamp, _) in _idempotent_responses.items()
-        if now - timestamp > IDEMPOTENCY_TTL_SECONDS
-    ]
-    for key in stale_keys:
-        _idempotent_responses.pop(key, None)
-
-
-def _resolve_requested_model(requested_model: Optional[str]) -> ModelDescriptor:
-    resolved = (requested_model or "").strip()
-    if not resolved:
-        resolved = configured_default_model()
-
-    descriptor = _model_registry.resolve_model(resolved, allow_refresh=True)
-    if descriptor is not None:
-        return descriptor
-
-    allowed = ", ".join(model.name for model in _model_registry.list_models())
-    raise HTTPException(status_code=400, detail=f"Unsupported model '{resolved}'. Allowed models: {allowed}")
+class ArchiveResponse(BaseModel):
+    status: str
 
 
 @app.get("/health")
@@ -123,125 +70,162 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/models", response_model=ModelListResponse)
-def list_models_endpoint() -> ModelListResponse:
-    models = [ModelResponse(**item.as_dict()) for item in _model_registry.list_models()]
-    return ModelListResponse(models=models)
+@app.get("/models")
+def list_models_endpoint() -> dict[str, object]:
+    return {"models": runtime.list_models()}
 
 
+@app.post("/models/updateLocalModelList")
+def update_local_model_list() -> dict[str, object]:
+    models = runtime.refresh_local_models()
+    return {"count": len(models), "models": models}
 
-@app.post("/chats")
-def create_chat_endpoint(payload: Optional[CreateChatRequest] = None) -> dict[str, str]:
-    requested_name = (payload.name if payload else None) or ""
-    requested_name = requested_name.strip()
-    if not requested_name:
-        return {"chat_id": create_chat()}
 
-    _validate_chat_id(requested_name)
+@app.post("/threads")
+def create_thread_endpoint(payload: Optional[CreateThreadRequest] = None) -> dict[str, str]:
+    args = payload or CreateThreadRequest()
     try:
-        chat_id = create_chat(chat_id=requested_name, eager=True)
-    except FileExistsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    return {"chat_id": chat_id}
-
-
-@app.get("/chats")
-def list_chats_endpoint() -> dict[str, list[dict[str, str]]]:
-    return {"chats": list_chats()}
-
-
-@app.get("/chats/{chat_id}/metadata")
-def chat_metadata_endpoint(chat_id: str) -> dict[str, object]:
-    _validate_chat_id(chat_id)
-    try:
-        return get_chat_metadata(chat_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/chats/{chat_id}/messages")
-def chat_messages_range_endpoint(chat_id: str, start: int = 0, end: int = 20) -> dict[str, object]:
-    _validate_chat_id(chat_id)
-    if start < 0 or end < 0:
-        raise HTTPException(status_code=400, detail="start and end must be non-negative")
-    if end < start:
-        raise HTTPException(status_code=400, detail="end must be >= start")
-    try:
-        return get_message_range(chat_id, start=start, end=end)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/admin/reboot")
-def reboot_services_endpoint() -> dict[str, str]:
-    path = REBOOT_REQUEST_FILE
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to request reboot: {exc}") from exc
-
-    return {"status": "reboot_requested"}
-
-
-@app.post("/chats/{chat_id}/messages", response_model=ChatMessageResponse)
-def chat(chat_id: str, payload: ChatMessageRequest, request: Request) -> ChatMessageResponse:
-    _validate_chat_id(chat_id)
-    requested_model = _resolve_requested_model(payload.model)
-    idempotency_key = request.headers.get("x-idempotency-key")
-    cache_key = (chat_id, requested_model.name, idempotency_key) if idempotency_key else None
-    now = time.time()
-
-    if cache_key:
-        with _idempotency_lock:
-            _prune_idempotency_cache(now)
-            cached = _idempotent_responses.get(cache_key)
-            if cached is not None:
-                return cached[1]
-
-    try:
-        assistant_text, checkpoint_id, tool_calls = run_chat_turn(
-            chat_id,
-            payload.message,
-            model=requested_model.name,
+        thread_id = runtime.create_thread(
+            thread_id=args.thread_id,
+            name=args.name,
+            prev_thread_id=args.prev_thread_id,
+            start_turn_id=args.start_turn_id,
         )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"thread_id": thread_id}
 
-    response = ChatMessageResponse(
-        chat_id=chat_id,
-        response=assistant_text,
-        checkpoint_id=checkpoint_id,
-        tool_calls=tool_calls,
+
+@app.get("/threads")
+def list_threads_endpoint() -> dict[str, object]:
+    return {"threads": runtime.list_threads()}
+
+
+@app.post("/threads/{thread_id}/archive", response_model=ArchiveResponse)
+def archive_thread_endpoint(thread_id: str) -> ArchiveResponse:
+    runtime.archive_thread(thread_id, archived=True)
+    return ArchiveResponse(status="archived")
+
+
+@app.post("/threads/{thread_id}/unarchive", response_model=ArchiveResponse)
+def unarchive_thread_endpoint(thread_id: str) -> ArchiveResponse:
+    runtime.archive_thread(thread_id, archived=False)
+    return ArchiveResponse(status="unarchived")
+
+
+@app.post("/threads/{thread_id}/enter-chat", response_model=EnterChatResponse)
+def enter_chat(thread_id: str, payload: EnterChatRequest) -> EnterChatResponse:
+    if payload.protocol_version != PROTOCOL_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Unsupported protocol_version={payload.protocol_version}; expected {PROTOCOL_VERSION}",
+        )
+    session = runtime.create_session(thread_id, payload.known_tail_turn_id)
+    return EnterChatResponse(
+        session_id=session.session_id,
+        websocket_url=f"/ws/chat/{session.session_id}",
+        accepted_protocol_version=PROTOCOL_VERSION,
     )
-    if cache_key:
-        with _idempotency_lock:
-            _prune_idempotency_cache(now)
-            _idempotent_responses[cache_key] = (now, response)
 
-    return response
+
+async def _heartbeat_task(websocket: WebSocket, session_id: str) -> None:
+    while True:
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+        await runtime.send_frame(websocket, session_id, "heartbeat", {"interval_seconds": HEARTBEAT_SECONDS})
+
+
+@app.websocket("/ws/chat/{session_id}")
+async def chat_ws(websocket: WebSocket, session_id: str) -> None:
+    await websocket.accept()
+    try:
+        session = runtime.attach_websocket(session_id, websocket)
+    except ProtocolError:
+        await runtime.send_frame(
+            websocket,
+            session_id,
+            "error",
+            {"message": "Unknown session. Call enter-chat first."},
+        )
+        await websocket.close(code=1008)
+        return
+
+    heartbeat = asyncio.create_task(_heartbeat_task(websocket, session_id))
+    try:
+        await runtime.stream_handshake(session, websocket)
+        while True:
+            message = await websocket.receive_json()
+            frame_type = str(message.get("type", ""))
+            if frame_type != "submit_message":
+                await runtime.send_frame(
+                    websocket,
+                    session_id,
+                    "error",
+                    {"message": f"Unsupported frame type '{frame_type}'"},
+                )
+                continue
+
+            protocol_version = int(message.get("protocol_version", 0))
+            if protocol_version != PROTOCOL_VERSION:
+                await runtime.send_frame(
+                    websocket,
+                    session_id,
+                    "error",
+                    {"message": f"protocol_version mismatch; expected {PROTOCOL_VERSION}"},
+                )
+                continue
+
+            try:
+                queue_id = runtime.enqueue_message(
+                    thread_id=str(message.get("thread_id", session.thread_id)),
+                    text=str(message.get("text", "")).strip(),
+                    model_name=str(message.get("model_name", "")).strip(),
+                    in_response_to_turn_id=message.get("in_response_to_turn_id"),
+                    client_message_id=message.get("client_message_id"),
+                    session_id=session.session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await runtime.send_frame(
+                    websocket,
+                    session_id,
+                    "error",
+                    {"message": str(exc)},
+                )
+                continue
+
+            await runtime.send_frame(
+                websocket,
+                session_id,
+                "message_durable_ack",
+                {
+                    "queue_id": queue_id,
+                    "client_message_id": message.get("client_message_id"),
+                },
+            )
+    except WebSocketDisconnect:
+        return
+    finally:
+        heartbeat.cancel()
+        runtime.detach_websocket(session_id)
 
 
 def main() -> None:
     import uvicorn
 
-    config_path = Path(__file__).resolve().parents[3] / "sheaf_server.config"
+    config = load_server_config()
+    host = "127.0.0.1"
     port = 2731
-    if config_path.exists():
-        try:
-            import json
-
-            raw = json.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                server = raw.get("server", {})
-                if isinstance(server, dict):
-                    parsed = int(server.get("api_port", 2731))
-                    if 1 <= parsed <= 65535:
-                        port = parsed
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            pass
-    uvicorn.run("sheaf.server.app:app", host="127.0.0.1", port=port, reload=True)
+    try:
+        server = config.get("server", {})
+        if isinstance(server, dict):
+            parsed_host = server.get("host", "127.0.0.1")
+            if isinstance(parsed_host, str) and parsed_host.strip():
+                host = parsed_host.strip()
+            parsed_port = int(server.get("api_port", 2731))
+            if 1 <= parsed_port <= 65535:
+                port = parsed_port
+    except (TypeError, ValueError):
+        pass
+    uvicorn.run("sheaf.server.app:app", host=host, port=port, reload=True)
 
 
 if __name__ == "__main__":

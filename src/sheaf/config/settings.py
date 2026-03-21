@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
-import os
 from functools import lru_cache
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = REPO_ROOT / "sheaf_server.config"
+_SUPPORTED_OPENAI_MODELS = {
+    "gpt-5-mini",
+    "gpt-5.2",
+    "gpt-5.3-codex",
+    "gpt-5.4",
+}
 
 
 @lru_cache(maxsize=1)
@@ -31,10 +36,11 @@ def _path_config_value(key: str, default: Path) -> Path:
 
 
 DATA_DIR = _path_config_value("data_dir", REPO_ROOT / "data")
-CHATS_DIR = DATA_DIR / "chats"
+DATA_ARCHIVE_DIR = REPO_ROOT / "data_archive"
+USER_DBS_DIR = DATA_DIR / "user_dbs"
+SYSTEM_PROMPTS_DIR = DATA_DIR / "system_prompts"
+SERVER_DB_PATH = _path_config_value("server_db_path", DATA_DIR / "server.sqlite3")
 SECRETS_FILE = _path_config_value("secrets_file", REPO_ROOT / ".secrets.json")
-DEFAULT_TOME_DIR = DATA_DIR / "notes"
-TOME_DIR = _path_config_value("tome_dir", DEFAULT_TOME_DIR)
 RUNTIME_DIR = REPO_ROOT / ".runtime"
 REBOOT_REQUEST_FILE = RUNTIME_DIR / "reboot.request"
 
@@ -55,7 +61,9 @@ def configured_openai_model() -> str:
     if isinstance(llm, dict):
         model = llm.get("openai_model")
         if isinstance(model, str) and model.strip():
-            return model.strip()
+            configured = model.strip()
+            if configured in _SUPPORTED_OPENAI_MODELS:
+                return configured
     return "gpt-5-mini"
 
 
@@ -69,18 +77,24 @@ def configured_default_model() -> str:
     return configured_openai_model()
 
 
+def configured_system_prompt_file() -> str:
+    cfg = load_server_config()
+    llm = cfg.get("llm")
+    if isinstance(llm, dict):
+        prompt_file = llm.get("system_prompt_file")
+        if isinstance(prompt_file, str) and prompt_file.strip():
+            return prompt_file.strip()
+    return "sheaf_default.md"
+
+
 def configured_ollama_base_url() -> str:
-    env_value = os.environ.get("OLLAMA_HOST")
-    if isinstance(env_value, str) and env_value.strip():
-        raw = env_value.strip()
-    else:
-        cfg = load_server_config()
-        llm = cfg.get("llm")
-        raw = "http://127.0.0.1:11434"
-        if isinstance(llm, dict):
-            value = llm.get("ollama_base_url")
-            if isinstance(value, str) and value.strip():
-                raw = value.strip()
+    cfg = load_server_config()
+    llm = cfg.get("llm")
+    raw = "http://127.0.0.1:11434"
+    if isinstance(llm, dict):
+        value = llm.get("ollama_base_url")
+        if isinstance(value, str) and value.strip():
+            raw = value.strip()
 
     if raw.startswith("http://") or raw.startswith("https://"):
         return raw
@@ -114,10 +128,6 @@ def configured_model_tuning() -> tuple[dict[str, object], dict[str, object]]:
     )
 
 
-# Backward-compatible alias for existing imports/tool names.
-NOTES_DIR = TOME_DIR
-
-
 def ensure_data_dirs() -> None:
-    CHATS_DIR.mkdir(parents=True, exist_ok=True)
-    TOME_DIR.mkdir(parents=True, exist_ok=True)
+    USER_DBS_DIR.mkdir(parents=True, exist_ok=True)
+    SYSTEM_PROMPTS_DIR.mkdir(parents=True, exist_ok=True)

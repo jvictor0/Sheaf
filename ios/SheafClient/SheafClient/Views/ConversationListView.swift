@@ -133,8 +133,12 @@ private struct ConversationRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
+                Text(chat.name)
+                    .font(.body)
+                    .lineLimit(1)
                 Text(chat.chatID)
-                    .font(.body.monospaced())
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                 if let updated = chat.updatedAt {
                     Text(updated.formatted(date: .abbreviated, time: .shortened))

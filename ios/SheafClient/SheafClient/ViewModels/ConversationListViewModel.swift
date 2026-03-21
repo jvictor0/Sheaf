@@ -20,7 +20,9 @@ final class ConversationListViewModel: ObservableObject {
     func loadChats() async {
         state = .loading
         do {
-            chats = try await api.listChats().sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
+            async let loadedChats = api.listChats()
+            async let _ = ClientSettingsStore.shared.refreshAvailableModels(client: api)
+            chats = try await loadedChats.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
             state = .loaded
         } catch {
             state = .error(error.localizedDescription)

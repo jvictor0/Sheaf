@@ -1,12 +1,11 @@
 {
-  "zulip_enabled": true,
   "data_dir": "data",
   "secrets_file": ".secrets.json",
-  "tome_dir": "~/AgentData/Sheaf",
   "llm": {
     "provider": "openai",
     "default_model": "gpt-5-mini",
     "openai_model": "gpt-5-mini",
+    "system_prompt_file": "sheaf_default.md",
     "ollama_base_url": "http://127.0.0.1:11434",
     "ollama_cache_ttl_seconds": 30,
     "model_limits": {},
@@ -14,22 +13,6 @@
   },
   "server": {
     "host": "127.0.0.1",
-    "api_port": 2731,
-    "chainlit_port": 2732
-  },
-  "zulip_site": "https://acme.zulipchat.com",
-  "zulip_bot_email": "sheaf-bot-bot@acme.zulipchat.com",
-  "zulip_bot_api_key": "1234567890abcdef1234567890abcdef",
-  "sheaf_api_base_url": "http://127.0.0.1:2731",
-  "sheaf_chat_id": "",
-  "state_db_path": "data/zulip_bot_state.sqlite3",
-  "poll_seconds": 2.0,
-  "batch_size": 100,
-  "narrow": [
-    {
-      "operator": "is",
-      "operand": "mentioned"
-    }
-  ],
-  "process_backlog_on_first_run": false
+    "api_port": 2731
+  }
 }

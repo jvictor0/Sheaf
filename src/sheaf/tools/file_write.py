@@ -1,12 +1,11 @@
-"""Tooling for constrained note writes under the configured tome directory."""
+"""Filesystem write tooling constrained by visible_directories policy."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_core.tools import tool
-
-from sheaf.config.settings import TOME_DIR
+from sheaf.tools.simple_tool import tool
+from sheaf.tools.visibility import ensure_writable, resolve_input_path
 
 
 def _display_path(path: Path) -> str:
@@ -22,31 +21,12 @@ def _display_path(path: Path) -> str:
     return f"~/{rel.as_posix()}"
 
 
-def resolve_note_path(relative_path: str) -> Path:
-    path_text = relative_path.strip()
-    if not path_text:
-        raise ValueError("relative_path must not be empty")
-
-    root = TOME_DIR.resolve()
-    candidate = (root / path_text).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("Path escapes allowed tome directory") from exc
-    if candidate == root:
-        raise ValueError("relative_path must point to a file under the configured tome directory")
-    return candidate
-
-
 @tool("write_note")
 def write_note_tool(relative_path: str, content: str, overwrite: bool = True) -> str:
-    """Write UTF-8 text into the configured tome directory.
+    """Write UTF-8 text to a path allowed by visible_directories policy."""
 
-    Use this when you need to save durable notes or outputs. The path must stay under
-    the configured tome directory and parent folders will be created automatically.
-    """
-
-    target = resolve_note_path(relative_path)
+    target = resolve_input_path(relative_path)
+    ensure_writable(target)
     if target.exists() and target.is_dir():
         raise ValueError("Target path points to a directory, expected a file")
     if target.exists() and not overwrite:

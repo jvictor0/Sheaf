@@ -19,6 +19,7 @@ zulip_bot.config.json
 data/*
 !data/.gitkeep
 !data/README.md
+data_archive/
 
 # iOS SwiftPM build artifacts
 ios/SheafIOS/.build/
