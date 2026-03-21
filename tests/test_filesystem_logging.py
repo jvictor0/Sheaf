@@ -112,3 +112,25 @@ def test_create_vault_endpoint_rejects_overlapping_roots(tmp_path: Path, monkeyp
     runtime.create_vault(root_path=str(parent))
     with pytest.raises(ValueError, match="overlaps existing vault"):
         runtime.create_vault(root_path=str(parent / "child"))
+
+
+def test_create_vault_registers_read_write_visible_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data_dir = tmp_path / "data"
+    rr.DATA_DIR = data_dir
+    rr.SERVER_DB_PATH = data_dir / "server.sqlite3"
+    rr.USER_DBS_DIR = data_dir / "user_dbs"
+    rr.SYSTEM_PROMPTS_DIR = data_dir / "system_prompts"
+    monkeypatch.setattr(vault_runtime, "VAULT_DB_PATH", data_dir / "vaults.sqlite3")
+    runtime = RewriteRuntime()
+    runtime.initialize()
+
+    root = tmp_path / "vaults" / "visible"
+    runtime.create_vault(root_path=str(root))
+
+    with sqlite3.connect(rr.SERVER_DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT access_mode FROM visible_directories WHERE path = ?",
+            (str(root.resolve()),),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "read_write"

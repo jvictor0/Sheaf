@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".test-dist",
+    "rootDir": "."
+  },
+  "include": [
+    "src/checksum.ts",
+    "src/path.ts",
+    "src/replay.ts",
+    "src/replayQueue.ts",
+    "src/types.ts",
+    "test/**/*.ts"
+  ]
+}

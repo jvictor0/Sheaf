@@ -17,6 +17,11 @@ from sheaf.server.runtime import (
     ProtocolError,
     runtime,
 )
+from sheaf.server.replica import (
+    REPLICA_PROTOCOL_VERSION,
+    ReplicaProtocolError,
+    ReplicaService,
+)
 from sheaf.config.settings import load_server_config
 
 @asynccontextmanager
@@ -30,6 +35,7 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="sheaf", version="0.2.0", lifespan=_lifespan)
+replica_service = ReplicaService()
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,6 +76,25 @@ class CreateVaultRequest(BaseModel):
     metadata_json: Optional[str] = None
 
 
+class StartReplicaSessionRequest(BaseModel):
+    vault_name: str
+    next_lsn: int = 0
+    create_if_missing: bool = False
+    root_path: Optional[str] = None
+    metadata_json: Optional[str] = None
+
+
+class StartReplicaSessionResponse(BaseModel):
+    session_id: str
+    websocket_url: str
+    accepted_protocol_version: int
+    vault_id: int
+    vault_name: str
+    root_path: str
+    created: bool
+    next_lsn: int
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -107,6 +132,30 @@ def create_vault_endpoint(payload: CreateVaultRequest) -> dict[str, object]:
         return runtime.create_vault(root_path=payload.root_path, metadata_json=payload.metadata_json)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/replica/sessions", response_model=StartReplicaSessionResponse)
+def start_replica_session(payload: StartReplicaSessionRequest) -> StartReplicaSessionResponse:
+    try:
+        session = replica_service.start_session(
+            vault_name=payload.vault_name,
+            next_lsn=payload.next_lsn,
+            create_if_missing=payload.create_if_missing,
+            root_path=payload.root_path,
+            metadata_json=payload.metadata_json,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return StartReplicaSessionResponse(
+        session_id=str(session["session_id"]),
+        websocket_url=f"/ws/replica/{session['session_id']}",
+        accepted_protocol_version=REPLICA_PROTOCOL_VERSION,
+        vault_id=int(session["vault_id"]),
+        vault_name=str(session["vault_name"]),
+        root_path=str(session["root_path"]),
+        created=bool(session["created"]),
+        next_lsn=int(session["next_lsn"]),
+    )
 
 
 @app.get("/threads")
@@ -219,6 +268,29 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
     finally:
         heartbeat.cancel()
         runtime.detach_websocket(session_id)
+
+
+@app.websocket("/ws/replica/{session_id}")
+async def replica_ws(websocket: WebSocket, session_id: str) -> None:
+    await websocket.accept()
+    try:
+        session = replica_service.attach_websocket(session_id, websocket)
+    except ReplicaProtocolError:
+        await replica_service.send_frame(
+            websocket,
+            session_id,
+            "error",
+            {"message": "Unknown replica session. Call POST /replica/sessions first."},
+        )
+        await websocket.close(code=1008)
+        return
+
+    try:
+        await replica_service.stream_session(session)
+    except WebSocketDisconnect:
+        return
+    finally:
+        replica_service.detach_websocket(session_id)
 
 
 def main() -> None:

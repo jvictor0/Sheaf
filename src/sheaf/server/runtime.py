@@ -254,6 +254,19 @@ class RewriteRuntime:
             )
         conn.commit()
 
+    def _register_visible_directory(self, conn: sqlite3.Connection, path: Path, *, access_mode: str) -> None:
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO visible_directories(path, access_mode, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                access_mode=excluded.access_mode,
+                updated_at=excluded.updated_at
+            """,
+            (str(path.resolve()), access_mode, now, now),
+        )
+
     def refresh_local_models(self) -> list[dict[str, Any]]:
         self.initialize()
         with self._db() as conn:
@@ -363,6 +376,9 @@ class RewriteRuntime:
                 """,
                 (str(resolved_root), metadata_json, now, now),
             )
+            conn.commit()
+        with self._db() as conn:
+            self._register_visible_directory(conn, resolved_root, access_mode="read_write")
             conn.commit()
         return {
             "vault_id": int(cursor.lastrowid),

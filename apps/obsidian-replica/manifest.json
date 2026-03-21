@@ -1,0 +1,9 @@
+{
+  "id": "sheaf-obsidian-replica",
+  "name": "Sheaf Obsidian Replica",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Server-authoritative Obsidian replica sync for Sheaf vaults.",
+  "author": "OpenAI Codex",
+  "isDesktopOnly": false
+}
