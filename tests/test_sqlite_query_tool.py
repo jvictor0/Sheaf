@@ -178,10 +178,10 @@ def test_openai_tool_definitions_are_derived_from_tool_metadata() -> None:
     definitions = dispatcher._openai_tool_definitions()
     by_name = {item["function"]["name"]: item for item in definitions}
 
-    assert "write_note" in by_name
-    write_tool = by_name["write_note"]["function"]
-    assert "Write UTF-8 text to a path allowed by visible_directories policy." in write_tool["description"]
-    assert write_tool["parameters"]["properties"]["relative_path"]["type"] == "string"
-    assert write_tool["parameters"]["properties"]["content"]["type"] == "string"
-    assert write_tool["parameters"]["properties"]["overwrite"]["type"] == "boolean"
-    assert write_tool["parameters"]["required"] == ["relative_path", "content"]
+    assert "create_file" in by_name
+    create_tool = by_name["create_file"]["function"]
+    assert "Create or overwrite a UTF-8 file and record the write in the vault log." in create_tool["description"]
+    assert create_tool["parameters"]["properties"]["path"]["type"] == "string"
+    assert create_tool["parameters"]["properties"]["content"]["type"] == "string"
+    assert create_tool["parameters"]["properties"]["overwrite"]["type"] == "boolean"
+    assert create_tool["parameters"]["required"] == ["path", "content"]

@@ -40,6 +40,8 @@ DATA_ARCHIVE_DIR = REPO_ROOT / "data_archive"
 USER_DBS_DIR = DATA_DIR / "user_dbs"
 SYSTEM_PROMPTS_DIR = DATA_DIR / "system_prompts"
 SERVER_DB_PATH = _path_config_value("server_db_path", DATA_DIR / "server.sqlite3")
+VAULT_DB_PATH = _path_config_value("vault_db_path", DATA_DIR / "vaults.sqlite3")
+VAULT_QUARANTINE_DIR = DATA_DIR / "vault_quarantine"
 SECRETS_FILE = _path_config_value("secrets_file", REPO_ROOT / ".secrets.json")
 RUNTIME_DIR = REPO_ROOT / ".runtime"
 REBOOT_REQUEST_FILE = RUNTIME_DIR / "reboot.request"
@@ -131,3 +133,4 @@ def configured_model_tuning() -> tuple[dict[str, object], dict[str, object]]:
 def ensure_data_dirs() -> None:
     USER_DBS_DIR.mkdir(parents=True, exist_ok=True)
     SYSTEM_PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+    VAULT_QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)

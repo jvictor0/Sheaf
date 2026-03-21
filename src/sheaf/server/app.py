@@ -65,6 +65,11 @@ class ArchiveResponse(BaseModel):
     status: str
 
 
+class CreateVaultRequest(BaseModel):
+    root_path: str
+    metadata_json: Optional[str] = None
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -94,6 +99,14 @@ def create_thread_endpoint(payload: Optional[CreateThreadRequest] = None) -> dic
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"thread_id": thread_id}
+
+
+@app.post("/vaults")
+def create_vault_endpoint(payload: CreateVaultRequest) -> dict[str, object]:
+    try:
+        return runtime.create_vault(root_path=payload.root_path, metadata_json=payload.metadata_json)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/threads")

@@ -33,6 +33,9 @@ from sheaf.llm.dispatcher import (
 )
 from sheaf.llm.model_properties import resolve_model_properties
 from sheaf.llm.model_registry import get_model_registry
+from sheaf.vaults.paths import canonicalize_path, validate_distinct_root
+from sheaf.vaults.runtime import db as vault_db
+from sheaf.vaults.runtime import initialize as initialize_vault_db
 
 try:
     from openai import AuthenticationError as OpenAIAuthenticationError
@@ -117,6 +120,7 @@ class RewriteRuntime:
             SYSTEM_PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
             self._ensure_default_system_prompt()
             SERVER_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            initialize_vault_db()
             with self._db() as conn:
                 self._apply_database_pragmas(conn)
                 self._bootstrap_schema(conn)
@@ -340,6 +344,31 @@ class RewriteRuntime:
             }
             for row in rows
         ]
+
+    def create_vault(self, *, root_path: str, metadata_json: str | None = None) -> dict[str, Any]:
+        self.initialize()
+        resolved_root = canonicalize_path(root_path)
+        ensure_parent = resolved_root.parent
+        ensure_parent.mkdir(parents=True, exist_ok=True)
+        if resolved_root.exists() and not resolved_root.is_dir():
+            raise ValueError(f"Vault root must be a directory path: {resolved_root}")
+        resolved_root.mkdir(parents=True, exist_ok=True)
+        now = utc_now()
+        with vault_db() as conn:
+            validate_distinct_root(conn, resolved_root)
+            cursor = conn.execute(
+                """
+                INSERT INTO vaults(root_path, metadata_json, created_at, updated_at, is_active)
+                VALUES (?, ?, ?, ?, 1)
+                """,
+                (str(resolved_root), metadata_json, now, now),
+            )
+            conn.commit()
+        return {
+            "vault_id": int(cursor.lastrowid),
+            "root_path": str(resolved_root),
+            "created": True,
+        }
 
     def archive_thread(self, thread_id: str, *, archived: bool) -> None:
         self.initialize()
