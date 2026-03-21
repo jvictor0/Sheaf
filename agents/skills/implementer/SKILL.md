@@ -14,8 +14,10 @@ Use this role for implementation-stage delivery.
 3. Implement the full spec before finishing.
 4. Never modify files in `specs/`.
 5. Do not respond to reviewer issues inside `issues.md`.
-6. Record implementation decisions in `decisions.md`.
-7. Leave issue status updates to the reviewer.
+6. Do not open issues in `issues.md`; only the reviewer may open issues.
+7. Record implementation decisions in `decisions.md`.
+8. Leave issue status updates to the reviewer.
+9. Run appropriate tests for the work you deliver (for example the project’s unit or integration tests, or any test commands documented for the quest).
 
 ## Primary Files
 

@@ -103,6 +103,7 @@ Responsibilities:
 - render streaming assistant content
 - render tool-event summaries
 - render thinking and activity indicators
+- update visible regions incrementally instead of rebuilding the entire chat pane on every transport frame
 
 ## State Ownership
 
@@ -144,13 +145,47 @@ The user explicitly does not need advanced markdown or math rendering in v1.
 
 Recommended rendering approach:
 
-- use straightforward DOM creation for transcript rows
+- create the pane shell once per view instance and keep header, transcript,
+  status, and composer in stable DOM containers
 - render user and assistant messages with separate CSS classes
-- render streaming assistant content in a mutable container
-- when a committed final assistant turn arrives, replace or redraw the message
-  cleanly from the committed turn content
+- keep committed transcript rows keyed by turn ID and leave them mounted once
+  committed during normal live updates
+- render streaming assistant content in a mutable container that can be updated
+  in place
+- preserve the composer DOM node, draft text, and focus state across normal
+  chat updates
+- reserve full transcript rebuilds for explicit replay/reset moments such as
+  handshake snapshot begin, reconnect resync, or thread switch
+- when a committed final assistant turn arrives, replace or redraw only the
+  affected in-progress row from the committed turn content
 
-This keeps the rendering loop simple and stable for the first implementation.
+This keeps the rendering loop simple and stable for the first implementation,
+while also avoiding focus loss and scroll jumps during routine websocket
+traffic.
+
+## Incremental Update Rules
+
+Normal event handling should prefer narrow DOM updates:
+
+- `heartbeat` and other non-visible transport frames should not trigger visible
+  rerenders
+- `assistant_token` should update only the active streaming row and any
+  user-visible activity indicator
+- `committed_turn` should append or reconcile only the affected turn rows and
+  matching pending-send artifacts
+- status text changes should update the status region only
+- the composer should not be recreated during live transcript updates
+
+## Scroll And Focus Rules
+
+Scrolling should be conditional and user-respecting:
+
+- do not force scroll-to-bottom on every render cycle
+- only auto-scroll when new visible transcript content appears and the user was
+  already near the bottom before the update
+- if the user has scrolled upward, preserve their scroll position during
+  streaming and status updates
+- preserving composer focus takes priority over transcript redraw convenience
 
 ## Thread Navigation Strategy
 
@@ -275,3 +310,5 @@ The architecture should make these units independently testable:
 - state reducer or event application logic
 - tool-call summary formatting
 - thread switch and reconnect behavior
+- incremental transcript updates without full-pane rerender on heartbeat or
+  status-only events

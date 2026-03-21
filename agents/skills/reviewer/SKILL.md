@@ -16,7 +16,9 @@ Use this role for review-stage feedback and issue tracking.
 5. Use `Next Action: fix` for straightforward bugs.
 6. Request human intervention for redesign, spec changes, tricky concurrency, or taste-driven questions.
 7. Never modify code.
-8. The reviewer is the only role that changes issue statuses.
+8. Never run tests; review using the diff, specs, and static reasoning only.
+9. The reviewer is the only role that opens issues in `issues.md`.
+10. The reviewer is the only role that changes issue statuses.
 
 ## Primary Files
 

@@ -15,7 +15,8 @@ Use this role for planning-stage workflow work.
 4. Update files in `specs/` as the source of truth for planned behavior.
 5. Follow `docs/workflow/stages.md` and keep planning-stage restrictions intact.
 6. Do not modify implementation code.
-7. Do not perform reviewer or committer duties.
+7. Do not open issues in `issues.md`; only the reviewer may open issues.
+8. Do not perform reviewer or committer duties.
 
 ## Primary Files
 

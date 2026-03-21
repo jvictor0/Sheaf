@@ -2,20 +2,36 @@
   "state": {
     "version": 1,
     "vaultName": "test",
-    "nextLsn": 8,
+    "nextLsn": 10,
     "files": {
       "toaster.md": {
         "checksum": "432f21db18890b3836dafccac00f2b4a6b22f618076b02f2b606738deb003453",
         "syncedMtimeMs": 1774079864210
+      },
+      "roaster.md": {
+        "checksum": "7fac6b666b2c019887f1a493a689c9bb42610f19d9fc02d42a64b3f751942d23",
+        "syncedMtimeMs": 1774125178982
       }
     },
     "health": {
       "connectionState": "live",
-      "lastSuccessfulLsn": 7,
-      "lastSyncAtMs": 1774079864231,
+      "lastSuccessfulLsn": 9,
+      "lastSyncAtMs": 1774125179001,
       "lastError": null,
       "unhealthyPath": null,
       "resyncRequired": false
     }
+  },
+  "settings": {
+    "serverBaseUrl": "http://127.0.0.1:2731",
+    "vaultName": "test",
+    "createIfMissing": true,
+    "serverRootPath": "",
+    "blockLocalEdits": true,
+    "repairIntervalMs": 60000,
+    "reconnectDelayMs": 2000,
+    "chatDefaultModel": "gpt-5.2",
+    "chatWatchdogMs": 45000,
+    "chatReconnectDelayMs": 2000
   }
 }

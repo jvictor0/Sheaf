@@ -92,6 +92,9 @@ Finish with layout and verification:
 - spacing and bubble cleanup
 - pane reopen behavior
 - thread-switch smoothness
+- incremental rendering so the transcript can update without recreating the
+  composer or old committed rows
+- heartbeat-safe UI updates that do not cause scroll jumps or focus loss
 - desktop and mobile-safe interaction review
 - manual protocol edge-case validation
 
@@ -116,6 +119,8 @@ Finish with layout and verification:
 - finalize the assistant message and remove the temporary streaming row
 - switch threads while a previous thread has cached state
 - reconnect using `known_tail_turn_id`
+- verify that heartbeat frames do not recreate the composer or force transcript
+  scroll changes
 
 ### Manual UX Validation
 
@@ -126,6 +131,12 @@ Finish with layout and verification:
 - a visible indicator appears while the assistant is thinking/streaming
 - tool-call bubbles do not leak file contents
 - error states are visible without destroying already committed transcript state
+- the composer keeps focus while the assistant streams and while routine status
+  updates occur
+- when already at the bottom, new visible messages scroll in naturally without
+  sudden upward jumps
+- when scrolled upward, streaming and status updates do not steal scroll
+  position
 
 ## Edge Cases To Validate Explicitly
 
@@ -137,6 +148,9 @@ Finish with layout and verification:
 - fatal queue/send error
 - websocket disconnect during streaming
 - thread switch during or shortly after streaming
+- heartbeat arrival while the composer is focused at the bottom of a live
+  thread
+- streaming token arrival while the user is scrolled away from the bottom
 
 ## Implementation Guardrails
 
@@ -165,3 +179,6 @@ Before the quest can be considered ready for completion:
 - the thinking and streaming indicators are visible but unobtrusive
 - the UI does not expose full reasoning traces
 - the protocol documentation still matches the actual implementation behavior
+- transcript updates feel seamless enough that committed rows stay visually
+  stable, the composer does not blur during routine updates, and heartbeat
+  traffic causes no visible scroll disturbance

@@ -10,12 +10,15 @@ Use this role for polishing-stage fixes.
 ## Instructions
 
 1. Read `issues.md` before making changes.
-2. Fix the problems identified by the reviewer.
-3. Do not edit `issues.md`.
-4. Only change files in `specs/` when the issues indicate redesign is required.
-5. Record spec changes and important decisions in `decisions.md`.
-6. Leave issue status updates to the reviewer.
-7. Focus on code and test changes needed to address the findings.
+2. Only act on issues whose status is `open`.
+3. Do not act on issues marked `deferred`, `rejected`, or `completed`.
+4. Fix the open problems identified by the reviewer.
+5. Do not edit `issues.md`.
+6. Only change files in `specs/` when the open issues indicate redesign is required.
+7. Record spec changes and important decisions in `decisions.md`.
+8. Leave issue status updates to the reviewer.
+9. Focus on code and test changes needed to address the open findings.
+10. Run appropriate tests for the fixes you make (for example the project’s unit or integration tests, or any test commands documented for the quest).
 
 ## Primary Files
 

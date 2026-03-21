@@ -5,3 +5,4 @@
 - creates quests
 - updates spec files from user input
 - does not edit implementation code
+- does not open issues in `issues.md`

@@ -6,6 +6,7 @@
     "rootDir": "."
   },
   "include": [
+    "src/chat/**/*.ts",
     "src/checksum.ts",
     "src/path.ts",
     "src/replay.ts",

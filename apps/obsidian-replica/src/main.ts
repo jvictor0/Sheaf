@@ -1,18 +1,23 @@
 import {
   App,
+  ItemView,
   MarkdownView,
   Notice,
   Plugin,
   PluginSettingTab,
   Setting,
   TFile,
+  WorkspaceLeaf,
+  requestUrl,
   normalizePath,
 } from "obsidian";
 
+import { ChatService } from "./chat/service";
+import { SHEAF_CHAT_VIEW_TYPE, SheafChatView } from "./chat/view";
 import { createReplicaEditBlocker } from "./editProtection";
 import { ReplicaRemoteReader, ReplicaReplayEngine, ReplicaVaultAdapter } from "./replay";
 import { ReplicaStateRepository } from "./state";
-import { DEFAULT_SETTINGS, ReplicaPluginSettings, ReplicaVaultState } from "./types";
+import { ChatModelOption, DEFAULT_SETTINGS, ReplicaPluginSettings, ReplicaVaultState } from "./types";
 import { ReplicaSyncService } from "./syncClient";
 
 class ObsidianVaultAdapter implements ReplicaVaultAdapter {
@@ -174,15 +179,69 @@ class ReplicaSettingTab extends PluginSettingTab {
           await this.plugin.persistSettings();
         }),
       );
+
+    new Setting(containerEl)
+      .setName("Chat default model")
+      .setDesc("Choose which model new chat messages should use.")
+      .addDropdown((dropdown) => {
+        dropdown.addOption("", "Server default");
+        const models = this.plugin.availableChatModels;
+        for (const model of models) {
+          const suffix = model.is_default ? " (default)" : "";
+          dropdown.addOption(model.name, `${model.name} · ${model.provider}${suffix}`);
+        }
+        if (this.plugin.settings.chatDefaultModel && !models.some((model) => model.name === this.plugin.settings.chatDefaultModel)) {
+          dropdown.addOption(this.plugin.settings.chatDefaultModel, `${this.plugin.settings.chatDefaultModel} · custom`);
+        }
+        dropdown.setValue(this.plugin.settings.chatDefaultModel).onChange(async (value) => {
+          this.plugin.settings.chatDefaultModel = value.trim();
+          await this.plugin.persistSettings();
+        });
+      })
+      .addButton((button) => {
+        button.setButtonText("Refresh").onClick(async () => {
+          await this.plugin.refreshAvailableChatModels(true);
+          this.display();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Chat reconnect delay (ms)")
+      .setDesc("Delay before retrying after a chat disconnect or conflict.")
+      .addText((text) =>
+        text.setValue(String(this.plugin.settings.chatReconnectDelayMs)).onChange(async (value) => {
+          const parsed = Number.parseInt(value, 10);
+          this.plugin.settings.chatReconnectDelayMs = Number.isFinite(parsed)
+            ? Math.max(parsed, 250)
+            : DEFAULT_SETTINGS.chatReconnectDelayMs;
+          await this.plugin.persistSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Chat watchdog timeout (ms)")
+      .setDesc("Reconnect the chat pane if no websocket frames arrive within this window.")
+      .addText((text) =>
+        text.setValue(String(this.plugin.settings.chatWatchdogMs)).onChange(async (value) => {
+          const parsed = Number.parseInt(value, 10);
+          this.plugin.settings.chatWatchdogMs = Number.isFinite(parsed)
+            ? Math.max(parsed, 5_000)
+            : DEFAULT_SETTINGS.chatWatchdogMs;
+          await this.plugin.persistSettings();
+        }),
+      );
   }
 }
 
 export default class SheafObsidianReplicaPlugin extends Plugin {
   settings: ReplicaPluginSettings = { ...DEFAULT_SETTINGS };
+  availableChatModels: ChatModelOption[] = [];
   private stateRepository!: ReplicaStateRepository;
   private syncService: ReplicaSyncService | null = null;
+  private chatService!: ChatService;
   private latestState: ReplicaVaultState | null = null;
   private repairTimer: number | null = null;
+  private settingTab!: ReplicaSettingTab;
 
   async onload(): Promise<void> {
     this.stateRepository = new ReplicaStateRepository(this);
@@ -227,7 +286,15 @@ export default class SheafObsidianReplicaPlugin extends Plugin {
         return Boolean(this.latestState?.files[normalizePath(activeFile.path)]);
       }),
     );
-    this.addSettingTab(new ReplicaSettingTab(this.app, this));
+    this.chatService = new ChatService({
+      settings: () => this.settings,
+      openSettings: () => this.openPluginSettings(),
+    });
+
+    this.registerView(SHEAF_CHAT_VIEW_TYPE, (leaf) => new SheafChatView(leaf, this.chatService));
+    this.settingTab = new ReplicaSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
+    void this.refreshAvailableChatModels(false);
 
     this.addCommand({
       id: "replica-sync-now",
@@ -268,6 +335,14 @@ export default class SheafObsidianReplicaPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "open-chat-pane",
+      name: "Open Sheaf chat",
+      callback: async () => {
+        await this.activateChatView();
+      },
+    });
+
     try {
       await this.syncService.start();
     } catch (error) {
@@ -285,6 +360,8 @@ export default class SheafObsidianReplicaPlugin extends Plugin {
   }
 
   onunload(): void {
+    void this.chatService?.deactivateView();
+    this.app.workspace.getLeavesOfType(SHEAF_CHAT_VIEW_TYPE).forEach((leaf) => leaf.detach());
     this.syncService?.stop();
     if (this.repairTimer !== null) {
       window.clearInterval(this.repairTimer);
@@ -294,5 +371,47 @@ export default class SheafObsidianReplicaPlugin extends Plugin {
 
   async persistSettings(): Promise<void> {
     await this.stateRepository.saveSettings(this.settings);
+  }
+
+  async refreshAvailableChatModels(showFailureNotice: boolean): Promise<void> {
+    try {
+      const response = await requestUrl({
+        url: `${this.settings.serverBaseUrl}/models`,
+        method: "GET",
+      });
+      const payload = response.json as { models?: Array<Record<string, unknown>> };
+      const models = Array.isArray(payload.models) ? payload.models : [];
+      this.availableChatModels = models
+        .filter((item): item is Record<string, unknown> => typeof item?.name === "string")
+        .map((item) => ({
+          name: String(item.name),
+          provider: typeof item.provider === "string" ? item.provider : "unknown",
+          is_default: item.is_default === true,
+        }));
+      this.settingTab?.display();
+    } catch (error) {
+      if (showFailureNotice) {
+        new Notice(`Failed to load models: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  private async activateChatView(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(SHEAF_CHAT_VIEW_TYPE)[0];
+    const leaf = existing ?? this.app.workspace.getLeaf(true);
+    await leaf.setViewState({ type: SHEAF_CHAT_VIEW_TYPE, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  private openPluginSettings(): void {
+    const settingAPI = (this.app as App & {
+      setting?: {
+        open: () => void;
+        openTabById?: (id: string) => void;
+      };
+    }).setting;
+
+    settingAPI?.open?.();
+    settingAPI?.openTabById?.(this.manifest.id);
   }
 }

@@ -6,6 +6,9 @@ export const DEFAULT_SETTINGS = {
     blockLocalEdits: true,
     repairIntervalMs: 60_000,
     reconnectDelayMs: 2_000,
+    chatDefaultModel: "",
+    chatWatchdogMs: 45_000,
+    chatReconnectDelayMs: 2_000,
 };
 export function createDefaultVaultState(vaultName) {
     return {
