@@ -98,6 +98,38 @@ def test_directory_operations_and_rebuild(filesystem_env: dict[str, Path]) -> No
         assert names == ["b/child.txt"]
 
 
+def test_rebuild_files_table_only_rebuilds_target_vault(filesystem_env: dict[str, Path]) -> None:
+    runtime = RewriteRuntime()
+    runtime.initialize()
+
+    first_root = filesystem_env["vault_root"]
+    second_root = filesystem_env["repo_root"] / "vault-two"
+    second_created = runtime.create_vault(root_path=str(second_root))
+
+    create_file_tool.invoke({"path": str(first_root / "first.md"), "content": "first\n"})
+    create_file_tool.invoke({"path": str(second_root / "second.md"), "content": "second\n"})
+
+    with sqlite3.connect(filesystem_env["vault_db_path"]) as conn:
+        conn.row_factory = sqlite3.Row
+        first_vault_id = int(conn.execute("SELECT id FROM vaults WHERE root_path = ?", (str(first_root.resolve()),)).fetchone()[0])
+        second_vault_id = int(second_created["vault_id"])
+        conn.execute("DELETE FROM files WHERE vault_id = ?", (first_vault_id,))
+        rebuild_files_table(conn, vault_id=first_vault_id)
+        conn.commit()
+
+        first_names = [
+            row["name"]
+            for row in conn.execute("SELECT name FROM files WHERE vault_id = ? ORDER BY name", (first_vault_id,)).fetchall()
+        ]
+        second_names = [
+            row["name"]
+            for row in conn.execute("SELECT name FROM files WHERE vault_id = ? ORDER BY name", (second_vault_id,)).fetchall()
+        ]
+
+    assert first_names == ["first.md"]
+    assert second_names == ["second.md"]
+
+
 def test_create_vault_endpoint_rejects_overlapping_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     data_dir = tmp_path / "data"
     rr.DATA_DIR = data_dir

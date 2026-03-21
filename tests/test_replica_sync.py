@@ -113,6 +113,35 @@ def test_replica_list_log_records_orders_file_events_only(tmp_path: Path) -> Non
     assert create_lsn < patch_lsn < delete_lsn
 
 
+def test_replica_list_log_records_isolated_to_requested_vault(tmp_path: Path) -> None:
+    _configure(tmp_path)
+    service = ReplicaService()
+    first = service.start_session(
+        vault_name="alpha",
+        next_lsn=0,
+        create_if_missing=True,
+        root_path=str(tmp_path / "alpha"),
+    )
+    second = service.start_session(
+        vault_name="beta",
+        next_lsn=0,
+        create_if_missing=True,
+        root_path=str(tmp_path / "beta"),
+    )
+
+    with sqlite3.connect(vault_runtime.VAULT_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        alpha_lsn = _insert_log_record(conn, vault_id=int(first["vault_id"]), name="alpha.md", action="create", data="a\n")
+        beta_lsn = _insert_log_record(conn, vault_id=int(second["vault_id"]), name="beta.md", action="create", data="b\n")
+        conn.commit()
+
+    alpha_records = service.list_log_records(vault_id=int(first["vault_id"]), next_lsn=0)
+    beta_records = service.list_log_records(vault_id=int(second["vault_id"]), next_lsn=0)
+
+    assert [(record["lsn"], record["path"]) for record in alpha_records] == [(alpha_lsn, "alpha.md")]
+    assert [(record["lsn"], record["path"]) for record in beta_records] == [(beta_lsn, "beta.md")]
+
+
 def test_replica_path_state_returns_current_authoritative_content(tmp_path: Path) -> None:
     _configure(tmp_path)
     service = ReplicaService()
