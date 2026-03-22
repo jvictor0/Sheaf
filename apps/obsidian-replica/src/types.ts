@@ -294,10 +294,12 @@ export type ChatTranscriptItem =
 
 export interface ChatThreadSessionState {
   thread: ChatThreadSummary;
-  committedTurns: ChatCommittedTurn[];
+  committedHistory: {
+    turns: ChatCommittedTurn[];
+    lastTurnID: string | null;
+  };
   pendingSends: ChatPendingSend[];
   streamingByQueue: Record<number, ChatStreamingAssistantTurn>;
-  lastCommittedTurnID: string | null;
   lastFrameAtMs: number | null;
   errorMessage: string | null;
   connectionState: ChatConnectionState;

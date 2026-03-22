@@ -11,7 +11,7 @@ import type {
 function buildTranscriptItems(session: ChatThreadSessionState): ChatTranscriptItem[] {
   const items: ChatTranscriptItem[] = [];
 
-  for (const turn of session.committedTurns) {
+  for (const turn of session.committedHistory.turns) {
     if (turn.speaker === "assistant") {
       for (const call of turn.tool_calls) {
         items.push({
@@ -56,10 +56,12 @@ function buildTranscriptItems(session: ChatThreadSessionState): ChatTranscriptIt
 export function createChatSession(thread: ChatThreadSummary): ChatThreadSessionState {
   return {
     thread,
-    committedTurns: [],
+    committedHistory: {
+      turns: [],
+      lastTurnID: null,
+    },
     pendingSends: [],
     streamingByQueue: {},
-    lastCommittedTurnID: null,
     lastFrameAtMs: null,
     errorMessage: null,
     connectionState: "idle",
@@ -78,11 +80,23 @@ export function consumeMatchingPendingSend(session: ChatThreadSessionState, turn
     if (pending.text !== turn.message_text) {
       return false;
     }
-    return pending.responseToTurnID === turn.prev_turn_id || pending.responseToTurnID === session.lastCommittedTurnID;
+    return pending.responseToTurnID === turn.prev_turn_id || pending.responseToTurnID === session.committedHistory.lastTurnID;
   });
   if (index >= 0) {
     session.pendingSends.splice(index, 1);
   }
+}
+
+export function getLastCommittedTurnID(session: ChatThreadSessionState): string | null {
+  return session.committedHistory.lastTurnID;
+}
+
+export function clearCommittedHistory(session: ChatThreadSessionState): ChatThreadSessionState {
+  session.committedHistory = {
+    turns: [],
+    lastTurnID: null,
+  };
+  return rebuildTranscript(session);
 }
 
 export function rebuildTranscript(session: ChatThreadSessionState): ChatThreadSessionState {
@@ -111,11 +125,11 @@ export function dropQueueArtifacts(session: ChatThreadSessionState, queueID: num
 }
 
 export function applyCommittedTurn(session: ChatThreadSessionState, turn: ChatCommittedTurn): ChatThreadSessionState {
-  if (session.committedTurns.some((existing) => existing.id === turn.id)) {
+  if (session.committedHistory.turns.some((existing) => existing.id === turn.id)) {
     return session;
   }
-  session.committedTurns.push(turn);
-  session.lastCommittedTurnID = turn.id;
+  session.committedHistory.turns.push(turn);
+  session.committedHistory.lastTurnID = turn.id;
   consumeMatchingPendingSend(session, turn);
   return rebuildTranscript(session);
 }

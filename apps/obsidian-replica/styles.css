@@ -1,0 +1,471 @@
+/* Sheaf Chat – Plugin Styles
+   ================================================================
+   Obsidian auto-loads styles.css from the plugin root.
+   All classes are prefixed with `sheaf-` to avoid collisions.
+   ================================================================ */
+
+/* ----------------------------------------------------------------
+   Design tokens (scoped to plugin root)
+   ---------------------------------------------------------------- */
+.sheaf-root {
+  --sheaf-xs: 4px;
+  --sheaf-sm: 8px;
+  --sheaf-md: 12px;
+  --sheaf-lg: 16px;
+  --sheaf-xl: 24px;
+  --sheaf-radius-sm: 4px;
+  --sheaf-radius-md: 8px;
+  --sheaf-radius-lg: 14px;
+  --sheaf-text-xs: 0.8em;
+  --sheaf-text-sm: 0.9em;
+}
+
+/* ----------------------------------------------------------------
+   Root layout
+   ---------------------------------------------------------------- */
+.sheaf-root {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--sheaf-md);
+  padding-bottom: max(var(--sheaf-md), env(safe-area-inset-bottom)) !important;
+  gap: var(--sheaf-md);
+}
+
+/* ----------------------------------------------------------------
+   Header (thread list + conversation)
+   ---------------------------------------------------------------- */
+.sheaf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sheaf-sm);
+  flex: 0 0 auto;
+}
+
+.sheaf-header-title {
+  font-weight: 700;
+  font-size: 1.1em;
+}
+
+.sheaf-header-actions {
+  display: flex;
+  gap: var(--sheaf-xs);
+  align-items: center;
+}
+
+/* ----------------------------------------------------------------
+   Icon buttons (square, transparent)
+   ---------------------------------------------------------------- */
+.sheaf-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--sheaf-radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.sheaf-icon-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.sheaf-icon-btn:active {
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+
+.sheaf-icon-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.sheaf-icon-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ----------------------------------------------------------------
+   New thread button (full-width, dashed outline)
+   ---------------------------------------------------------------- */
+.sheaf-new-thread-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sheaf-sm);
+  width: 100%;
+  padding: var(--sheaf-sm) var(--sheaf-md);
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: var(--sheaf-radius-md);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--sheaf-text-sm);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  flex: 0 0 auto;
+}
+
+.sheaf-new-thread-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  border-color: var(--text-muted);
+}
+
+.sheaf-new-thread-btn:active {
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+
+.sheaf-new-thread-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.sheaf-new-thread-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ----------------------------------------------------------------
+   Thread list
+   ---------------------------------------------------------------- */
+.sheaf-thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sheaf-sm);
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 0;
+  overscroll-behavior: contain;
+}
+
+.sheaf-thread-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sheaf-xs);
+  width: 100%;
+  padding: var(--sheaf-md);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--sheaf-radius-md);
+  background: var(--background-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.sheaf-thread-card:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--text-faint);
+  transform: translateY(-1px);
+}
+
+.sheaf-thread-card:active {
+  transform: translateY(0);
+}
+
+.sheaf-thread-card-title {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.sheaf-thread-card-meta {
+  font-size: var(--sheaf-text-xs);
+  color: var(--text-muted);
+}
+
+/* ----------------------------------------------------------------
+   Empty / loading / error states
+   ---------------------------------------------------------------- */
+.sheaf-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sheaf-sm);
+  padding: var(--sheaf-xl) var(--sheaf-lg);
+  color: var(--text-muted);
+  text-align: center;
+  font-size: var(--sheaf-text-sm);
+  flex: 1 1 0;
+}
+
+.sheaf-error-text {
+  color: var(--text-error);
+  font-size: var(--sheaf-text-sm);
+  padding: var(--sheaf-sm);
+}
+
+/* ----------------------------------------------------------------
+   Conversation layout
+   ---------------------------------------------------------------- */
+.sheaf-conversation {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  gap: var(--sheaf-sm);
+}
+
+.sheaf-conv-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sheaf-sm);
+  flex: 0 0 auto;
+}
+
+.sheaf-conv-header-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sheaf-conv-title {
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sheaf-conv-subtitle {
+  font-size: var(--sheaf-text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ----------------------------------------------------------------
+   Transcript (message list)
+   ---------------------------------------------------------------- */
+.sheaf-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sheaf-sm);
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sheaf-xs) 0;
+}
+
+/* ----------------------------------------------------------------
+   Message bubbles
+   ---------------------------------------------------------------- */
+.sheaf-message {
+  padding: var(--sheaf-sm) var(--sheaf-md);
+  border-radius: var(--sheaf-radius-lg);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--sheaf-text-sm);
+}
+
+.sheaf-message--user {
+  align-self: flex-end;
+  max-width: 85%;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-bottom-right-radius: var(--sheaf-radius-sm);
+}
+
+.sheaf-message--assistant {
+  align-self: flex-start;
+  max-width: 92%;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border-bottom-left-radius: var(--sheaf-radius-sm);
+}
+
+.sheaf-message--system {
+  align-self: stretch;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: var(--sheaf-text-xs);
+}
+
+.sheaf-message--pending {
+  opacity: 0.7;
+}
+
+.sheaf-message--tool {
+  align-self: flex-start;
+  max-width: 85%;
+  padding: var(--sheaf-xs) var(--sheaf-sm);
+  background: var(--background-primary-alt);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--sheaf-radius-md);
+  color: var(--text-muted);
+  font-size: var(--sheaf-text-xs);
+}
+
+.sheaf-message--tool-error {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+.sheaf-message--streaming::after {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  vertical-align: middle;
+  animation: sheaf-pulse 1.2s ease-in-out infinite;
+}
+
+/* ----------------------------------------------------------------
+   Status bar
+   ---------------------------------------------------------------- */
+.sheaf-status {
+  flex: 0 0 auto;
+  min-height: 1.4em;
+  font-size: var(--sheaf-text-xs);
+  color: var(--text-muted);
+  padding: 0 var(--sheaf-xs);
+}
+
+.sheaf-status--error {
+  color: var(--text-error);
+}
+
+/* ----------------------------------------------------------------
+   Composer
+   ---------------------------------------------------------------- */
+.sheaf-composer {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--sheaf-xs);
+  padding-top: var(--sheaf-sm);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--background-primary);
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.sheaf-composer-textarea {
+  width: 100%;
+  min-height: 44px;
+  height: 44px;
+  resize: none;
+  overflow-y: hidden;
+  border-radius: var(--sheaf-radius-md);
+  padding: 10px var(--sheaf-md);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-family: inherit;
+  font-size: var(--sheaf-text-sm);
+  line-height: 1.4;
+  transition: border-color 120ms ease;
+}
+
+.sheaf-composer-textarea:focus {
+  border-color: var(--interactive-accent);
+  outline: none;
+}
+
+.sheaf-composer-textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sheaf-composer-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sheaf-sm);
+}
+
+.sheaf-composer-hint {
+  color: var(--text-faint);
+  font-size: var(--sheaf-text-xs);
+}
+
+@media (max-width: 700px) {
+  .sheaf-composer-hint {
+    display: none;
+  }
+
+  .sheaf-composer-row {
+    justify-content: flex-end;
+  }
+}
+
+/* ----------------------------------------------------------------
+   Send button (circular accent)
+   ---------------------------------------------------------------- */
+.sheaf-send-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity 120ms ease, transform 80ms ease;
+}
+
+.sheaf-send-btn:hover {
+  opacity: 0.9;
+}
+
+.sheaf-send-btn:active {
+  transform: scale(0.93);
+}
+
+.sheaf-send-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.sheaf-send-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ----------------------------------------------------------------
+   Modal overrides
+   ---------------------------------------------------------------- */
+.sheaf-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sheaf-sm);
+  margin-top: var(--sheaf-md);
+}
+
+/* ----------------------------------------------------------------
+   Animations
+   ---------------------------------------------------------------- */
+@keyframes sheaf-pulse {
+  0% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+}
+
+@keyframes sheaf-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}

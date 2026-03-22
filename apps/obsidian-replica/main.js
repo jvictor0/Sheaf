@@ -1,9 +1,7 @@
 "use strict";
-var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -17,14 +15,6 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
-  mod
-));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/main.ts
@@ -33,7 +23,10 @@ __export(main_exports, {
   default: () => SheafObsidianReplicaPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian7 = require("obsidian");
+
+// src/chat/api.ts
+var import_obsidian = require("obsidian");
 
 // src/chat/protocol.ts
 var CHAT_PROTOCOL_VERSION = 1;
@@ -135,23 +128,19 @@ function decodeModelListResponse(value) {
 }
 
 // src/chat/api.ts
-async function requestObsidianUrl(args) {
-  const obsidian = await import("obsidian");
-  return obsidian.requestUrl(args);
-}
 var ChatApiClient = class {
   constructor(settings) {
     this.settings = settings;
   }
   async listThreads() {
-    const response = await requestObsidianUrl({
+    const response = await (0, import_obsidian.requestUrl)({
       url: `${this.settings().serverBaseUrl}/threads`,
       method: "GET"
     });
     return decodeThreadsResponse(response.json);
   }
   async createThread(name) {
-    const response = await requestObsidianUrl({
+    const response = await (0, import_obsidian.requestUrl)({
       url: `${this.settings().serverBaseUrl}/threads`,
       method: "POST",
       contentType: "application/json",
@@ -160,14 +149,14 @@ var ChatApiClient = class {
     return decodeCreateThreadResponse(response.json);
   }
   async listModels() {
-    const response = await requestObsidianUrl({
+    const response = await (0, import_obsidian.requestUrl)({
       url: `${this.settings().serverBaseUrl}/models`,
       method: "GET"
     });
     return decodeModelListResponse(response.json);
   }
   async enterThread(threadID, knownTailTurnID) {
-    const response = await requestObsidianUrl({
+    const response = await (0, import_obsidian.requestUrl)({
       url: `${this.settings().serverBaseUrl}/threads/${encodeURIComponent(threadID)}/enter-chat`,
       method: "POST",
       contentType: "application/json",
@@ -241,7 +230,7 @@ function summarizeToolCall(call) {
 // src/chat/store.ts
 function buildTranscriptItems(session) {
   const items = [];
-  for (const turn of session.committedTurns) {
+  for (const turn of session.committedHistory.turns) {
     if (turn.speaker === "assistant") {
       for (const call of turn.tool_calls) {
         items.push({
@@ -281,10 +270,12 @@ function buildTranscriptItems(session) {
 function createChatSession(thread) {
   return {
     thread,
-    committedTurns: [],
+    committedHistory: {
+      turns: [],
+      lastTurnID: null
+    },
     pendingSends: [],
     streamingByQueue: {},
-    lastCommittedTurnID: null,
     lastFrameAtMs: null,
     errorMessage: null,
     connectionState: "idle",
@@ -302,11 +293,21 @@ function consumeMatchingPendingSend(session, turn) {
     if (pending.text !== turn.message_text) {
       return false;
     }
-    return pending.responseToTurnID === turn.prev_turn_id || pending.responseToTurnID === session.lastCommittedTurnID;
+    return pending.responseToTurnID === turn.prev_turn_id || pending.responseToTurnID === session.committedHistory.lastTurnID;
   });
   if (index >= 0) {
     session.pendingSends.splice(index, 1);
   }
+}
+function getLastCommittedTurnID(session) {
+  return session.committedHistory.lastTurnID;
+}
+function clearCommittedHistory(session) {
+  session.committedHistory = {
+    turns: [],
+    lastTurnID: null
+  };
+  return rebuildTranscript(session);
 }
 function rebuildTranscript(session) {
   session.transcriptItems = buildTranscriptItems(session);
@@ -331,11 +332,11 @@ function dropQueueArtifacts(session, queueID) {
   return rebuildTranscript(session);
 }
 function applyCommittedTurn(session, turn) {
-  if (session.committedTurns.some((existing) => existing.id === turn.id)) {
+  if (session.committedHistory.turns.some((existing) => existing.id === turn.id)) {
     return session;
   }
-  session.committedTurns.push(turn);
-  session.lastCommittedTurnID = turn.id;
+  session.committedHistory.turns.push(turn);
+  session.committedHistory.lastTurnID = turn.id;
   consumeMatchingPendingSend(session, turn);
   return rebuildTranscript(session);
 }
@@ -744,7 +745,7 @@ var ChatService = class {
     this.activeThreadID = threadID;
     const attempt = ++this.connectAttempt;
     try {
-      const enter = await this.api.enterThread(threadID, session.lastCommittedTurnID);
+      const enter = await this.api.enterThread(threadID, getLastCommittedTurnID(session));
       if (attempt !== this.connectAttempt || this.activeThreadID !== threadID) {
         return;
       }
@@ -781,7 +782,7 @@ var ChatService = class {
     const clientMessageID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
     const localMessageID = `local-${clientMessageID}`;
     const modelName = this.options.settings().chatDefaultModel;
-    const inResponseToTurnID = session.lastCommittedTurnID ?? null;
+    const inResponseToTurnID = getLastCommittedTurnID(session);
     this.store.updateSession(threadID, (session2) => {
       session2.pendingSends.push({
         clientMessageID,
@@ -839,7 +840,7 @@ var ChatService = class {
           session.connectionState = "replaying";
           session.errorMessage = null;
           session.statusMessage = "Loading chat history\u2026";
-          session.committedTurns = [];
+          clearCommittedHistory(session);
           dropUncommittedArtifacts(session);
           break;
         case "handshake_ready":
@@ -1009,10 +1010,15 @@ var ChatService = class {
 };
 
 // src/chat/view.ts
-var import_obsidian = require("obsidian");
-var SHEAF_CHAT_VIEW_TYPE = "sheaf-chat-view";
+var import_obsidian5 = require("obsidian");
+
+// src/chat/components/threadList.ts
+var import_obsidian3 = require("obsidian");
+
+// src/chat/modals.ts
+var import_obsidian2 = require("obsidian");
 var DEFAULT_NEW_THREAD_NAME = "New thread";
-var NewThreadModal = class extends import_obsidian.Modal {
+var NewThreadModal = class extends import_obsidian2.Modal {
   constructor(app, onSubmit) {
     super(app);
     this.onSubmit = onSubmit;
@@ -1021,59 +1027,32 @@ var NewThreadModal = class extends import_obsidian.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h3", { text: "New thread" });
+    this.titleEl.setText("New thread");
     let inputEl = null;
-    new import_obsidian.Setting(contentEl).setName("Thread name").addText((text) => {
+    new import_obsidian2.Setting(contentEl).setName("Thread name").addText((text) => {
       inputEl = text.inputEl;
       text.setValue(this.name).onChange((value) => {
         this.name = value;
       });
+      text.inputEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          this.onSubmit(this.name);
+          this.close();
+        }
+      });
     });
-    const actions = contentEl.createDiv({ cls: "sheaf-chat-actions" });
-    const cancel = actions.createEl("button", { text: "Cancel", cls: "sheaf-chat-icon-button" });
-    cancel.addEventListener("click", () => this.close());
-    const create = actions.createEl("button", { text: "Create", cls: "sheaf-chat-action" });
-    create.addEventListener("click", () => {
+    const actions = contentEl.createDiv({ cls: "sheaf-modal-actions" });
+    actions.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.close());
+    actions.createEl("button", { text: "Create", cls: "mod-cta" }).addEventListener("click", () => {
       this.onSubmit(this.name);
       this.close();
     });
     window.setTimeout(() => inputEl?.focus(), 0);
   }
 };
-function ensureStyles(doc) {
-  if (doc.getElementById("sheaf-chat-styles")) {
-    return;
-  }
-  const style = doc.createElement("style");
-  style.id = "sheaf-chat-styles";
-  style.textContent = `
-    .sheaf-chat-view { display: flex; flex-direction: column; height: 100%; gap: 12px; padding: 12px; }
-    .sheaf-chat-header, .sheaf-chat-conversation-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .sheaf-chat-title { font-weight: 700; }
-    .sheaf-chat-subtle { color: var(--text-muted); font-size: 0.9em; }
-    .sheaf-chat-thread-list, .sheaf-chat-transcript { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-height: 0; }
-    .sheaf-chat-thread-item, .sheaf-chat-action, .sheaf-chat-icon-button, .sheaf-chat-back { border: 1px solid var(--background-modifier-border); background: var(--background-secondary); border-radius: 10px; padding: 12px 12px; cursor: pointer; }
-    .sheaf-chat-thread-item { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; text-align: left; width: 100%; gap: 5px; white-space: normal; min-height: 56px; }
-    .sheaf-chat-thread-title { display: block; font-weight: 700; }
-    .sheaf-chat-thread-item:hover, .sheaf-chat-action:hover, .sheaf-chat-icon-button:hover, .sheaf-chat-back:hover { background: var(--background-modifier-hover); }
-    .sheaf-chat-actions { display: flex; gap: 8px; }
-    .sheaf-chat-thread-meta { display: block; font-size: 0.82em; }
-    .sheaf-chat-bubble { border-radius: 14px; padding: 10px 12px; white-space: pre-wrap; line-height: 1.45; }
-    .sheaf-chat-bubble-user { align-self: flex-end; background: var(--interactive-accent); color: var(--text-on-accent); max-width: 85%; }
-    .sheaf-chat-bubble-assistant { align-self: flex-start; background: var(--background-secondary); max-width: 92%; }
-    .sheaf-chat-bubble-system { align-self: stretch; background: var(--background-modifier-hover); }
-    .sheaf-chat-tool { align-self: flex-start; background: var(--background-primary-alt); border: 1px solid var(--background-modifier-border); color: var(--text-muted); font-size: 0.9em; }
-    .sheaf-chat-tool-error { color: var(--text-error); }
-    .sheaf-chat-streaming::after { content: " "; display: inline-block; width: 0.75em; height: 0.75em; margin-left: 6px; border-radius: 999px; background: var(--interactive-accent); animation: sheaf-chat-pulse 1s infinite ease-in-out; vertical-align: middle; }
-    .sheaf-chat-status { color: var(--text-muted); font-size: 0.9em; min-height: 1.2em; }
-    .sheaf-chat-error { color: var(--text-error); }
-    .sheaf-chat-composer { display: flex; flex-direction: column; gap: 8px; }
-    .sheaf-chat-textarea { width: 100%; min-height: 72px; resize: vertical; border-radius: 12px; padding: 10px 12px; border: 1px solid var(--background-modifier-border); background: var(--background-primary); }
-    .sheaf-chat-send-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-    @keyframes sheaf-chat-pulse { 0% { opacity: 0.3; transform: scale(0.8);} 50% { opacity: 1; transform: scale(1);} 100% { opacity: 0.3; transform: scale(0.8);} }
-  `;
-  doc.head.appendChild(style);
-}
+
+// src/chat/components/threadList.ts
 function formatWhen(value) {
   if (!value) {
     return null;
@@ -1084,230 +1063,256 @@ function formatWhen(value) {
   }
   return parsed.toLocaleString();
 }
-var SheafChatView = class extends import_obsidian.ItemView {
-  constructor(leaf, chatService) {
-    super(leaf);
-    this.chatService = chatService;
+var ThreadListComponent = class {
+  container = null;
+  mount(parent) {
+    parent.empty();
+    parent.addClass("sheaf-root");
+    this.container = parent;
   }
-  unsubscribe = null;
-  composerValue = "";
-  mountedScreen = null;
-  mountedThreadID = null;
-  threadListEl = null;
-  conversationEl = null;
-  conversationTitleEl = null;
-  conversationSubtitleEl = null;
-  transcriptEl = null;
-  statusEl = null;
-  composerEl = null;
-  sendButtonEl = null;
-  transcriptRowMap = /* @__PURE__ */ new Map();
-  lastTranscriptSnapshot = /* @__PURE__ */ new Map();
-  lastStatusText = "";
-  getViewType() {
-    return SHEAF_CHAT_VIEW_TYPE;
-  }
-  getDisplayText() {
-    return "Sheaf Chat";
-  }
-  async onOpen() {
-    ensureStyles(document);
-    this.unsubscribe = this.chatService.subscribe(() => {
-      this.render(this.chatService.getSnapshot());
-    });
-    await this.chatService.activateView();
-    this.render(this.chatService.getSnapshot());
-  }
-  async onClose() {
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    await this.chatService.deactivateView();
-  }
-  render(state) {
-    if (state.screen === "threads") {
-      this.renderThreadList(state);
+  update(state, service, app) {
+    if (!this.container) {
       return;
     }
-    this.renderConversation(state);
-  }
-  renderThreadList(state) {
-    const { contentEl } = this;
-    if (this.mountedScreen !== "threads") {
-      contentEl.empty();
-      contentEl.addClass("sheaf-chat-view");
-      this.threadListEl = contentEl.createDiv({ cls: "sheaf-chat-view" });
-      this.conversationEl = null;
-      this.mountedScreen = "threads";
-      this.mountedThreadID = null;
-      this.transcriptRowMap.clear();
-      this.lastTranscriptSnapshot.clear();
-      this.lastStatusText = "";
-    }
-    const container = this.threadListEl;
-    if (!container) {
-      return;
-    }
-    container.empty();
-    const header = container.createDiv({ cls: "sheaf-chat-header" });
-    header.createDiv({ text: "Sheaf Chat", cls: "sheaf-chat-title" });
-    const actions = header.createDiv({ cls: "sheaf-chat-actions" });
-    const refreshButton = actions.createEl("button", { text: "Refresh", cls: "sheaf-chat-icon-button" });
-    refreshButton.addEventListener("click", () => {
-      void this.chatService.refreshThreads();
+    this.container.empty();
+    const header = this.container.createDiv({ cls: "sheaf-header" });
+    header.createDiv({ text: "Sheaf Chat", cls: "sheaf-header-title" });
+    const actions = header.createDiv({ cls: "sheaf-header-actions" });
+    const refreshBtn = actions.createEl("button", { cls: "sheaf-icon-btn" });
+    (0, import_obsidian3.setIcon)(refreshBtn, "refresh-cw");
+    refreshBtn.setAttribute("aria-label", "Refresh threads");
+    refreshBtn.addEventListener("click", () => {
+      void service.refreshThreads();
     });
-    const settingsButton = actions.createEl("button", { text: "Gear", cls: "sheaf-chat-icon-button" });
-    settingsButton.setAttribute("aria-label", "Open chat settings");
-    settingsButton.addEventListener("click", () => {
-      this.chatService.openSettings();
+    const settingsBtn = actions.createEl("button", { cls: "sheaf-icon-btn" });
+    (0, import_obsidian3.setIcon)(settingsBtn, "settings");
+    settingsBtn.setAttribute("aria-label", "Open settings");
+    settingsBtn.addEventListener("click", () => {
+      service.openSettings();
     });
-    const newThreadButton = container.createEl("button", { text: "New thread", cls: "sheaf-chat-action" });
-    newThreadButton.disabled = state.threadList.creating;
-    newThreadButton.addEventListener("click", () => {
-      new NewThreadModal(this.app, (name) => {
-        void this.chatService.createThread(name).catch((error) => {
-          new import_obsidian.Notice(error instanceof Error ? error.message : String(error));
+    const newBtn = this.container.createEl("button", { cls: "sheaf-new-thread-btn" });
+    const plusIcon = newBtn.createSpan();
+    (0, import_obsidian3.setIcon)(plusIcon, "plus");
+    newBtn.createSpan({ text: "New thread" });
+    newBtn.disabled = state.threadList.creating;
+    newBtn.setAttribute("aria-label", "Create a new thread");
+    newBtn.addEventListener("click", () => {
+      new NewThreadModal(app, (name) => {
+        void service.createThread(name).catch((error) => {
+          new import_obsidian3.Notice(error instanceof Error ? error.message : String(error));
         });
       }).open();
     });
     if (state.threadList.loading) {
-      container.createDiv({ text: "Loading threads\u2026", cls: "sheaf-chat-subtle" });
+      this.container.createDiv({ text: "Loading threads\u2026", cls: "sheaf-empty-state" });
       return;
     }
     if (state.threadList.errorMessage) {
-      container.createDiv({ text: state.threadList.errorMessage, cls: "sheaf-chat-error" });
+      this.container.createDiv({ text: state.threadList.errorMessage, cls: "sheaf-error-text" });
     }
     if (state.threadList.threads.length === 0) {
-      container.createDiv({ text: "No threads yet. Create one to start chatting.", cls: "sheaf-chat-subtle" });
+      this.container.createDiv({
+        text: "No threads yet. Create one to start chatting.",
+        cls: "sheaf-empty-state"
+      });
       return;
     }
-    const list = container.createDiv({ cls: "sheaf-chat-thread-list" });
+    const list = this.container.createDiv({ cls: "sheaf-thread-list" });
+    list.setAttribute("role", "list");
+    list.setAttribute("aria-label", "Chat threads");
     for (const thread of state.threadList.threads) {
-      const button = list.createEl("button", { cls: "sheaf-chat-thread-item" });
-      button.createSpan({ text: thread.name || thread.thread_id, cls: "sheaf-chat-thread-title" });
+      const card = list.createEl("button", { cls: "sheaf-thread-card" });
+      card.setAttribute("role", "listitem");
+      card.createSpan({ text: thread.name || thread.thread_id, cls: "sheaf-thread-card-title" });
       const updated = formatWhen(thread.updated_at);
       if (updated) {
-        button.createSpan({ text: `Updated ${updated}`, cls: "sheaf-chat-subtle sheaf-chat-thread-meta" });
+        card.createSpan({ text: `Updated ${updated}`, cls: "sheaf-thread-card-meta" });
       }
-      button.addEventListener("click", () => {
-        void this.chatService.openThread(thread.thread_id).catch((error) => {
-          new import_obsidian.Notice(error instanceof Error ? error.message : String(error));
+      card.addEventListener("click", () => {
+        void service.openThread(thread.thread_id).catch((error) => {
+          new import_obsidian3.Notice(error instanceof Error ? error.message : String(error));
         });
       });
     }
   }
-  renderConversation(state) {
-    const session = state.activeSession;
-    const { contentEl } = this;
-    if (this.mountedScreen !== "conversation") {
-      contentEl.empty();
-      contentEl.addClass("sheaf-chat-view");
-      this.buildConversationShell(contentEl);
-      this.threadListEl = null;
-      this.mountedScreen = "conversation";
-      this.mountedThreadID = null;
-      this.transcriptRowMap.clear();
-      this.lastTranscriptSnapshot.clear();
-      this.lastStatusText = "";
+  destroy() {
+    this.container = null;
+  }
+};
+
+// src/chat/components/conversation.ts
+var import_obsidian4 = require("obsidian");
+
+// src/chat/components/messageRenderer.ts
+function itemSignature(item) {
+  switch (item.kind) {
+    case "tool_call":
+      return `${item.kind}:${item.text}:${item.tone}`;
+    case "streaming":
+      return `${item.kind}:${item.text}:${item.queueID}`;
+    default:
+      return `${item.kind}:${item.role}:${item.text}`;
+  }
+}
+function renderTranscriptItem(item) {
+  const element = document.createElement("div");
+  element.dataset.signature = itemSignature(item);
+  element.setAttribute("role", "listitem");
+  if (item.kind === "tool_call") {
+    element.addClasses(["sheaf-message", "sheaf-message--tool"]);
+    if (item.tone === "error") {
+      element.addClass("sheaf-message--tool-error");
     }
+    element.setText(item.text);
+    return element;
+  }
+  element.addClass("sheaf-message");
+  if (item.role === "user") {
+    element.addClass("sheaf-message--user");
+  } else if (item.role === "assistant") {
+    element.addClass("sheaf-message--assistant");
+  } else {
+    element.addClass("sheaf-message--system");
+  }
+  if (item.kind === "pending") {
+    element.addClass("sheaf-message--pending");
+  }
+  if (item.kind === "streaming") {
+    element.addClass("sheaf-message--streaming");
+  }
+  element.setText(item.text);
+  return element;
+}
+function updateTranscriptItem(element, item) {
+  const newSig = itemSignature(item);
+  if (element.dataset.signature === newSig) {
+    return;
+  }
+  if (item.kind === "streaming" && element.hasClass("sheaf-message--streaming")) {
+    element.textContent = item.text;
+    element.dataset.signature = newSig;
+    return;
+  }
+  const replacement = renderTranscriptItem(item);
+  element.className = replacement.className;
+  element.textContent = replacement.textContent;
+  element.dataset.signature = replacement.dataset.signature;
+}
+
+// src/chat/components/conversation.ts
+function formatWhen2(value) {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString();
+}
+var ConversationComponent = class {
+  container = null;
+  titleEl = null;
+  subtitleEl = null;
+  transcriptEl = null;
+  statusEl = null;
+  composerEl = null;
+  sendBtn = null;
+  composerValue = "";
+  transcriptRowMap = /* @__PURE__ */ new Map();
+  lastTranscriptSnapshot = /* @__PURE__ */ new Map();
+  lastStatusText = "";
+  mountedThreadID = null;
+  mount(parent, service) {
+    parent.empty();
+    parent.addClass("sheaf-root");
+    this.container = parent;
+    const conversation = this.container.createDiv({ cls: "sheaf-conversation" });
+    const header = conversation.createDiv({ cls: "sheaf-conv-header" });
+    const backBtn = header.createEl("button", { cls: "sheaf-icon-btn" });
+    (0, import_obsidian4.setIcon)(backBtn, "arrow-left");
+    backBtn.setAttribute("aria-label", "Back to threads");
+    backBtn.addEventListener("click", () => {
+      void service.showThreadList();
+    });
+    const info = header.createDiv({ cls: "sheaf-conv-header-info" });
+    this.titleEl = info.createDiv({ cls: "sheaf-conv-title" });
+    this.subtitleEl = info.createDiv({ cls: "sheaf-conv-subtitle" });
+    const settingsBtn = header.createEl("button", { cls: "sheaf-icon-btn" });
+    (0, import_obsidian4.setIcon)(settingsBtn, "settings");
+    settingsBtn.setAttribute("aria-label", "Open settings");
+    settingsBtn.addEventListener("click", () => {
+      service.openSettings();
+    });
+    this.transcriptEl = conversation.createDiv({ cls: "sheaf-transcript" });
+    this.transcriptEl.setAttribute("role", "log");
+    this.transcriptEl.setAttribute("aria-label", "Chat messages");
+    this.statusEl = conversation.createDiv({ cls: "sheaf-status" });
+    this.statusEl.setAttribute("aria-live", "polite");
+    const composer = conversation.createDiv({ cls: "sheaf-composer" });
+    this.composerEl = composer.createEl("textarea", {
+      cls: "sheaf-composer-textarea",
+      attr: { placeholder: "Message Sheaf\u2026", rows: "1" }
+    });
+    this.composerEl.setAttribute("aria-label", "Message input");
+    this.composerEl.addEventListener("input", () => {
+      this.composerValue = this.composerEl?.value ?? "";
+      this.autosizeComposer();
+    });
+    this.composerEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        void this.submitComposer(service);
+      }
+    });
+    const row = composer.createDiv({ cls: "sheaf-composer-row" });
+    row.createDiv({ text: "Enter sends, Shift+Enter new line", cls: "sheaf-composer-hint" });
+    this.sendBtn = row.createEl("button", { cls: "sheaf-send-btn" });
+    (0, import_obsidian4.setIcon)(this.sendBtn, "send");
+    this.sendBtn.setAttribute("aria-label", "Send message");
+    this.sendBtn.addEventListener("click", () => {
+      void this.submitComposer(service);
+    });
+  }
+  update(session) {
     if (!session) {
-      this.conversationEl?.empty();
-      this.conversationEl?.createDiv({ text: "No thread selected.", cls: "sheaf-chat-subtle" });
+      this.transcriptEl?.empty();
+      this.titleEl?.setText("");
+      this.subtitleEl?.setText("");
       return;
     }
     if (this.mountedThreadID !== session.thread.thread_id) {
       this.resetTranscript();
       this.mountedThreadID = session.thread.thread_id;
     }
-    if (this.conversationTitleEl) {
-      this.conversationTitleEl.setText(session.thread.name || session.thread.thread_id);
-    }
-    if (this.conversationSubtitleEl) {
-      const updated = formatWhen(session.thread.updated_at);
-      this.conversationSubtitleEl.setText(updated ? `Updated ${updated}` : "");
-    }
+    this.titleEl?.setText(session.thread.name || session.thread.thread_id);
+    const updated = formatWhen2(session.thread.updated_at);
+    this.subtitleEl?.setText(updated ? `Updated ${updated}` : "");
     this.syncTranscript(session);
     this.syncStatus(session);
     this.syncComposer(session);
   }
-  buildConversationShell(container) {
-    const conversation = container.createDiv({ cls: "sheaf-chat-view" });
-    this.conversationEl = conversation;
-    const header = conversation.createDiv({ cls: "sheaf-chat-conversation-header" });
-    const back = header.createEl("button", { text: "Back", cls: "sheaf-chat-back" });
-    back.addEventListener("click", () => {
-      void this.chatService.showThreadList();
-    });
-    const titleWrap = header.createDiv();
-    this.conversationTitleEl = titleWrap.createDiv({ cls: "sheaf-chat-title" });
-    this.conversationSubtitleEl = titleWrap.createDiv({ cls: "sheaf-chat-subtle" });
-    const settingsButton = header.createEl("button", { text: "Gear", cls: "sheaf-chat-icon-button" });
-    settingsButton.setAttribute("aria-label", "Open chat settings");
-    settingsButton.addEventListener("click", () => {
-      this.chatService.openSettings();
-    });
-    this.transcriptEl = conversation.createDiv({ cls: "sheaf-chat-transcript" });
-    this.statusEl = conversation.createDiv({ cls: "sheaf-chat-status" });
-    const composer = conversation.createDiv({ cls: "sheaf-chat-composer" });
-    this.composerEl = composer.createEl("textarea", {
-      cls: "sheaf-chat-textarea",
-      attr: { placeholder: "Message Sheaf\u2026" }
-    });
-    this.composerEl.addEventListener("input", () => {
-      this.composerValue = this.composerEl?.value ?? "";
-    });
-    this.composerEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        void this.submitComposer();
-      }
-    });
-    const sendRow = composer.createDiv({ cls: "sheaf-chat-send-row" });
-    sendRow.createDiv({ text: "Enter sends, Shift+Enter adds a new line.", cls: "sheaf-chat-subtle" });
-    this.sendButtonEl = sendRow.createEl("button", { text: "Send", cls: "sheaf-chat-action" });
-    this.sendButtonEl.addEventListener("click", () => {
-      void this.submitComposer();
-    });
-  }
-  syncComposer(session) {
-    if (!this.composerEl) {
+  scrollToBottomIfNeeded() {
+    if (!this.transcriptEl) {
       return;
     }
-    const canSend = session.connectionState === "live";
-    this.composerEl.disabled = !canSend;
-    this.composerEl.placeholder = canSend ? "Message Sheaf\u2026" : "Loading chat history\u2026";
-    if (this.sendButtonEl) {
-      this.sendButtonEl.disabled = !canSend;
-    }
-    if (this.composerEl.value !== this.composerValue && document.activeElement !== this.composerEl) {
-      this.composerEl.value = this.composerValue;
+    if (this.isNearBottom(this.transcriptEl)) {
+      this.transcriptEl.scrollTop = this.transcriptEl.scrollHeight;
     }
   }
-  async submitComposer() {
-    const value = this.composerEl?.value ?? "";
-    const sent = await this.chatService.sendMessage(value);
-    if (sent) {
-      this.clearComposer();
-    }
-  }
-  clearComposer() {
+  destroy() {
+    this.container = null;
+    this.titleEl = null;
+    this.subtitleEl = null;
+    this.transcriptEl = null;
+    this.statusEl = null;
+    this.composerEl = null;
+    this.sendBtn = null;
+    this.transcriptRowMap.clear();
+    this.lastTranscriptSnapshot.clear();
+    this.lastStatusText = "";
+    this.mountedThreadID = null;
     this.composerValue = "";
-    if (!this.composerEl) {
-      return;
-    }
-    this.composerEl.value = "";
-    this.composerEl.focus();
-  }
-  syncStatus(session) {
-    if (!this.statusEl) {
-      return;
-    }
-    const statusText = session.errorMessage ?? session.statusMessage ?? (session.thinkingActive ? "Thinking\u2026" : session.connectionState === "connecting" ? "Connecting\u2026" : "");
-    if (statusText === this.lastStatusText) {
-      return;
-    }
-    this.lastStatusText = statusText;
-    this.statusEl.setText(statusText);
-    this.statusEl.className = `sheaf-chat-status${session.errorMessage ? " sheaf-chat-error" : ""}`;
   }
   syncTranscript(session) {
     if (!this.transcriptEl) {
@@ -1315,18 +1320,18 @@ var SheafChatView = class extends import_obsidian.ItemView {
     }
     const visibleSnapshot = /* @__PURE__ */ new Map();
     for (const item of session.transcriptItems) {
-      visibleSnapshot.set(item.id, this.itemSignature(item));
+      visibleSnapshot.set(item.id, itemSignature(item));
     }
-    let transcriptChanged = visibleSnapshot.size !== this.lastTranscriptSnapshot.size;
-    if (!transcriptChanged) {
-      for (const [id, signature] of visibleSnapshot.entries()) {
-        if (this.lastTranscriptSnapshot.get(id) !== signature) {
-          transcriptChanged = true;
+    let changed = visibleSnapshot.size !== this.lastTranscriptSnapshot.size;
+    if (!changed) {
+      for (const [id, sig] of visibleSnapshot.entries()) {
+        if (this.lastTranscriptSnapshot.get(id) !== sig) {
+          changed = true;
           break;
         }
       }
     }
-    if (!transcriptChanged) {
+    if (!changed) {
       return;
     }
     const wasNearBottom = this.isNearBottom(this.transcriptEl);
@@ -1340,11 +1345,11 @@ var SheafChatView = class extends import_obsidian.ItemView {
     for (const item of session.transcriptItems) {
       const existing = this.transcriptRowMap.get(item.id);
       if (existing) {
-        this.updateTranscriptItem(existing, item);
+        updateTranscriptItem(existing, item);
         this.transcriptEl.appendChild(existing);
         continue;
       }
-      const node = this.renderTranscriptItem(item);
+      const node = renderTranscriptItem(item);
       this.transcriptRowMap.set(item.id, node);
       this.transcriptEl.appendChild(node);
     }
@@ -1353,59 +1358,159 @@ var SheafChatView = class extends import_obsidian.ItemView {
       this.transcriptEl.scrollTop = this.transcriptEl.scrollHeight;
     }
   }
+  syncStatus(session) {
+    if (!this.statusEl) {
+      return;
+    }
+    const text = session.errorMessage ?? session.statusMessage ?? (session.thinkingActive ? "Thinking\u2026" : session.connectionState === "connecting" ? "Connecting\u2026" : "");
+    if (text === this.lastStatusText) {
+      return;
+    }
+    this.lastStatusText = text;
+    this.statusEl.setText(text);
+    this.statusEl.className = session.errorMessage ? "sheaf-status sheaf-status--error" : "sheaf-status";
+  }
+  syncComposer(session) {
+    if (!this.composerEl) {
+      return;
+    }
+    const canSend = session.connectionState === "live";
+    this.composerEl.disabled = !canSend;
+    this.composerEl.placeholder = canSend ? "Message Sheaf\u2026" : "Loading chat history\u2026";
+    if (this.sendBtn) {
+      this.sendBtn.disabled = !canSend;
+    }
+    if (this.composerEl.value !== this.composerValue && document.activeElement !== this.composerEl) {
+      this.composerEl.value = this.composerValue;
+    }
+    this.autosizeComposer();
+  }
+  async submitComposer(service) {
+    const value = this.composerEl?.value ?? "";
+    const sent = await service.sendMessage(value);
+    if (sent) {
+      this.clearComposer();
+    }
+  }
+  clearComposer() {
+    this.composerValue = "";
+    if (!this.composerEl) {
+      return;
+    }
+    this.composerEl.value = "";
+    this.composerEl.blur();
+    this.autosizeComposer();
+  }
+  autosizeComposer() {
+    if (!this.composerEl) {
+      return;
+    }
+    const baseHeight = 44;
+    const maxHeight = Math.max(88, Math.floor(window.innerHeight * 0.35));
+    this.composerEl.style.height = `${baseHeight}px`;
+    const scrollH = this.composerEl.scrollHeight;
+    const nextHeight = Math.min(Math.max(scrollH, baseHeight), maxHeight);
+    this.composerEl.style.height = `${nextHeight}px`;
+    this.composerEl.style.overflowY = scrollH > maxHeight ? "auto" : "hidden";
+  }
   resetTranscript() {
     this.transcriptEl?.empty();
     this.transcriptRowMap.clear();
     this.lastTranscriptSnapshot.clear();
+    this.lastStatusText = "";
   }
-  isNearBottom(element) {
-    return element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+  isNearBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 24;
   }
-  itemSignature(item) {
-    switch (item.kind) {
-      case "tool_call":
-        return `${item.kind}:${item.text}:${item.tone}`;
-      case "streaming":
-        return `${item.kind}:${item.text}:${item.queueID}`;
-      default:
-        return `${item.kind}:${item.role}:${item.text}`;
-    }
+};
+
+// src/chat/view.ts
+var SHEAF_CHAT_VIEW_TYPE = "sheaf-chat-view";
+var SheafChatView = class extends import_obsidian5.ItemView {
+  constructor(leaf, chatService) {
+    super(leaf);
+    this.chatService = chatService;
   }
-  updateTranscriptItem(element, item) {
-    if (element.dataset.signature === this.itemSignature(item)) {
+  unsubscribe = null;
+  resizeObserver = null;
+  mountedScreen = null;
+  threadList = new ThreadListComponent();
+  conversation = new ConversationComponent();
+  getViewType() {
+    return SHEAF_CHAT_VIEW_TYPE;
+  }
+  getDisplayText() {
+    return "Sheaf Chat";
+  }
+  async onOpen() {
+    this.contentEl.style.display = "flex";
+    this.contentEl.style.flexDirection = "column";
+    this.observeParentSize();
+    this.unsubscribe = this.chatService.subscribe(() => {
+      this.render(this.chatService.getSnapshot());
+    });
+    await this.chatService.activateView();
+    this.render(this.chatService.getSnapshot());
+  }
+  async onClose() {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.contentEl.style.display = "";
+    this.contentEl.style.flexDirection = "";
+    this.contentEl.style.height = "";
+    this.threadList.destroy();
+    this.conversation.destroy();
+    this.mountedScreen = null;
+    await this.chatService.deactivateView();
+  }
+  render(state) {
+    if (state.screen === "threads") {
+      if (this.mountedScreen !== "threads") {
+        this.conversation.destroy();
+        this.contentEl.empty();
+        this.contentEl.removeClass("sheaf-root");
+        this.threadList.mount(this.contentEl);
+        this.mountedScreen = "threads";
+      }
+      this.threadList.update(state, this.chatService, this.app);
       return;
     }
-    element.className = "";
-    element.textContent = "";
-    const replacement = this.renderTranscriptItem(item);
-    element.className = replacement.className;
-    element.textContent = replacement.textContent;
-    element.dataset.signature = replacement.dataset.signature;
+    if (this.mountedScreen !== "conversation") {
+      this.threadList.destroy();
+      this.contentEl.empty();
+      this.contentEl.removeClass("sheaf-root");
+      this.conversation.mount(this.contentEl, this.chatService);
+      this.mountedScreen = "conversation";
+    }
+    this.conversation.update(state.activeSession);
   }
-  renderTranscriptItem(item) {
-    const element = document.createElement("div");
-    element.dataset.signature = this.itemSignature(item);
-    if (item.kind === "tool_call") {
-      element.addClass("sheaf-chat-bubble", "sheaf-chat-tool");
-      if (item.tone === "error") {
-        element.addClass("sheaf-chat-tool-error");
+  // Obsidian's parent container doesn't give contentEl a CSS-definite
+  // height (it's sized by flex layout, not an explicit height property).
+  // We observe the parent's actual size and set an explicit pixel height
+  // on contentEl so inner flex children can resolve flex-grow.
+  //
+  observeParentSize() {
+    const parent = this.contentEl.parentElement;
+    if (!parent) {
+      return;
+    }
+    let lastHeight = "";
+    const sync = () => {
+      const parentRect = parent.getBoundingClientRect();
+      const elRect = this.contentEl.getBoundingClientRect();
+      const offset = elRect.top - parentRect.top;
+      const available = parentRect.height - offset;
+      const h = `${Math.max(200, Math.round(available))}px`;
+      if (h !== lastHeight) {
+        this.contentEl.style.height = h;
+        lastHeight = h;
       }
-      element.setText(item.text);
-      return element;
-    }
-    element.addClass("sheaf-chat-bubble");
-    if (item.role === "user") {
-      element.addClass("sheaf-chat-bubble-user");
-    } else if (item.role === "assistant") {
-      element.addClass("sheaf-chat-bubble-assistant");
-    } else {
-      element.addClass("sheaf-chat-bubble-system");
-    }
-    if (item.kind === "streaming") {
-      element.addClass("sheaf-chat-streaming");
-    }
-    element.setText(item.text);
-    return element;
+    };
+    this.resizeObserver = new ResizeObserver(sync);
+    this.resizeObserver.observe(parent);
+    sync();
   }
 };
 
@@ -1796,7 +1901,7 @@ var ReplicaStateRepository = class {
 };
 
 // src/syncClient.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/replayQueue.ts
 var ReplayQueue = class {
@@ -1879,7 +1984,7 @@ var ReplicaSyncService = class {
     return this.sendRequest("query_path_state", path, this.pendingPathState);
   }
   async startSession(settings, nextLsn) {
-    const response = await (0, import_obsidian2.requestUrl)({
+    const response = await (0, import_obsidian6.requestUrl)({
       url: `${settings.serverBaseUrl}/replica/sessions`,
       method: "POST",
       contentType: "application/json",
@@ -1911,7 +2016,7 @@ var ReplicaSyncService = class {
         void this.scheduleReconnect();
       });
       socket.addEventListener("error", () => {
-        new import_obsidian2.Notice("Replica sync socket error");
+        new import_obsidian6.Notice("Replica sync socket error");
       });
     });
   }
@@ -2026,7 +2131,7 @@ var ReplicaSyncService = class {
         }
       };
       await this.persistState();
-      new import_obsidian2.Notice(`Replica sync requires attention: ${this.state.health.lastError}`);
+      new import_obsidian6.Notice(`Replica sync requires attention: ${this.state.health.lastError}`);
     }
   }
   async persistState() {
@@ -2087,16 +2192,16 @@ var ObsidianVaultAdapter = class {
     this.app = app;
   }
   async read(path) {
-    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian3.normalizePath)(path));
-    if (!(file instanceof import_obsidian3.TFile)) {
+    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian7.normalizePath)(path));
+    if (!(file instanceof import_obsidian7.TFile)) {
       return null;
     }
     return this.app.vault.cachedRead(file);
   }
   async write(path, content) {
-    const normalized = (0, import_obsidian3.normalizePath)(path);
+    const normalized = (0, import_obsidian7.normalizePath)(path);
     const existing = this.app.vault.getAbstractFileByPath(normalized);
-    if (existing instanceof import_obsidian3.TFile) {
+    if (existing instanceof import_obsidian7.TFile) {
       await this.app.vault.modify(existing, content);
       await this.refreshOpenLeaves(existing, content);
       this.app.vault.trigger("modify", existing);
@@ -2108,8 +2213,8 @@ var ObsidianVaultAdapter = class {
     this.app.vault.trigger("modify", created);
   }
   async delete(path) {
-    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian3.normalizePath)(path));
-    if (file instanceof import_obsidian3.TFile) {
+    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian7.normalizePath)(path));
+    if (file instanceof import_obsidian7.TFile) {
       await this.closeOpenLeaves(file);
       await this.app.vault.delete(file, true);
       this.app.workspace.trigger("layout-change");
@@ -2120,7 +2225,7 @@ var ObsidianVaultAdapter = class {
     }
   }
   async stat(path) {
-    const stat = await this.app.vault.adapter.stat((0, import_obsidian3.normalizePath)(path));
+    const stat = await this.app.vault.adapter.stat((0, import_obsidian7.normalizePath)(path));
     if (!stat) {
       return null;
     }
@@ -2130,7 +2235,7 @@ var ObsidianVaultAdapter = class {
     return this.app.vault.getFiles().map((file) => file.path);
   }
   async ensureFolders(path) {
-    const parts = (0, import_obsidian3.normalizePath)(path).split("/").slice(0, -1);
+    const parts = (0, import_obsidian7.normalizePath)(path).split("/").slice(0, -1);
     let current = "";
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
@@ -2141,10 +2246,10 @@ var ObsidianVaultAdapter = class {
     }
   }
   async refreshOpenLeaves(file, content) {
-    const matchingLeaves = this.app.workspace.getLeavesOfType("markdown").filter((leaf) => leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file?.path === file.path);
+    const matchingLeaves = this.app.workspace.getLeavesOfType("markdown").filter((leaf) => leaf.view instanceof import_obsidian7.MarkdownView && leaf.view.file?.path === file.path);
     for (const leaf of matchingLeaves) {
       const view = leaf.view;
-      if (!(view instanceof import_obsidian3.MarkdownView)) {
+      if (!(view instanceof import_obsidian7.MarkdownView)) {
         continue;
       }
       const scroll = view.currentMode.getScroll();
@@ -2156,18 +2261,18 @@ var ObsidianVaultAdapter = class {
       view.previewMode?.rerender(true);
     }
     if (matchingLeaves.length > 0) {
-      new import_obsidian3.Notice(`Replica refreshed ${file.path}`, 2e3);
+      new import_obsidian7.Notice(`Replica refreshed ${file.path}`, 2e3);
       this.app.workspace.trigger("layout-change");
     }
   }
   async closeOpenLeaves(file) {
-    const matchingLeaves = this.app.workspace.getLeavesOfType("markdown").filter((leaf) => leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file?.path === file.path);
+    const matchingLeaves = this.app.workspace.getLeavesOfType("markdown").filter((leaf) => leaf.view instanceof import_obsidian7.MarkdownView && leaf.view.file?.path === file.path);
     for (const leaf of matchingLeaves) {
       await leaf.setViewState({ type: "empty" });
     }
   }
 };
-var ReplicaSettingTab = class extends import_obsidian3.PluginSettingTab {
+var ReplicaSettingTab = class extends import_obsidian7.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2175,37 +2280,37 @@ var ReplicaSettingTab = class extends import_obsidian3.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian3.Setting(containerEl).setName("Server base URL").setDesc("Replica session endpoint for the Sheaf server.").addText(
+    new import_obsidian7.Setting(containerEl).setName("Server base URL").setDesc("Replica session endpoint for the Sheaf server.").addText(
       (text) => text.setValue(this.plugin.settings.serverBaseUrl).onChange(async (value) => {
         this.plugin.settings.serverBaseUrl = value.trim() || DEFAULT_SETTINGS.serverBaseUrl;
         await this.plugin.persistSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Vault name").setDesc("Logical server-side vault name used by replica sync.").addText(
+    new import_obsidian7.Setting(containerEl).setName("Vault name").setDesc("Logical server-side vault name used by replica sync.").addText(
       (text) => text.setValue(this.plugin.settings.vaultName).onChange(async (value) => {
         this.plugin.settings.vaultName = value.trim() || this.app.vault.getName();
         await this.plugin.persistSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Server root path").setDesc("Required when the server must create the replica vault on first sync.").addText(
+    new import_obsidian7.Setting(containerEl).setName("Server root path").setDesc("Required when the server must create the replica vault on first sync.").addText(
       (text) => text.setValue(this.plugin.settings.serverRootPath).onChange(async (value) => {
         this.plugin.settings.serverRootPath = value.trim();
         await this.plugin.persistSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Create missing vault automatically").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Create missing vault automatically").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.createIfMissing).onChange(async (value) => {
         this.plugin.settings.createIfMissing = value;
         await this.plugin.persistSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Block local edits").setDesc("Reject typing, paste, undo, and redo in replicated notes.").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Block local edits").setDesc("Reject typing, paste, undo, and redo in replicated notes.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.blockLocalEdits).onChange(async (value) => {
         this.plugin.settings.blockLocalEdits = value;
         await this.plugin.persistSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Chat default model").setDesc("Choose which model new chat messages should use.").addDropdown((dropdown) => {
+    new import_obsidian7.Setting(containerEl).setName("Chat default model").setDesc("Choose which model new chat messages should use.").addDropdown((dropdown) => {
       dropdown.addOption("", "Server default");
       const models = this.plugin.availableChatModels;
       for (const model of models) {
@@ -2225,14 +2330,14 @@ var ReplicaSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.display();
       });
     });
-    new import_obsidian3.Setting(containerEl).setName("Chat reconnect delay (ms)").setDesc("Delay before retrying after a chat disconnect or conflict.").addText(
+    new import_obsidian7.Setting(containerEl).setName("Chat reconnect delay (ms)").setDesc("Delay before retrying after a chat disconnect or conflict.").addText(
       (text) => text.setValue(String(this.plugin.settings.chatReconnectDelayMs)).onChange(async (value) => {
         const parsed = Number.parseInt(value, 10);
         this.plugin.settings.chatReconnectDelayMs = Number.isFinite(parsed) ? Math.max(parsed, 250) : DEFAULT_SETTINGS.chatReconnectDelayMs;
         await this.plugin.persistSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Chat watchdog timeout (ms)").setDesc("Reconnect the chat pane if no websocket frames arrive within this window.").addText(
+    new import_obsidian7.Setting(containerEl).setName("Chat watchdog timeout (ms)").setDesc("Reconnect the chat pane if no websocket frames arrive within this window.").addText(
       (text) => text.setValue(String(this.plugin.settings.chatWatchdogMs)).onChange(async (value) => {
         const parsed = Number.parseInt(value, 10);
         this.plugin.settings.chatWatchdogMs = Number.isFinite(parsed) ? Math.max(parsed, 5e3) : DEFAULT_SETTINGS.chatWatchdogMs;
@@ -2241,7 +2346,7 @@ var ReplicaSettingTab = class extends import_obsidian3.PluginSettingTab {
     );
   }
 };
-var SheafObsidianReplicaPlugin = class extends import_obsidian3.Plugin {
+var SheafObsidianReplicaPlugin = class extends import_obsidian7.Plugin {
   settings = { ...DEFAULT_SETTINGS };
   availableChatModels = [];
   stateRepository;
@@ -2283,11 +2388,11 @@ var SheafObsidianReplicaPlugin = class extends import_obsidian3.Plugin {
         if (!this.settings.blockLocalEdits) {
           return false;
         }
-        const activeFile = this.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView)?.file;
-        if (!(activeFile instanceof import_obsidian3.TFile)) {
+        const activeFile = this.app.workspace.getActiveViewOfType(import_obsidian7.MarkdownView)?.file;
+        if (!(activeFile instanceof import_obsidian7.TFile)) {
           return false;
         }
-        return Boolean(this.latestState?.files[(0, import_obsidian3.normalizePath)(activeFile.path)]);
+        return Boolean(this.latestState?.files[(0, import_obsidian7.normalizePath)(activeFile.path)]);
       })
     );
     this.chatService = new ChatService({
@@ -2304,9 +2409,9 @@ var SheafObsidianReplicaPlugin = class extends import_obsidian3.Plugin {
       callback: async () => {
         try {
           await this.syncService?.start();
-          new import_obsidian3.Notice("Replica sync started");
+          new import_obsidian7.Notice("Replica sync started");
         } catch (error) {
-          new import_obsidian3.Notice(`Replica sync failed: ${error instanceof Error ? error.message : String(error)}`);
+          new import_obsidian7.Notice(`Replica sync failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
     });
@@ -2316,9 +2421,9 @@ var SheafObsidianReplicaPlugin = class extends import_obsidian3.Plugin {
       callback: async () => {
         try {
           await this.syncService?.repairNow();
-          new import_obsidian3.Notice("Replica repair complete");
+          new import_obsidian7.Notice("Replica repair complete");
         } catch (error) {
-          new import_obsidian3.Notice(`Replica repair failed: ${error instanceof Error ? error.message : String(error)}`);
+          new import_obsidian7.Notice(`Replica repair failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
     });
@@ -2328,7 +2433,7 @@ var SheafObsidianReplicaPlugin = class extends import_obsidian3.Plugin {
       callback: async () => {
         const state = this.latestState ?? await this.stateRepository.loadState(this.settings.vaultName);
         const health = state.health;
-        new import_obsidian3.Notice(
+        new import_obsidian7.Notice(
           `Replica ${health.connectionState}; next LSN ${state.nextLsn}; last good ${health.lastSuccessfulLsn ?? "none"}`,
           6e3
         );
@@ -2344,7 +2449,7 @@ var SheafObsidianReplicaPlugin = class extends import_obsidian3.Plugin {
     try {
       await this.syncService.start();
     } catch (error) {
-      new import_obsidian3.Notice(`Replica sync failed to start: ${error instanceof Error ? error.message : String(error)}`);
+      new import_obsidian7.Notice(`Replica sync failed to start: ${error instanceof Error ? error.message : String(error)}`);
     }
     this.repairTimer = window.setInterval(() => {
       void this.syncService?.repairNow();
@@ -2370,7 +2475,7 @@ var SheafObsidianReplicaPlugin = class extends import_obsidian3.Plugin {
   }
   async refreshAvailableChatModels(showFailureNotice) {
     try {
-      const response = await (0, import_obsidian3.requestUrl)({
+      const response = await (0, import_obsidian7.requestUrl)({
         url: `${this.settings.serverBaseUrl}/models`,
         method: "GET"
       });
@@ -2384,7 +2489,7 @@ var SheafObsidianReplicaPlugin = class extends import_obsidian3.Plugin {
       this.settingTab?.display();
     } catch (error) {
       if (showFailureNotice) {
-        new import_obsidian3.Notice(`Failed to load models: ${error instanceof Error ? error.message : String(error)}`);
+        new import_obsidian7.Notice(`Failed to load models: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }

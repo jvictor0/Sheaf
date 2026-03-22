@@ -1,3 +1,5 @@
+import { requestUrl } from "obsidian";
+
 import {
   CHAT_PROTOCOL_VERSION,
   decodeCreateThreadResponse,
@@ -15,16 +17,11 @@ type RequestUrlArgs = {
   body?: string;
 };
 
-async function requestObsidianUrl(args: RequestUrlArgs): Promise<{ json: unknown }> {
-  const obsidian = await import("obsidian");
-  return obsidian.requestUrl(args);
-}
-
 export class ChatApiClient {
   constructor(private readonly settings: () => ReplicaPluginSettings) {}
 
   async listThreads(): Promise<ChatThreadSummary[]> {
-    const response = await requestObsidianUrl({
+    const response = await requestUrl({
       url: `${this.settings().serverBaseUrl}/threads`,
       method: "GET",
     });
@@ -32,7 +29,7 @@ export class ChatApiClient {
   }
 
   async createThread(name: string): Promise<{ thread_id: string }> {
-    const response = await requestObsidianUrl({
+    const response = await requestUrl({
       url: `${this.settings().serverBaseUrl}/threads`,
       method: "POST",
       contentType: "application/json",
@@ -42,7 +39,7 @@ export class ChatApiClient {
   }
 
   async listModels(): Promise<ChatModelOption[]> {
-    const response = await requestObsidianUrl({
+    const response = await requestUrl({
       url: `${this.settings().serverBaseUrl}/models`,
       method: "GET",
     });
@@ -50,7 +47,7 @@ export class ChatApiClient {
   }
 
   async enterThread(threadID: string, knownTailTurnID: string | null): Promise<ChatEnterResponse> {
-    const response = await requestObsidianUrl({
+    const response = await requestUrl({
       url: `${this.settings().serverBaseUrl}/threads/${encodeURIComponent(threadID)}/enter-chat`,
       method: "POST",
       contentType: "application/json",

@@ -95,6 +95,16 @@ class StartReplicaSessionResponse(BaseModel):
     next_lsn: int
 
 
+class ClientDebugPayload(BaseModel):
+    message: str
+
+
+@app.post("/debug/log")
+def client_debug_log(payload: ClientDebugPayload) -> dict[str, str]:
+    print(f"\n{'='*60}\n[CLIENT DEBUG]\n{'='*60}\n{payload.message}\n{'='*60}", flush=True)
+    return {"status": "ok"}
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}

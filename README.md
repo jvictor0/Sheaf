@@ -103,3 +103,15 @@ Run tests:
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest -q
 ```
+
+Install the Obsidian mobile plugin into a vault:
+
+```bash
+./scripts/install_obsidian_plugin.sh --vault "/path/to/vault"
+```
+
+Update every iCloud Obsidian vault that already has the plugin installed:
+
+```bash
+./scripts/deploy_obsidian_plugin.sh
+```

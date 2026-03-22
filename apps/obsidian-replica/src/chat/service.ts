@@ -1,5 +1,12 @@
 import { ChatApiClient } from "./api.js";
-import { ChatStore, applyCommittedTurn, dropQueueArtifacts, dropUncommittedArtifacts } from "./store.js";
+import {
+  ChatStore,
+  applyCommittedTurn,
+  clearCommittedHistory,
+  dropQueueArtifacts,
+  dropUncommittedArtifacts,
+  getLastCommittedTurnID,
+} from "./store.js";
 import { ChatTransportClient } from "./transport.js";
 
 import type {
@@ -117,7 +124,7 @@ export class ChatService {
     const attempt = ++this.connectAttempt;
 
     try {
-      const enter = await this.api.enterThread(threadID, session.lastCommittedTurnID);
+      const enter = await this.api.enterThread(threadID, getLastCommittedTurnID(session));
       if (attempt !== this.connectAttempt || this.activeThreadID !== threadID) {
         return;
       }
@@ -156,7 +163,7 @@ export class ChatService {
     const clientMessageID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
     const localMessageID = `local-${clientMessageID}`;
     const modelName = this.options.settings().chatDefaultModel;
-    const inResponseToTurnID = session.lastCommittedTurnID ?? null;
+    const inResponseToTurnID = getLastCommittedTurnID(session);
 
     this.store.updateSession(threadID, (session) => {
       session.pendingSends.push({
@@ -221,7 +228,7 @@ export class ChatService {
           session.connectionState = "replaying";
           session.errorMessage = null;
           session.statusMessage = "Loading chat history…";
-          session.committedTurns = [];
+          clearCommittedHistory(session);
           dropUncommittedArtifacts(session);
           break;
         case "handshake_ready":
