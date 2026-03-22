@@ -18,6 +18,12 @@
   --sheaf-radius-lg: 14px;
   --sheaf-text-xs: 0.8em;
   --sheaf-text-sm: 0.9em;
+  --sheaf-composer-pad-y: 15px;
+  --sheaf-composer-block-pt: calc(var(--sheaf-sm) * 1.5);
+  --sheaf-composer-block-pb: max(
+    calc(var(--sheaf-sm) * 1.5),
+    calc(env(safe-area-inset-bottom, 0px) * 1.5)
+  );
 }
 
 /* ----------------------------------------------------------------
@@ -30,6 +36,11 @@
   padding: var(--sheaf-md);
   padding-bottom: max(var(--sheaf-md), env(safe-area-inset-bottom)) !important;
   gap: var(--sheaf-md);
+}
+
+body.keyboard-animating .sheaf-root,
+.sheaf-root:has(.sheaf-composer:focus-within) {
+  padding-bottom: 0 !important;
 }
 
 /* ----------------------------------------------------------------
@@ -344,20 +355,47 @@
   flex: 0 0 auto;
   flex-direction: column;
   gap: var(--sheaf-xs);
-  padding-top: var(--sheaf-sm);
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-top: var(--sheaf-composer-block-pt);
+  padding-bottom: var(--sheaf-composer-block-pb);
+  margin-bottom: 0;
   background: var(--background-primary);
   border-top: 1px solid var(--background-modifier-border);
 }
 
+body.keyboard-animating .sheaf-conversation,
+.sheaf-conversation:has(.sheaf-composer:focus-within) {
+  gap: 0;
+}
+
+body.keyboard-animating .sheaf-transcript,
+.sheaf-conversation:has(.sheaf-composer:focus-within) .sheaf-transcript {
+  padding-bottom: 0;
+}
+
+body.keyboard-animating .sheaf-composer,
+.sheaf-composer:focus-within {
+  padding-top: 4px;
+  padding-bottom: 4px;
+  gap: 0;
+}
+
+.sheaf-composer-field {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: var(--sheaf-sm);
+}
+
 .sheaf-composer-textarea {
-  width: 100%;
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
   min-height: 44px;
   height: 44px;
   resize: none;
   overflow-y: hidden;
   border-radius: var(--sheaf-radius-md);
-  padding: 10px var(--sheaf-md);
+  padding: var(--sheaf-composer-pad-y) var(--sheaf-md);
   border: 1px solid var(--background-modifier-border);
   background: var(--background-primary);
   color: var(--text-normal);
@@ -377,11 +415,39 @@
   cursor: not-allowed;
 }
 
-.sheaf-composer-row {
+.sheaf-send-btn {
   display: flex;
-  justify-content: space-between;
+  flex-shrink: 0;
   align-items: center;
-  gap: var(--sheaf-sm);
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  cursor: pointer;
+  transition: opacity 120ms ease, filter 120ms ease;
+}
+
+.sheaf-send-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sheaf-send-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.sheaf-send-btn:active:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+.sheaf-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: none;
 }
 
 .sheaf-composer-hint {
@@ -389,52 +455,14 @@
   font-size: var(--sheaf-text-xs);
 }
 
-@media (max-width: 700px) {
-  .sheaf-composer-hint {
-    display: none;
+.sheaf-composer-hint--desktop {
+  display: none;
+}
+
+@media (min-width: 701px) {
+  .sheaf-composer-hint--desktop {
+    display: block;
   }
-
-  .sheaf-composer-row {
-    justify-content: flex-end;
-  }
-}
-
-/* ----------------------------------------------------------------
-   Send button (circular accent)
-   ---------------------------------------------------------------- */
-.sheaf-send-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: opacity 120ms ease, transform 80ms ease;
-}
-
-.sheaf-send-btn:hover {
-  opacity: 0.9;
-}
-
-.sheaf-send-btn:active {
-  transform: scale(0.93);
-}
-
-.sheaf-send-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-  transform: none;
-}
-
-.sheaf-send-btn svg {
-  width: 18px;
-  height: 18px;
 }
 
 /* ----------------------------------------------------------------

@@ -65,32 +65,31 @@ export class ConversationComponent {
 
     const composer = conversation.createDiv({ cls: "sheaf-composer" });
 
-    this.composerEl = composer.createEl("textarea", {
+    const field = composer.createDiv({ cls: "sheaf-composer-field" });
+
+    this.composerEl = field.createEl("textarea", {
       cls: "sheaf-composer-textarea",
       attr: { placeholder: "Message Sheaf\u2026", rows: "1" },
     });
     this.composerEl.setAttribute("aria-label", "Message input");
+    this.composerEl.setAttribute("enterkeyhint", "newline");
 
     this.composerEl.addEventListener("input", () => {
       this.composerValue = this.composerEl?.value ?? "";
       this.autosizeComposer();
     });
 
-    this.composerEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        void this.submitComposer(service);
-      }
-    });
-
-    const row = composer.createDiv({ cls: "sheaf-composer-row" });
-    row.createDiv({ text: "Enter sends, Shift+Enter new line", cls: "sheaf-composer-hint" });
-
-    this.sendBtn = row.createEl("button", { cls: "sheaf-send-btn" });
-    setIcon(this.sendBtn, "send");
+    this.sendBtn = field.createEl("button", { cls: "sheaf-send-btn" });
+    this.sendBtn.type = "button";
     this.sendBtn.setAttribute("aria-label", "Send message");
+    setIcon(this.sendBtn, "arrow-right");
     this.sendBtn.addEventListener("click", () => {
       void this.submitComposer(service);
+    });
+
+    composer.createDiv({
+      text: "Return adds a new line. Use the arrow to send.",
+      cls: "sheaf-composer-hint sheaf-composer-hint--desktop",
     });
   }
 

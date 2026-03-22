@@ -40,6 +40,10 @@ export class ChatService {
     this.getNow = options.getNow ?? (() => Date.now());
   }
 
+  getServerBaseUrl(): string {
+    return this.options.settings().serverBaseUrl.replace(/\/$/, "");
+  }
+
   subscribe(listener: () => void): () => void {
     return this.store.subscribe(listener);
   }
