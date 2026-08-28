@@ -1,0 +1,3 @@
+[submodule "projects/agents/vendor/cloudcli/tree"]
+	path = projects/agents/vendor/cloudcli/tree
+	url = https://github.com/siteboon/claudecodeui.git
