@@ -1,0 +1,51 @@
+diff --git a/server/modules/providers/list/codex/codex-runtime.provider.js b/server/modules/providers/list/codex/codex-runtime.provider.js
+index dc5bf66..fe920b8 100644
+--- a/server/modules/providers/list/codex/codex-runtime.provider.js
++++ b/server/modules/providers/list/codex/codex-runtime.provider.js
+@@ -197 +197 @@ function transformCodexEvent(event) {
+- * @returns {object} - { sandboxMode, approvalPolicy }
++ * @returns {object} - { sandboxMode, approvalPolicy, approvalsReviewer? }
+@@ -199 +199 @@ function transformCodexEvent(event) {
+-function mapPermissionModeToCodexOptions(permissionMode) {
++export function mapPermissionModeToCodexOptions(permissionMode) {
+@@ -204 +204,2 @@ function mapPermissionModeToCodexOptions(permissionMode) {
+-        approvalPolicy: 'never'
++        approvalPolicy: 'on-request',
++        approvalsReviewer: 'auto_review'
+@@ -246 +247 @@ export async function queryCodex(command, options = {}, ws, context) {
+-  const { sandboxMode, approvalPolicy } = mapPermissionModeToCodexOptions(permissionMode);
++  const { sandboxMode, approvalPolicy, approvalsReviewer } = mapPermissionModeToCodexOptions(permissionMode);
+@@ -267 +268,3 @@ export async function queryCodex(command, options = {}, ws, context) {
+-    codex = new Codex();
++    codex = new Codex({
++      config: approvalsReviewer ? { approvals_reviewer: approvalsReviewer } : {}
++    });
+diff --git a/server/modules/providers/services/provider-capabilities.service.ts b/server/modules/providers/services/provider-capabilities.service.ts
+index b506615..71ca581 100644
+--- a/server/modules/providers/services/provider-capabilities.service.ts
++++ b/server/modules/providers/services/provider-capabilities.service.ts
+@@ -62 +62 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
+-    defaultPermissionMode: 'default',
++    defaultPermissionMode: 'acceptEdits',
+diff --git a/src/i18n/locales/en/chat.json b/src/i18n/locales/en/chat.json
+index eaecb47..fd097c0 100644
+--- a/src/i18n/locales/en/chat.json
++++ b/src/i18n/locales/en/chat.json
+@@ -93 +93 @@
+-      "acceptEdits": "Accept Edits",
++      "acceptEdits": "Approve for me",
+@@ -100 +100 @@
+-      "acceptEdits": "All commands run automatically within the workspace. Full auto mode with sandboxed execution.",
++      "acceptEdits": "Codex automatically reviews approval requests while remaining sandboxed to the workspace.",
+diff --git a/src/i18n/locales/en/settings.json b/src/i18n/locales/en/settings.json
+index a783fb1..90550c0 100644
+--- a/src/i18n/locales/en/settings.json
++++ b/src/i18n/locales/en/settings.json
+@@ -423,2 +423,2 @@
+-          "title": "Accept Edits",
+-          "description": "All commands run automatically within the workspace. Full auto mode with sandboxed execution."
++          "title": "Approve for me",
++          "description": "Codex automatically reviews approval requests while remaining sandboxed to the workspace."
+@@ -434 +434 @@
+-        "acceptEdits": "sandboxMode=workspace-write, approvalPolicy=never. All commands auto-execute within project directory.",
++        "acceptEdits": "sandboxMode=workspace-write, approvalPolicy=on-request, approvalsReviewer=auto_review.",
