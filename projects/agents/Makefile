@@ -2,6 +2,7 @@
 .PHONY: install-repo check-repo clean-repo
 .PHONY: install-global check-global clean-global
 .PHONY: vendor-sync
+.PHONY: cloudcli-install cloudcli-check
 
 AGENTS_INSTALL_FLAGS ?=
 TOOL ?=
@@ -49,6 +50,12 @@ check-global:
 clean-global:
 	python3 scripts/install.py clean --scope global
 	python3 scripts/install_superpowers.py clean
+
+cloudcli-install:
+	scripts/install_cloudcli.sh install
+
+cloudcli-check:
+	scripts/install_cloudcli.sh check
 
 vendor-sync:
 	@if [ -z "$(TOOL)" ] || [ -z "$(REF)" ]; then \
