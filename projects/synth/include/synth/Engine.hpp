@@ -375,7 +375,7 @@ public:
                     // stashed message. See audioDeviceStateMutex_'s doc
                     // comment.
                     const std::lock_guard<std::mutex> lock(audioDeviceStateMutex_);
-                    retryStatus = ApplyPatchMessage(stashed, manager_, instrumentConfig_, defaultInstrumentConfig_,
+                    retryStatus = ApplyPatchMessageAndNotifyApp(stashed, manager_, instrumentConfig_, defaultInstrumentConfig_,
                                                     audioDeviceState_, defaultAudioDeviceState_, patchOutputBus_,
                                                     serializationContext_);
                 }
@@ -960,7 +960,7 @@ private:
             PatchApplyStatus status;
             {
                 const std::lock_guard<std::mutex> lock(audioDeviceStateMutex_);
-                status = ApplyPatchMessage(patchMessage, manager_, instrumentConfig_, defaultInstrumentConfig_,
+                status = ApplyPatchMessageAndNotifyApp(patchMessage, manager_, instrumentConfig_, defaultInstrumentConfig_,
                                            audioDeviceState_, defaultAudioDeviceState_, patchOutputBus_,
                                            serializationContext_);
             }
@@ -1033,20 +1033,42 @@ private:
     // Initialize() runs pre-audio, single-threaded). The lock is uncontended
     // in that window; held anyway for uniformity with every other touch point
     // of audioDeviceState_.
+    // Every patch-message apply in this class goes through here, so the revert
+    // hook cannot be wired at three of the four call sites and missed at the
+    // fourth. Forwards verbatim and adds exactly one thing: an app that
+    // declares HasRestoreStartupState is told when a revert has just rebuilt the
+    // parameter manager from registered defaults, which is the point at which
+    // any startup state the app established itself has been discarded.
+    //
+    // Called on whichever thread applied the message -- the pre-audio drain
+    // during Initialize(), or ProcessBlock's own drain. Apps implementing the
+    // hook are subject to the same audio-thread constraints as the drain
+    // itself.
+    template <typename... Args>
+    PatchApplyStatus ApplyPatchMessageAndNotifyApp(Args&&... args) {
+        const PatchApplyStatus status = ApplyPatchMessage(std::forward<Args>(args)...);
+        if constexpr (HasRestoreStartupState<App>) {
+            if (status == PatchApplyStatus::Reverted) {
+                app_.RestoreStartupState();
+            }
+        }
+        return status;
+    }
+
     void ApplyPendingPatchMessages() {
         PatchMessageIn message;
         while (patchInputBus_.Pop(message)) {
             PatchApplyStatus status;
             {
                 const std::lock_guard<std::mutex> lock(audioDeviceStateMutex_);
-                status = ApplyPatchMessage(message, manager_, instrumentConfig_, defaultInstrumentConfig_,
+                status = ApplyPatchMessageAndNotifyApp(message, manager_, instrumentConfig_, defaultInstrumentConfig_,
                                            audioDeviceState_, defaultAudioDeviceState_, patchOutputBus_,
                                            serializationContext_);
                 if (status == PatchApplyStatus::ArenaExhausted) {
                     // Pre-audio only: growing here is safe because the audio
                     // thread has not started running ProcessBlock yet.
                     serializationArena_.GrowAndReset();
-                    status = ApplyPatchMessage(message, manager_, instrumentConfig_, defaultInstrumentConfig_,
+                    status = ApplyPatchMessageAndNotifyApp(message, manager_, instrumentConfig_, defaultInstrumentConfig_,
                                                audioDeviceState_, defaultAudioDeviceState_, patchOutputBus_,
                                                serializationContext_);
                 }

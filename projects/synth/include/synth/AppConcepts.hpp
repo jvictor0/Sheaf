@@ -38,4 +38,32 @@ concept HasProcessFrame = requires(T app) {
     { app.ProcessFrame() } -> std::same_as<void>;
 };
 
+// Optional revert hook. When present, synth::Engine invokes
+// app.RestoreStartupState() immediately after a patch message reverts the
+// parameter manager to defaults, on whichever thread applied that message.
+//
+// A revert rebuilds every parameter from its REGISTERED default
+// (ParameterConfig::defaultValue). That is the whole of what registration can
+// express, and it cannot express a modulation DEPTH, which is a relationship
+// between a target parameter and a source slot rather than a value on one
+// parameter. An app whose startup state includes such depths -- materialized
+// in its own Init() -- therefore does not get them back from a revert, and
+// this hook is where it re-applies them.
+//
+// Named for the state it restores rather than for the revert that triggers it,
+// because Parameter::RevertToDefault(SceneState) already means something else
+// in this codebase -- reverting ONE parameter -- and a second concept under
+// that name would make either of them harder to trace by grep.
+//
+// Apps that establish nothing beyond registered defaults need not implement
+// it: for them a revert already reproduces startup exactly, and the absence of
+// the hook is the correct answer rather than an omission.
+//
+// The hook re-invokes the app's own definition of its startup state rather
+// than restoring a snapshot of it, so launch and revert cannot drift apart.
+template <typename T>
+concept HasRestoreStartupState = requires(T app) {
+    { app.RestoreStartupState() } -> std::same_as<void>;
+};
+
 }  // namespace synth
