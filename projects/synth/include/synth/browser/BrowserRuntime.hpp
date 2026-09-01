@@ -463,6 +463,16 @@ public:
         }
 #ifdef __EMSCRIPTEN__
         if (audioContext_ != 0) {
+            // The worklet thread, processor, and node are already set up from
+            // the first call -- only the AudioContext's own resume can still
+            // be outstanding, if the browser refused it because that first
+            // call carried no user gesture. Retry it here instead of
+            // trivially reporting success: a no-op once already running, and
+            // otherwise gives a later real gesture the resume attempt the
+            // first call was not able to make stick.
+            if (emscripten_audio_context_state(audioContext_) != AUDIO_CONTEXT_STATE_RUNNING) {
+                emscripten_resume_audio_context_sync(audioContext_);
+            }
             return true;
         }
         audioContext_ = suppliedContext;

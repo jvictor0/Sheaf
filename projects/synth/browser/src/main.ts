@@ -226,6 +226,10 @@ export class SynthBrowserApp {
     audioWorker.reportOutputRoutingUnsupported = () =>
       this.dispatchAction({ name: AudioOutputRouteAction.routingUnsupported, value: "" });
     this.audio = new AudioBridge(audioWorker, this.options.audioOptions);
+    // Scoped to the app's own root rather than a global target: the gesture
+    // only needs to reach this instrument, and a root-scoped listener needs
+    // no explicit teardown when the app stops.
+    installBrowserAudioActivation(this.root, this.audio);
     if (this.options.midiAccess) {
       this.activationStarted = true;
       const [audio, midi] = await Promise.all([
@@ -283,13 +287,16 @@ export class SynthBrowserApp {
   }
 
   private async startUserActivation(): Promise<void> {
-    if (this.activationStarted) return;
-    this.activationStarted = true;
-    if (!this.audio) return;
+    if (this.activationStarted || !this.audio) return;
     const [audio, midi] = await Promise.all([
       this.audio.startFromUserActivation(),
       this.midi.startFromUserActivation(),
     ]);
+    // Latches only once both sides actually came up. A partial or total
+    // failure leaves this false so the next gesture retries; that retry costs
+    // nothing extra on a side that already succeeded, since both start calls
+    // short-circuit once already running.
+    this.activationStarted = audio.started && midi.status === "online";
     this.renderStatus({ type: "status", status: `audio:${audio.started ? "online" : audio.diagnostic}; midi:${midi.status}` });
   }
 
@@ -396,14 +403,18 @@ export async function installSynthBrowserApp(root: HTMLElement, options: SynthBr
   }
 }
 
-export function installBrowserAudioActivation(
-  target: EventTarget,
-  worker: BrowserAudioWorker,
-  options: AudioBridgeOptions = {},
-): AudioBridge {
-  const bridge = new AudioBridge(worker, options);
-  target.addEventListener("pointerdown", () => { void bridge.startFromUserActivation(); }, { once: true });
-  return bridge;
+// Acts on a bridge the caller already owns and drives, rather than
+// constructing its own. Stays listening across a failed attempt and removes
+// itself only once the bridge actually reports started; re-invoking
+// `startFromUserActivation` before then is safe, since it short-circuits on
+// its own once running.
+export function installBrowserAudioActivation(target: EventTarget, bridge: AudioBridge): void {
+  const onPointerDown = () => {
+    void bridge.startFromUserActivation().then((result) => {
+      if (result.started) target.removeEventListener("pointerdown", onPointerDown);
+    });
+  };
+  target.addEventListener("pointerdown", onPointerDown);
 }
 
 export async function installSheafPatchLauncher(

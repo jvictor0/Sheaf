@@ -201,7 +201,12 @@ export class AudioBridge {
       return { started: false, diagnostic: "audio-bridge-stopped" };
     this.started = result.started;
     if (!result.started) {
-      this.releaseNow();
+      // Releases whatever this attempt opened, but does not permanently latch
+      // `stopped`: a native start can fail for a reason a later real gesture
+      // can still overcome (an autoplay-refused resume that a later trusted
+      // gesture will honour), so the bridge must stay retryable. Only a
+      // deliberate `releaseNow()`/`stop()` is terminal.
+      this.releaseResourcesNow();
       return result;
     }
     // Capture can no longer be in flight this early on the guarded (Launch
@@ -327,17 +332,28 @@ export class AudioBridge {
   // this returns, because a page being unloaded or frozen into the back/forward
   // cache is not required to run any promise continuation. Idempotent, and an
   // acquisition still in flight observes `stopped` and releases what it holds.
+  // Permanent: once this returns, no later gesture can start this bridge
+  // again. A start attempt that merely failed to start uses
+  // `releaseResourcesNow` below instead, so it stays retryable.
   releaseNow(): void {
     if (this.stopped) return;
     this.stopped = true;
-    this.started = false;
-    this.removeDeviceChangeListener();
-    this.releaseInputNow(AudioInputStatusCode.notRequested, "");
+    this.releaseResourcesNow();
   }
 
   async stop(): Promise<void> {
     this.releaseNow();
     await this.whenInputSettled();
+  }
+
+  // The resource release a deliberate stop and a start attempt that merely
+  // failed to start both need -- release any input, drop the device-change
+  // listener -- without the permanent `stopped` latch, which only
+  // `releaseNow()` sets.
+  private releaseResourcesNow(): void {
+    this.started = false;
+    this.removeDeviceChangeListener();
+    this.releaseInputNow(AudioInputStatusCode.notRequested, "");
   }
 
   inputState(): AudioInputState {
