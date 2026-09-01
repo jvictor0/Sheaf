@@ -22,15 +22,35 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
-tailscale_host() {
-    local host="${CLOUDCLI_HOST:-}"
-    if [[ -z "${host}" ]]; then
-        require_command tailscale
-        host="$(tailscale ip -4 | sed -n '1p')"
-    fi
-    [[ "${host}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] ||
-        die "CLOUDCLI_HOST must be an IPv4 address (got '${host}')"
+cloudcli_host() {
+    local host="${CLOUDCLI_HOST:-127.0.0.1}"
+    [[ "${host}" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] ||
+        die "CLOUDCLI_HOST must be a loopback IPv4 address (got '${host}')"
     printf '%s\n' "${host}"
+}
+
+tailscale_dns_name() {
+    local dns_name
+
+    require_command tailscale
+    dns_name="$(tailscale status --json | sed -n 's/^[[:space:]]*"DNSName": "\([^"]*\)",[[:space:]]*$/\1/p' | sed -n '1p')"
+    dns_name="${dns_name%.}"
+    [[ -n "${dns_name}" ]] || die "could not determine this node's Tailscale DNS name"
+    printf '%s\n' "${dns_name}"
+}
+
+configure_tailscale_serve() {
+    local host="$1"
+    local serve_status
+
+    serve_status="$(tailscale serve status 2>/dev/null || true)"
+    if grep -Fq "proxy http://${host}:${port}" <<<"${serve_status}"; then
+        echo "Tailscale Serve already proxies HTTPS port 443 to http://${host}:${port}"
+        return
+    fi
+
+    echo "Publishing CloudCLI through Tailscale Serve on HTTPS port 443..."
+    tailscale serve --bg --yes "http://${host}:${port}"
 }
 
 expected_version() {
@@ -68,6 +88,7 @@ write_service() {
 check_installation() {
     local host="$1"
     local wanted_version actual_version environment runtime_path
+    local dns_name serve_status tailscale_ip
 
     wanted_version="$(expected_version)"
     [[ -n "${wanted_version}" ]] || die "could not read version from ${manifest}"
@@ -93,7 +114,17 @@ check_installation() {
     curl --fail --silent --show-error "http://${host}:${port}/health" >/dev/null ||
         die "CloudCLI health check failed at http://${host}:${port}/health"
 
-    echo "CloudCLI ${actual_version} is active at http://${host}:${port}"
+    dns_name="$(tailscale_dns_name)"
+    tailscale_ip="$(tailscale ip -4 | sed -n '1p')"
+    serve_status="$(tailscale serve status)"
+    grep -Fq "proxy http://${host}:${port}" <<<"${serve_status}" ||
+        die "Tailscale Serve is not proxying HTTPS to http://${host}:${port}"
+    [[ -n "${tailscale_ip}" ]] || die "could not determine this node's Tailscale IPv4 address"
+    curl --fail --silent --show-error --resolve "${dns_name}:443:${tailscale_ip}" "https://${dns_name}/health" >/dev/null ||
+        die "CloudCLI health check failed at https://${dns_name}/health"
+
+    echo "CloudCLI ${actual_version} is active at https://${dns_name}/"
+    echo "The backend is restricted to http://${host}:${port}"
     echo "Persistent data remains in ${data_dir}"
 }
 
@@ -147,6 +178,7 @@ install_cloudcli() {
     systemctl --user daemon-reload
     systemctl --user enable cloudcli.service
     systemctl --user restart cloudcli.service
+    configure_tailscale_serve "${host}"
 
     for attempt in {1..30}; do
         if curl --fail --silent "http://${host}:${port}/health" >/dev/null 2>&1; then
@@ -164,7 +196,7 @@ main() {
     local action="${1:-install}"
     local host
 
-    host="$(tailscale_host)"
+    host="$(cloudcli_host)"
     case "${action}" in
         install) install_cloudcli "${host}" ;;
         check) check_installation "${host}" ;;
