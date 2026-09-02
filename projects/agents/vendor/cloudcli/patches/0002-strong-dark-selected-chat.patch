@@ -1,0 +1,15 @@
+diff --git a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
+--- a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
++++ b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
+@@ -223 +223 @@ export default function SidebarSessionItem({
+-            isSelected ? 'bg-primary/5 border-primary/20' : '',
++            isSelected ? 'bg-primary/5 border-primary/20 dark:border-blue-400/60 dark:bg-blue-600/30 dark:ring-1 dark:ring-inset dark:ring-blue-400/20' : '',
+@@ -236 +236 @@ export default function SidebarSessionItem({
+-                isSelected ? 'bg-primary/10' : 'bg-muted/50',
++                isSelected ? 'bg-primary/10 dark:bg-blue-500/30' : 'bg-muted/50',
+@@ -424 +424 @@ export default function SidebarSessionItem({
+-            isSelected ? 'border-primary/20 bg-primary/5' : 'border-border/30',
++            isSelected ? 'border-primary/20 bg-primary/5 dark:border-blue-400/60 dark:bg-blue-600/30 dark:ring-1 dark:ring-inset dark:ring-blue-400/20 dark:hover:bg-blue-600/40' : 'border-border/30',
+@@ -443 +443 @@ export default function SidebarSessionItem({
+-                isSelected ? 'bg-primary/10' : 'bg-muted/50',
++                isSelected ? 'bg-primary/10 dark:bg-blue-500/30' : 'bg-muted/50',
