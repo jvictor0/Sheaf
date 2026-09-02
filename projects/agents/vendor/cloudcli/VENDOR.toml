@@ -5,4 +5,5 @@ retrieved_at = "2026-08-28T22:58:38Z"
 patches = [
   "patches/0001-codex-approve-for-me-default.patch",
   "patches/0002-strong-dark-selected-chat.patch",
+  "patches/0003-immediate-archive-independent-projects.patch",
 ]

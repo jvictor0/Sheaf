@@ -1,0 +1,138 @@
+diff --git a/src/components/sidebar/hooks/useSidebarController.ts b/src/components/sidebar/hooks/useSidebarController.ts
+index c8c294c..15e6ba3 100644
+--- a/src/components/sidebar/hooks/useSidebarController.ts
++++ b/src/components/sidebar/hooks/useSidebarController.ts
+@@ -564,8 +564,10 @@ export function useSidebarController({
+   // `projectId` as their identifier after the migration.
+   const toggleProject = useCallback((projectId: string) => {
+     setExpandedProjects((prev) => {
+-      const next = new Set<string>();
+-      if (!prev.has(projectId)) {
++      const next = new Set(prev);
++      if (next.has(projectId)) {
++        next.delete(projectId);
++      } else {
+         next.add(projectId);
+       }
+       return next;
+@@ -833,9 +835,30 @@ export function useSidebarController({
+     [editingName, paletteOps],
+   );
+ 
++  const removeSession = useCallback(async (sessionId: string, hardDelete: boolean) => {
++    try {
++      const response = await api.deleteSession(sessionId, hardDelete);
++
++      if (response.ok) {
++        onSessionDelete?.(sessionId);
++        await fetchArchivedSessions();
++      } else {
++        const errorText = await response.text();
++        console.error('[Sidebar] Failed to delete session:', {
++          status: response.status,
++          error: errorText,
++        });
++        alert(t('messages.deleteSessionFailed'));
++      }
++    } catch (error) {
++      console.error('[Sidebar] Error deleting session:', error);
++      alert(t('messages.deleteSessionError'));
++    }
++  }, [fetchArchivedSessions, onSessionDelete, t]);
++
+   const showDeleteSessionConfirmation = useCallback(
+     // Kept with project/provider arguments for component wiring compatibility;
+-    // deletion now uses only `sessionId` via /api/providers/sessions/:sessionId.
++    // session removal uses only `sessionId` via /api/providers/sessions/:sessionId.
+     (
+       projectId: string | null,
+       sessionId: string,
+@@ -845,6 +868,11 @@ export function useSidebarController({
+         isArchived?: boolean;
+       } = {},
+     ) => {
++      if (!options.isArchived) {
++        void removeSession(sessionId, false);
++        return;
++      }
++
+       setSessionDeleteConfirmation({
+         projectId,
+         sessionId,
+@@ -853,7 +881,7 @@ export function useSidebarController({
+         isArchived: Boolean(options.isArchived),
+       });
+     },
+-    [],
++    [removeSession],
+   );
+ 
+   const confirmDeleteSession = useCallback(async (hardDelete = false) => {
+@@ -863,26 +891,8 @@ export function useSidebarController({
+ 
+     const { sessionId } = sessionDeleteConfirmation;
+     setSessionDeleteConfirmation(null);
+-
+-    try {
+-      const response = await api.deleteSession(sessionId, hardDelete);
+-
+-      if (response.ok) {
+-        onSessionDelete?.(sessionId);
+-        await fetchArchivedSessions();
+-      } else {
+-        const errorText = await response.text();
+-        console.error('[Sidebar] Failed to delete session:', {
+-          status: response.status,
+-          error: errorText,
+-        });
+-        alert(t('messages.deleteSessionFailed'));
+-      }
+-    } catch (error) {
+-      console.error('[Sidebar] Error deleting session:', error);
+-      alert(t('messages.deleteSessionError'));
+-    }
+-  }, [fetchArchivedSessions, onSessionDelete, sessionDeleteConfirmation, t]);
++    await removeSession(sessionId, hardDelete);
++  }, [removeSession, sessionDeleteConfirmation]);
+ 
+   const requestProjectDelete = useCallback(
+     (project: Project) => {
+diff --git a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
+index 90c98f0..2cb710d 100644
+--- a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
++++ b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
+@@ -1,5 +1,5 @@
+ import { useEffect, useRef, useState } from 'react';
+-import { Check, Copy, Edit2, Loader2, MoreHorizontal, Trash2, X } from 'lucide-react';
++import { Archive, Check, Copy, Edit2, Loader2, MoreHorizontal, X } from 'lucide-react';
+ import type { TFunction } from 'i18next';
+ 
+ import { ActionMenu, Badge, Dialog, DialogContent, DialogTitle, Tooltip, buttonVariants } from '../../../../shared/view/ui';
+@@ -393,10 +393,10 @@ export default function SidebarSessionItem({
+                       setMobileOptionsOpen(false);
+                       requestDeleteSession();
+                     }}
+-                    className="flex min-h-12 w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-red-600 transition-colors active:bg-red-500/10 dark:text-red-400"
++                    className="flex min-h-12 w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-foreground transition-colors active:bg-muted"
+                   >
+-                    <Trash2 className="h-5 w-5 flex-shrink-0" />
+-                    <span className="text-sm font-medium">Archive or delete session</span>
++                    <Archive className="h-5 w-5 flex-shrink-0" />
++                    <span className="text-sm font-medium">Archive session</span>
+                   </button>
+                 )}
+               </div>
+@@ -564,10 +564,9 @@ export default function SidebarSessionItem({
+                     onSelect: handleCopyAction,
+                   },
+                   ...(!isProcessing ? [{
+-                    key: 'delete',
+-                    label: 'Archive or delete session',
+-                    icon: Trash2,
+-                    isDanger: true,
++                    key: 'archive',
++                    label: 'Archive session',
++                    icon: Archive,
+                     showDividerBefore: true,
+                     onSelect: requestDeleteSession,
+                   }] : []),
