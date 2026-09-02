@@ -3332,6 +3332,16 @@ const char* MidiProfileKindName(MidiProfileKind kind) {
     return "generic";
 }
 
+const char* MidiProfileKindDisplayName(MidiProfileKind kind) {
+    switch (kind) {
+        case MidiProfileKind::WrldBldr: return "WRLD.Bldr";
+        case MidiProfileKind::MfTwister: return "MF Twister";
+        case MidiProfileKind::Launchpad: return "Launchpad";
+        case MidiProfileKind::Generic: return "Generic";
+    }
+    return "Generic";
+}
+
 bool MidiProfileKindFromName(std::string_view name, MidiProfileKind& out) {
     if (name == "wrldbldr") {
         out = MidiProfileKind::WrldBldr;

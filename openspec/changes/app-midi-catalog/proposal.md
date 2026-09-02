@@ -103,6 +103,24 @@ frogg3rs is the first consumer of the mechanism this change adds.
   version 1 with no such section, byte-for-byte what a parameter-only
   patch has always written, and a version-2 section present in a file —
   however it got there — is never even parsed.
+- **Controller row fits its host.** Every controller row's header lays out
+  as two 36 px lines instead of one: identity — disclosure, name, device
+  display name, status dots, the Layout combo, and, for a Launchpad, the
+  Variant combo — on line one, and ports and lifecycle — MIDI in, MIDI out,
+  a "Rename to" draft, Rename, Delete, and Blacklist — on line two, so the
+  header's minimum width stays under a narrow host's content instead of
+  running past it. The row's device label and the add row's selector now
+  read the device's display name (`MidiProfileKindDisplayName`) while the
+  persisted config keeps the profile-kind token; the add row's caption
+  reads "Device"; the endpoint selectors read "MIDI in" and "MIDI out";
+  and one legend, ahead of the first row, shows a coloured dot in each
+  endpoint-status colour before "online", "offline", and "not set". A new
+  `FitsWithinViolations` criterion checks every node's rectangle, folded
+  over its ancestor chain, against the page's actual content bounds — the
+  check `ContainmentViolations` alone cannot make, since a row inside a
+  scroll area that grows to fit it still passes containment while running
+  past the surface — and the Controllers fixture asserts it empty for a
+  Twister, a Generic, a Launchpad, and a Blacklisted row at 900 px.
 
 ## What Does NOT Change
 

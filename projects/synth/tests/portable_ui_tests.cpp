@@ -7,6 +7,7 @@
 #include "synth/ConstantBarVisualizer.hpp"
 #include "synth/DspScope.hpp"
 #include "synth/GangedRandomLfoVisualizer.hpp"
+#include "synth/MidiAppCatalog.hpp"
 #include "synth/MidiController.hpp"
 #include "synth/NoiseWaveformVisualizer.hpp"
 #include "synth/StandardModulators.hpp"
@@ -2427,7 +2428,8 @@ const std::vector<float>& ControllersSpacing()
                        synth::runtime_ui::ControllersLayout::kRowGap,
                        synth::runtime_ui::ControllersLayout::kEndpointBoxGap,
                        synth::runtime_ui::ControllersLayout::kAvailableControlGap,
-                       synth::runtime_ui::ControllersLayout::kLifecycleControlGap});
+                       synth::runtime_ui::ControllersLayout::kLifecycleControlGap,
+                       synth::runtime_ui::ControllersLayout::kStatusLegendPairGap});
     return values;
 }
 
@@ -2690,7 +2692,7 @@ struct ControllersFixture {
 std::set<std::string> ControllerStatusDotIds(std::size_t controllers)
 {
     // Each row's status dots are an explicitly bounded Draw the producer
-    // hand-centres inside its cell (`(kControllerHeaderHeight - 8) / 2`), so it
+    // hand-centres inside its cell (`(kControllerHeaderLineHeight - 8) / 2`), so it
     // is out of flow and contributes no stacking gap. The arithmetic itself is
     // the sru-47/sru-53 residual recorded in tasks.md under 6.5b: the library
     // has no cross-axis alignment for a producer to declare instead.
@@ -2781,13 +2783,10 @@ std::map<std::string, std::string> ControllerCaptionExceptions(std::size_t contr
     Except(exceptions, synth::runtime_ui::NodeIds::kAddName,
            "add-row name field; the add row has no column headings and the field carries its "
            "prompt only in TextField::label, which no backend renders");
-    for (std::size_t ix = 0; ix < controllers; ++ix)
-    {
-        const std::string row = "controller row " + std::to_string(ix);
-        Except(exceptions, synth::runtime_ui::NodeIds::ControllerRenameDraft(ix),
-               row + " rename field; appears only while renaming, where the adjacent Rename "
-                     "button is the only thing naming it");
-    }
+    // The rename draft field now carries its own "Rename to" caption (it used
+    // to rely on the adjacent Rename button to name it), so it is no longer
+    // excused from the caption criterion here.
+    (void)controllers;
     return exceptions;
 }
 
@@ -3016,6 +3015,228 @@ static void TestNamedVisualCriteriaHoldOnEveryPageAndApp()
              // controls that DO conform.
              .expectedFormControls = 6});
     }
+}
+
+// `ContainmentViolations` alone cannot see a row overflowing its host: today
+// `scrollWidth` grows to the row's own minimum width whenever the content is
+// narrower (`BuildControllersPageTree`, ControllersPageUI.hpp), so every node
+// is inside a container that grew to fit it. `FitsWithinViolations` checks
+// against the page's actual content bounds instead, folded over each node's
+// ancestor chain, and is what keeps the two-line header's minimum width under
+// frogg3rs's 900-wide content.
+static void TestControllersRowFitsWithinFroggersNarrowestHost()
+{
+    synth::MidiInstrumentConfig instrument;
+    synth::MidiConnectionState connection;
+
+    synth::MidiControllerSlot twister;
+    twister.name = "MIDI Fighter Twister";
+    twister.kind = synth::MidiProfileKind::MfTwister;
+    twister.input = {"twister-in", "Midi Fighter Twister"};
+    twister.output = {"twister-out", "Midi Fighter Twister"};
+    twister.config =
+        synth::MfTwisterDefaultProfileConfig(synth::MfTwisterDefaultProfileOptions{.slotIx = 0});
+    Require(instrument.AddController(std::move(twister)), "fixture adds the Twister row");
+    connection.controllers.push_back(
+        {.input = {.status = synth::MidiEndpointStatus::Offline},
+         .output = {.status = synth::MidiEndpointStatus::Offline}});
+
+    synth::MidiControllerSlot generic;
+    generic.name = "Generic Controller";
+    generic.kind = synth::MidiProfileKind::Generic;
+    Require(instrument.AddController(std::move(generic)), "fixture adds the Generic row");
+    connection.controllers.push_back({});
+
+    synth::MidiControllerSlot launchpad;
+    launchpad.name = "Launchpad";
+    launchpad.kind = synth::MidiProfileKind::Launchpad;
+    launchpad.config = synth::LaunchpadDefaultProfileConfig();
+    Require(instrument.AddController(std::move(launchpad)), "fixture adds the Launchpad row");
+    connection.controllers.push_back({});
+
+    synth::MidiControllerSlot blacklisted;
+    blacklisted.name = "Blacklisted Device";
+    blacklisted.kind = synth::MidiProfileKind::Generic;
+    blacklisted.disposition = synth::MidiControllerDisposition::Blacklisted;
+    blacklisted.wizardId = "some.wizard.id";
+    blacklisted.input = {"blacklisted-in", "Some Long Device Name"};
+    blacklisted.output = {"blacklisted-out", "Some Long Device Name"};
+    Require(instrument.AddController(std::move(blacklisted)), "fixture adds the Blacklisted row");
+    connection.controllers.push_back({});
+
+    synth::MidiAppCatalog catalog;
+    synth::MidiAppDeviceDefault twisterDefault;
+    twisterDefault.id = "froggers.twister";
+    twisterDefault.displayName = "Midi Fighter Twister (offline)";
+    twisterDefault.kind = synth::MidiProfileKind::MfTwister;
+    twisterDefault.config =
+        synth::MfTwisterDefaultProfileConfig(synth::MfTwisterDefaultProfileOptions{.slotIx = 0});
+    catalog.deviceDefaults.push_back(twisterDefault);
+    synth::MidiAppDeviceDefault genericDefault;
+    genericDefault.id = "froggers.generic";
+    genericDefault.displayName = "Akai APC40 mkII (Generic, offline)";
+    genericDefault.kind = synth::MidiProfileKind::Generic;
+    catalog.deviceDefaults.push_back(genericDefault);
+    synth::MidiAppDeviceDefault launchpadDefault;
+    launchpadDefault.id = "froggers.launchpad";
+    launchpadDefault.displayName = "Novation Launchpad (offline)";
+    launchpadDefault.kind = synth::MidiProfileKind::Launchpad;
+    launchpadDefault.config = synth::LaunchpadDefaultProfileConfig();
+    catalog.deviceDefaults.push_back(launchpadDefault);
+
+    catalog.libraryKinds = {synth::UISystemMessage::ParamIncDec,
+                             synth::UISystemMessage::ParamSetAbsolute,
+                             synth::UISystemMessage::ParamPush,
+                             synth::UISystemMessage::SetSceneBlend,
+                             synth::UISystemMessage::HoldDrill};
+    const char* const kPlainActionLabels[] = {"Play", "Stop", "Freeze", "Record", "Randomize All",
+                                              "Randomize Page", "Reset All", "Reset Page",
+                                              "Bank Previous", "Bank Next"};
+    const char* const kPlainActionNames[] = {
+        "app.play",         "app.stop",         "app.freeze",       "app.record",
+        "app.randomize_all", "app.randomize_page", "app.reset_all", "app.reset_page",
+        "app.bank_previous", "app.bank_next"};
+    for (std::size_t ix = 0; ix < 10; ++ix)
+    {
+        synth::MidiAppAction action;
+        action.action = kPlainActionNames[ix];
+        action.value = "";
+        action.label = kPlainActionLabels[ix];
+        catalog.actions.push_back(std::move(action));
+    }
+    for (int bank = 0; bank < 6; ++bank)
+    {
+        synth::MidiAppAction action;
+        action.action = "app.bank_select";
+        action.value = std::to_string(bank);
+        action.label = "Bank " + std::to_string(bank + 1);
+        catalog.actions.push_back(std::move(action));
+    }
+    for (int scene = 0; scene < 2; ++scene)
+    {
+        synth::MidiAppAction action;
+        action.action = "app.scene_select";
+        action.value = std::to_string(scene);
+        action.label = "Scene " + std::to_string(scene + 1);
+        catalog.actions.push_back(std::move(action));
+    }
+    {
+        synth::MidiAppAction bpm;
+        bpm.action = "app.bpm";
+        bpm.value = "";
+        bpm.label = "BPM";
+        bpm.analogRange = std::make_pair(30.0f, 300.0f);
+        catalog.actions.push_back(std::move(bpm));
+    }
+
+    std::string status;
+    synth::runtime_ui::ControllersPageCallbacks callbacks;
+    callbacks.instrumentSnapshot = [&instrument] { return instrument; };
+    callbacks.connectionState = [&connection] { return connection; };
+    callbacks.enumerateDevices = [] { return synth::MidiDeviceList{}; };
+    callbacks.commitInstrument = [&instrument, &connection](synth::MidiInstrumentConfig out) {
+        instrument = std::move(out);
+        connection.controllers.resize(instrument.controllers.size());
+        return true;
+    };
+    callbacks.setStatus = [&status](std::string text) { status = std::move(text); };
+    callbacks.messageCatalog = synth::MakeUISystemMessageChoices(catalog);
+    callbacks.analogActionCatalog = synth::MakeAnalogAppActionChoices(catalog);
+    callbacks.layouts = synth::MakeControllerWizardRegistry(catalog);
+
+    synth::runtime_ui::ControllersPageSurface surface(std::move(callbacks));
+    const synth::ui::Bounds froggersContentBounds{0.0f, 0.0f, 900.0f, 620.0f};
+    surface.SetContentBounds(froggersContentBounds);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    const auto requireFits = [&](const char* state) {
+        surface.RefreshOnTick();
+        const synth::ui::NodeTree stateTree = surface.BuildTree();
+        const std::vector<std::string> stateViolations =
+            synth::ui::criteria::FitsWithinViolations(stateTree, froggersContentBounds);
+        for (const std::string& violation : stateViolations)
+        {
+            std::fprintf(stderr, "FitsWithinViolations[%s]: %s\n", state, violation.c_str());
+        }
+        Require(stateViolations.empty(),
+                (std::string("the Controllers page fits frogg3rs's 900-wide content: ") + state)
+                    .c_str());
+        return stateTree;
+    };
+    const auto requireAdded = [&](const char* label) {
+        Require(status.rfind("Refused", 0) != 0, label);
+    };
+
+    requireFits("collapsed rows: a Twister, a Generic, a Launchpad and a Blacklisted controller "
+                "with long device names");
+
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleConfig, "1"));
+    requireFits("Generic expanded");
+
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleSection, "1:encoders"));
+    requireFits("Generic Encoders open");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddSingle,
+                                                         "1:encoders:encoder_turn"));
+    requireAdded("Generic Turn row add accepted");
+    requireFits("Generic Turn row added");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddSingle,
+                                                         "1:encoders:encoder_push"));
+    requireAdded("Generic Push row add accepted");
+    requireFits("Generic Push row added");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleSection,
+                                                         "1:system_messages"));
+    requireFits("Generic System Messages open");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddSingle,
+                                                         "1:system_messages:system"));
+    requireAdded("Generic system row add accepted");
+    const synth::ui::NodeTree systemRowTree = requireFits("Generic system row added");
+
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleSection, "1:analogs"));
+    requireFits("Generic Analogs open");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddSingle,
+                                                         "1:analogs:analog_gesture"));
+    requireAdded("Generic Gesture row add accepted");
+    requireFits("Generic Gesture row added");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddSingle,
+                                                         "1:analogs:analog_app_action"));
+    requireAdded("Generic App action row add accepted");
+    requireFits("Generic App action row added");
+
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleConfig, "2"));
+    requireFits("Launchpad expanded");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleSection,
+                                                         "2:system_messages"));
+    requireFits("Launchpad System Messages open");
+
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleConfig, "0"));
+    requireFits("Twister expanded");
+
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleSection, "0:encoders"));
+    requireFits("Twister Encoders open");
+
+    const synth::ui::Node* messageCombo = FindNodeById(
+        systemRowTree, synth::runtime_ui::NodeIds::MappingField(
+                           1, synth::MidiConfigSection::SystemMessages, 0,
+                           synth::MidiMappingRowVM::Field::MessageKind));
+    Require(messageCombo != nullptr, "the Generic system row's Message combo exists");
+    Require(messageCombo->kind == synth::ui::NodeKind::ComboBox,
+            "the Generic system row's Message field renders as a combo box");
+    Require(messageCombo->options.size() == 24,
+            "the Generic system row's Message combo offers the app catalog's 24 choices");
 }
 
 // Task 6.2a. `TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface` and its
@@ -3715,6 +3936,7 @@ int main()
     TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface();
     TestControllersWizardAndBraid4ResolveAtTheSmallestDeclaredSurface();
     TestNamedVisualCriteriaHoldOnEveryPageAndApp();
+    TestControllersRowFitsWithinFroggersNarrowestHost();
     TestTheNamedCriteriaAreTheOnesThePlaywrightSuiteNames();
     TestTheWizardFormIsReachableRatherThanClipped();
     TestControllersChooserAndBraid4PinTheirAbsorbingRegions();

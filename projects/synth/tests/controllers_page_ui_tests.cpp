@@ -1248,8 +1248,8 @@ void TestControllersSectionsNestThroughLibraryContainers()
     Require(!scroll->children.empty(), "the Controllers scroll area has nested children");
     const synth::ui::Node* row =
         FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerRow(0));
-    Require(row != nullptr && row->kind == synth::ui::NodeKind::Row,
-            "controller list entries are Row containers");
+    Require(row != nullptr && row->kind == synth::ui::NodeKind::Section,
+            "controller list entries are Section containers stacking their two header lines");
     Require(FindParentOf(tree, row->id.value) == scroll,
             "controller list rows are nested under the scroll area");
     const synth::ui::Node* section =
@@ -1302,12 +1302,42 @@ void TestControllerRowsStayReadableWithLargeLists()
         FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerRow(59));
     Require(scroll != nullptr && first != nullptr && tail != nullptr,
             "large controller list exposes first and tail rows");
-    Require(first->bounds.height == 36.0f && tail->bounds.height == 36.0f,
+    Require(first->bounds.height == synth::runtime_ui::ControllersLayout::kControllerHeaderHeight &&
+                tail->bounds.height == synth::runtime_ui::ControllersLayout::kControllerHeaderHeight,
             "large controller list rows keep the recovered readable height");
     Require(scroll->scrollContentHeight > scroll->bounds.height,
             "large controller list publishes a larger scroll content extent");
     Require(tail->bounds.y + tail->bounds.height <= scroll->scrollContentHeight + 0.001f,
             "large controller list tail stays inside scroll content");
+}
+
+void TestControllerKindLabelsShowTheCombinedDisplayNames()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    synth::MidiControllerSlot twister;
+    twister.name = "twister";
+    twister.kind = synth::MidiProfileKind::MfTwister;
+    twister.config = synth::MfTwisterDefaultProfileConfig();
+    Require(harness.instrument.AddController(std::move(twister)), "add Twister slot");
+    harness.connection.controllers.push_back({});
+    Require(harness.instrument.AddController(MakeGenericSlot("blank")), "add Generic slot");
+    harness.connection.controllers.push_back({});
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree tree = surface.BuildTree();
+
+    const synth::ui::Node* twisterKind =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerKind(0));
+    const synth::ui::Node* genericKind =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerKind(1));
+    Require(twisterKind != nullptr && twisterKind->text == "MF Twister",
+            "the Active row's kind label reads MF Twister for a Twister slot");
+    Require(genericKind != nullptr && genericKind->text == "Generic",
+            "the Active row's kind label reads Generic for a Generic slot");
 }
 
 void TestControllerLifecycleActionsUseTheNormalCommitAndSavePath()
@@ -1354,6 +1384,12 @@ void TestControllerLifecycleActionsUseTheNormalCommitAndSavePath()
                 renameDraft->action->value.back() != ':' &&
                 renameButton != nullptr && renameButton->action.has_value(),
             "Rename exposes a draft field with an unambiguous renderer prefix and an explicit commit button");
+    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerRenameDraft(0) + ".caption")
+                    ->text == "Rename to",
+            "active row rename draft has a visible caption");
+    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerRenameDraft(3) + ".caption")
+                    ->text == "Rename to",
+            "blacklisted row rename draft has a visible caption");
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerDelete(0)) != nullptr,
             "manual active row exposes Delete");
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerBlacklist(1)) != nullptr &&
@@ -1396,6 +1432,23 @@ void TestControllerLifecycleActionsUseTheNormalCommitAndSavePath()
     const synth::ui::Node* lifecycleScroll = FindNodeById(
         initialTree, synth::runtime_ui::NodeIds::kScroll);
     Require(lifecycleScroll != nullptr, "lifecycle tree includes its scroll container");
+    const std::string legendId = synth::runtime_ui::NodeIds::kStatusLegend;
+    const synth::ui::Node* onlineDot = FindNodeById(initialTree, legendId + ".online");
+    const synth::ui::Node* onlineLabel = FindNodeById(initialTree, legendId + ".online.label");
+    const synth::ui::Node* offlineDot = FindNodeById(initialTree, legendId + ".offline");
+    const synth::ui::Node* offlineLabel = FindNodeById(initialTree, legendId + ".offline.label");
+    const synth::ui::Node* notSetDot = FindNodeById(initialTree, legendId + ".not_set");
+    const synth::ui::Node* notSetLabel = FindNodeById(initialTree, legendId + ".not_set.label");
+    Require(onlineDot != nullptr && onlineLabel != nullptr && offlineDot != nullptr &&
+                offlineLabel != nullptr && notSetDot != nullptr && notSetLabel != nullptr,
+            "the status dot legend carries all three dot/label pairs");
+    Require(onlineLabel->text == "online" && offlineLabel->text == "offline" &&
+                notSetLabel->text == "not set",
+            "the status dot legend names the three endpoint statuses in order");
+    Require(onlineDot->bounds.x < onlineLabel->bounds.x &&
+                offlineDot->bounds.x < offlineLabel->bounds.x &&
+                notSetDot->bounds.x < notSetLabel->bounds.x,
+            "each status dot precedes its own label on x");
     for (const synth::ui::Node& node : initialTree.nodes)
     {
         if (node.id.value.starts_with("runtime.controllers.row.") &&
@@ -1529,6 +1582,7 @@ int main()
     TestNoHandRolledControllerNodesSurvive();
     TestControllersSectionsNestThroughLibraryContainers();
     TestControllerRowsStayReadableWithLargeLists();
+    TestControllerKindLabelsShowTheCombinedDisplayNames();
     TestDiscoveryRendersPortableAvailableRowsAndDiagnostics();
     TestWizardSessionRoutesPortableChooserAndForm();
     TestWizardSubmitCommitsCompleteProfileThenSaves();
@@ -1567,7 +1621,7 @@ int main()
     Require(addKind != nullptr && addKind->action.has_value() &&
                 addKind->action->name == "runtime.controllers.add_kind_draft",
             "add controller kind edits dispatch a portable draft action");
-    Require(addKindCaption != nullptr && addKindCaption->text == "Kind",
+    Require(addKindCaption != nullptr && addKindCaption->text == "Device",
             "add controller kind selector has a visible caption");
     const synth::ui::Node* wrldInput =
         FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerInput(0));
@@ -1591,20 +1645,24 @@ int main()
         FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerVariant(1));
     const synth::ui::Node* padsVariantRow =
         FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerVariant(1) + ".row");
+    const synth::ui::Node* padsLayoutRow =
+        FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerLayout(1) + ".row");
     const synth::ui::Node* scrollNode = FindNodeById(initialTree, synth::runtime_ui::NodeIds::kScroll);
     Require(wrldInput != nullptr && padsInput != nullptr && wrldOutput != nullptr && padsOutput != nullptr,
             "controller device controls render");
     Require(wrldInputRow != nullptr && padsInputRow != nullptr && wrldOutputRow != nullptr &&
-                padsOutputRow != nullptr && padsVariantRow != nullptr,
+                padsOutputRow != nullptr && padsVariantRow != nullptr && padsLayoutRow != nullptr,
             "captioned endpoint selectors render their flow-slot rows");
     Require(wrldDots != nullptr, "controller status dots render");
     Require(padsVariant != nullptr, "launchpad variant selector renders");
     Require(scrollNode != nullptr, "scroll area node still present");
     Require(wrldInput->bounds.x == padsInput->bounds.x, "launchpad input aligns with other controller inputs");
     Require(wrldOutput->bounds.x == padsOutput->bounds.x, "launchpad output aligns with other controller outputs");
-    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerInput(0) + ".caption")->text == "Input",
+    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerInput(0) + ".caption")->text ==
+                "MIDI in",
             "input selector caption is visible text");
-    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutput(0) + ".caption")->text == "Output",
+    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutput(0) + ".caption")->text ==
+                "MIDI out",
             "output selector caption is visible text");
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerVariant(1) + ".caption")->text ==
                 "Variant",
@@ -1616,15 +1674,33 @@ int main()
     Require(wrldOutputRow->bounds.x == wrldInputRow->bounds.x + wrldInputRow->bounds.width +
                                          synth::runtime_ui::ControllersLayout::kEndpointBoxGap,
             "input and output selector flow slots keep endpoint spacing");
-    Require(padsVariantRow->bounds.x > padsOutputRow->bounds.x + padsOutputRow->bounds.width,
-            "launchpad variant flow slot sits to the right of output");
-    Require(padsVariantRow->bounds.x == padsOutputRow->bounds.x + padsOutputRow->bounds.width +
-                                        synth::runtime_ui::ControllersLayout::kEndpointBoxGap,
-            "output and variant selector flow slots keep endpoint spacing");
+    Require(padsVariantRow->bounds.x > padsLayoutRow->bounds.x + padsLayoutRow->bounds.width,
+            "launchpad variant flow slot sits to the right of the Layout combo on the identity line");
+    Require(padsVariantRow->bounds.x == padsLayoutRow->bounds.x + padsLayoutRow->bounds.width +
+                                        synth::runtime_ui::ControllersLayout::kLifecycleControlGap,
+            "Layout and variant selector flow slots keep lifecycle spacing");
+    Require(padsVariantRow->bounds.y == padsLayoutRow->bounds.y,
+            "the variant selector shares the identity line with the Layout combo");
+    // Bounds are parent-relative (design.md), so a variant/output line check
+    // has to walk parentage rather than compare raw y across different
+    // immediate parents.
+    const synth::ui::Node* padsVariantLine = FindParentOf(initialTree, padsVariantRow->id.value);
+    const synth::ui::Node* padsOutputEndpoints = FindParentOf(initialTree, padsOutputRow->id.value);
+    const synth::ui::Node* padsOutputLine =
+        padsOutputEndpoints != nullptr ? FindParentOf(initialTree, padsOutputEndpoints->id.value)
+                                       : nullptr;
+    Require(padsVariantLine != nullptr &&
+                padsVariantLine->id.value ==
+                    synth::runtime_ui::NodeIds::ControllerRow(1) + ".line1",
+            "the variant selector is on the identity line");
+    Require(padsOutputLine != nullptr &&
+                padsOutputLine->id.value == synth::runtime_ui::NodeIds::ControllerRow(1) + ".line2",
+            "the output selector is on the ports line");
     Require(wrldDots->bounds.y ==
-                (synth::runtime_ui::ControllersLayout::kControllerHeaderHeight - wrldDots->bounds.height) /
+                (synth::runtime_ui::ControllersLayout::kControllerHeaderLineHeight -
+                 wrldDots->bounds.height) /
                     2.0f,
-            "status dots are vertically centered in the controller row");
+            "status dots are vertically centered in their header line");
     Require(scrollNode->scrollContentWidth >= padsVariantRow->bounds.x + padsVariantRow->bounds.width,
             "scroll content reserves launchpad variant width");
 

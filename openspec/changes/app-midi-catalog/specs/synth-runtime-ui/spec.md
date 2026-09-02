@@ -129,3 +129,51 @@ WHEN an active controller row is presented, THE runtime library SHALL offer a La
 - **WHEN** a Launchpad slot's variant is changed
 - **THEN** its `wizardId` is cleared, the same as a mapping field commit, add, delete, or block edit would clear it
 - Check: `viewmodel_tests.cpp: SetLaunchpadVariantClearsWizardId`
+
+### Requirement: sru-61 — Controllers page: the controller row fits the host
+WHEN an active or blacklisted controller row is presented, THE runtime library SHALL lay out its header as two lines of 36 px: the first line holds the row's identity controls — disclosure, name at 200 px, the device's display name, status dots, the Layout combo, and, for a Launchpad slot, the Variant combo — and the second line holds its ports and lifecycle controls — MIDI in, MIDI out, a rename field captioned "Rename to", Rename, Delete, and Blacklist. THE runtime library SHALL keep every control's node id unchanged by the reflow, and every node of the Controllers page SHALL lie inside the surface's content bounds at any app width of at least the header's minimum width, 890 px.
+
+#### Scenario: The page fits a 900-wide host with its widest rows
+- **WHEN** the Controllers page lists a Twister, a Generic, a Launchpad, and a Blacklisted controller, each with device names as long as "Midi Fighter Twister (offline)", built at content bounds 900 by 620
+- **THEN** every node's rectangle, folded over its ancestor chain, lies inside those bounds
+- Check: `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`
+
+#### Scenario: A Launchpad row keeps its Variant combo on the identity line
+- **WHEN** a Launchpad slot's row is built
+- **THEN** the Variant combo sits on line one, to the right of the Layout combo, at the same line height
+- Check: `controllers_page_ui_tests.cpp: main`
+
+#### Scenario: A blacklisted row lays out on the same two lines
+- **WHEN** a blacklisted controller record is listed
+- **THEN** its name, kind, and Blacklisted badge sit on line one and its two stored-endpoint labels and lifecycle controls sit on line two
+- Check: `controllers_page_ui_tests.cpp: TestControllersSectionsNestThroughLibraryContainers`,
+  `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`
+
+#### Scenario: The page fits a 900-wide host in every open state
+- **WHEN** the same page has the Generic row expanded with Encoders (a Turn and a Push row added), System Messages (a row added) and Analogs (a Gesture and an App action row added) open, the Launchpad row expanded with System Messages open, and the Twister row expanded with Encoders open
+- **THEN** every node's rectangle, folded over its ancestor chain, lies inside those bounds after each step, and the Generic system row's Message combo offers the 24 choices the app catalog supplies
+- Check: `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`
+
+### Requirement: sru-62 — Controllers page: device names, port captions and legend
+WHEN the Controllers page builds an active row's device label or the add row's device selector, THE runtime library SHALL show the device display name (`MidiProfileKindDisplayName`: WRLD.Bldr, MF Twister, Launchpad, Generic) while the persisted config keeps the profile-kind token; the add row's selector SHALL be captioned "Device"; the endpoint selectors SHALL be captioned "MIDI in" and "MIDI out", and a blacklisted row's stored-endpoint labels SHALL read "MIDI in: " and "MIDI out: " ahead of the stored name and identifier; and the section heading SHALL carry one legend, ahead of the first controller row, showing a coloured dot in each of the three `EndpointStatusColor` colours before the words "online", "offline", and "not set".
+
+#### Scenario: Row and add-selector labels use the display name; the persisted config keeps the token
+- **WHEN** a Twister slot's row and the add row's Device selector are built
+- **THEN** both read "MF Twister"
+- **AND** the persisted config still writes "twister"
+- Check: `instrument_tests.cpp: KindDisplayNameCoversEveryKind`, `controllers_page_ui_tests.cpp: TestControllerKindLabelsShowTheCombinedDisplayNames`
+
+#### Scenario: The add row and the endpoint selectors read their new captions
+- **WHEN** the Controllers page builds the add row and an active row's endpoint selectors
+- **THEN** the add row's selector is captioned "Device" and the endpoint selectors are captioned "MIDI in" and "MIDI out"
+- Check: `controllers_page_ui_tests.cpp: main`
+
+#### Scenario: A blacklisted row keeps its stored endpoint labels under the same wording
+- **WHEN** a blacklisted record is listed
+- **THEN** its two endpoint labels carry the stored device name and identifier under the "MIDI in: " / "MIDI out: " wording
+- Check: `controllers_page_ui_tests.cpp: TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`
+
+#### Scenario: A status legend precedes the first controller row
+- **WHEN** the Controllers page lists at least one controller
+- **THEN** a legend node naming all three endpoint statuses is present ahead of the first row, each word preceded by its status colour's dot
+- Check: `controllers_page_ui_tests.cpp: TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`

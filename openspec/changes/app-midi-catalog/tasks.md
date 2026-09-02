@@ -117,6 +117,55 @@
       (`run_engine_tests.log`, `run_instrument_tests.log`,
       `run_parameter_modulation_tests.log`, `run_miniapp_system_tests.log`,
       `run_braid4_system_tests.log`).
+- [x] 1.16 Two-line controller header: `kControllerHeaderHeight` becomes two
+      36 px lines, identity on line one and ports/lifecycle on line two, for
+      both Active and Blacklisted rows; the header width constants become
+      the maximum of the two lines.
+      File: `include/synth/ControllersPageUI.hpp`.
+      Test: `controllers_page_ui_tests.cpp: TestControllersSectionsNestThroughLibraryContainers`,
+      `TestControllerRowsStayReadableWithLargeLists`,
+      `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`.
+- [x] 1.17 Device display names and captions: `MidiProfileKindDisplayName`
+      beside `MidiProfileKindName`, used by the row label and the add row's
+      selector; the add row's caption "Kind" becomes "Device"; the endpoint
+      selectors are captioned "MIDI in" and "MIDI out" (a blacklisted row's
+      stored labels read "MIDI in: " / "MIDI out: "); the rename draft gains
+      the caption "Rename to".
+      Files: `include/synth/MidiController.hpp`, `src/MidiController.cpp`,
+      `include/synth/ControllersPageUI.hpp`.
+      Test: `instrument_tests.cpp: KindDisplayNameCoversEveryKind`,
+      `controllers_page_ui_tests.cpp: TestControllerKindLabelsShowTheCombinedDisplayNames`,
+      `TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`, `main`.
+- [x] 1.18 Status legend: one legend row, `NodeIds::kStatusLegend`, ahead of
+      the first controller row, with a coloured dot in each
+      `EndpointStatusColor` colour before "online", "offline", and "not set".
+      File: `include/synth/ControllersPageUI.hpp`.
+      Test: `controllers_page_ui_tests.cpp: TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`.
+- [x] 1.19 Browser overlay sizing: the combo box's `<select>` and the text
+      field's `<input>` fill their node's box (width and height 100%,
+      border-box) and a select's text clips to it
+      (`browser/public/synth-browser.css`); spec'd as sprs-18; checked by
+      the select-fills-wrapper assertion in `browser/tests/ui-backend.spec.ts`.
+- [x] 1.20 Fits-within criterion: `FitsWithinViolations(tree, bounds)`
+      beside `ContainmentViolations`, folded over each node's ancestor
+      chain; the Controllers fixture builds a Twister, a Generic, a
+      Launchpad, and a Blacklisted row at 900x620 content bounds and asserts
+      the violation list is empty.
+      Files: `tests/support/VisualCriteria.hpp`, `tests/portable_ui_tests.cpp`.
+      Test: `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`.
+- [x] 1.21 Fits-within over the open states: the Controllers fixture
+      dispatches the page's own actions (expand, open section, add row)
+      for the Generic, Launchpad and Twister rows and asserts zero
+      violations after each step; the Generic system row's Message combo
+      offers the app catalog's 24 choices.
+      File: `tests/portable_ui_tests.cpp`.
+      Test: `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`.
+- [x] 1.22 `browser/tests/ui-backend.spec.ts` runs in CI: added to the
+      build job's "Run local cross-origin publication gates" step of
+      `.github/workflows/synth-browser-pages.yml`, the invocation that
+      runs against the built bundle, so the select-fills-wrapper
+      assertion (sprs-18) is checked on every push to main.
+      File: `.github/workflows/synth-browser-pages.yml`.
 
 ## 2. Postflight and delivery
 

@@ -194,6 +194,15 @@ TEST_CASE(KindNameRoundTrip) {
     REQUIRE_TRUE(kind == MidiProfileKind::Generic);
 }
 
+TEST_CASE(KindDisplayNameCoversEveryKind) {
+    REQUIRE_TRUE(std::string(synth::MidiProfileKindDisplayName(MidiProfileKind::WrldBldr)) == "WRLD.Bldr");
+    REQUIRE_TRUE(std::string(synth::MidiProfileKindDisplayName(MidiProfileKind::MfTwister)) == "MF Twister");
+    REQUIRE_TRUE(std::string(synth::MidiProfileKindDisplayName(MidiProfileKind::Launchpad)) == "Launchpad");
+    REQUIRE_TRUE(std::string(synth::MidiProfileKindDisplayName(MidiProfileKind::Generic)) == "Generic");
+
+    REQUIRE_TRUE(std::string(synth::MidiProfileKindName(MidiProfileKind::MfTwister)) == "twister");
+}
+
 TEST_CASE(MessageInJsonRoundTripsHighGestureIndex) {
     synth::JsonArena arena(4096);
     const synth::MessageIn source = synth::MessageIn::SetGestureSelect(17, 63, true);

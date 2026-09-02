@@ -942,6 +942,7 @@ MidiControllerProfileResult CreateBlacklistedMidiControllerProfile();
 enum class MidiProfileKind { WrldBldr, MfTwister, Launchpad, Generic };
 
 const char* MidiProfileKindName(MidiProfileKind kind);
+const char* MidiProfileKindDisplayName(MidiProfileKind kind);
 bool MidiProfileKindFromName(std::string_view name, MidiProfileKind& out);
 
 struct MidiKindSupport {

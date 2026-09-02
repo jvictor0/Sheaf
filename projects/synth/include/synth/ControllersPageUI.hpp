@@ -11,6 +11,7 @@
 #include "synth/MidiReconcile.hpp"
 #include "synth/PortableUI.hpp"
 #include "synth/PortableUIBuilders.hpp"
+#include "synth/PortableUIMetrics.hpp"
 #include "synth/RuntimePageStyle.hpp"
 
 #include <algorithm>
@@ -50,6 +51,7 @@ inline constexpr const char* kAvailableHeading = "runtime.controllers.available.
 inline constexpr const char* kAvailableEmpty = "runtime.controllers.available.empty";
 inline constexpr const char* kAvailableUnmatchedInputs = "runtime.controllers.available.unmatched_inputs";
 inline constexpr const char* kAvailableUnmatchedOutputs = "runtime.controllers.available.unmatched_outputs";
+inline constexpr const char* kStatusLegend = "runtime.controllers.status_legend";
 inline constexpr const char* kWizardLaunch = "runtime.controllers.wizard.launch";
 inline constexpr const char* kWizardChooser = "runtime.controllers.wizard.chooser";
 inline constexpr const char* kWizardChooserEmpty = "runtime.controllers.wizard.chooser.empty";
@@ -472,7 +474,8 @@ inline constexpr float kBackButtonWidth = 80.0f;
 inline constexpr float kWizardIgnoreWidth = 160.0f;
 inline constexpr float kRowGap = 6.0f;
 inline constexpr float kStatusRowHeight = 24.0f;
-inline constexpr float kControllerHeaderHeight = 36.0f;
+inline constexpr float kControllerHeaderLineHeight = 36.0f;
+inline constexpr float kControllerHeaderHeight = 2.0f * kControllerHeaderLineHeight;
 inline constexpr float kSectionHeaderHeight = 28.0f;
 inline constexpr float kMappingRowHeight = 30.0f;
 inline constexpr float kGroupHeaderHeight = 42.0f;
@@ -482,7 +485,12 @@ inline constexpr float kDeleteButtonWidth = 22.0f;
 inline constexpr float kAddButtonWidth = 62.0f;
 inline constexpr float kVariantFieldWidth = 200.0f;
 inline constexpr float kStatusDotsWidth = 32.0f;
-inline constexpr float kHeaderControlsX = 256.0f;
+// The section heading's legend: three in-flow dot/word pairs (online, offline,
+// not set). Each dot sits in its own cell, sized for the 8px dot it centres;
+// the word beside it takes the word's own intrinsic width, so the two never
+// drift apart the way character-advance arithmetic over a shared string did.
+inline constexpr float kStatusLegendDotWidth = 16.0f;
+inline constexpr float kStatusLegendPairGap = 16.0f;
 inline constexpr float kEndpointFieldWidth = 220.0f;
 inline constexpr float kEndpointBoxGap = 8.0f;
 // Available-controller row columns: the recognized controller's descriptor
@@ -492,37 +500,56 @@ inline constexpr float kAvailableEndpointsWidth = 260.0f;
 inline constexpr float kAvailableConfigureWidth = 92.0f;
 inline constexpr float kAvailableIgnoreWidth = 72.0f;
 inline constexpr float kAvailableControlGap = 8.0f;
-inline constexpr float kControllerNameWidth = 120.0f;
+inline constexpr float kControllerNameWidth = 200.0f;
 inline constexpr float kControllerKindWidth = 100.0f;
 inline constexpr float kControllerDisclosureWidth = 24.0f;
-inline constexpr float kLifecycleDraftWidth = 120.0f;
+// 120px cannot hold the "Rename to" caption plus a usable field (the caption
+// alone measures ~94px at the default text size), so the draft column is wide
+// enough for the caption and a short name.
+inline constexpr float kLifecycleDraftWidth = 160.0f;
 inline constexpr float kLifecycleRenameWidth = 72.0f;
 inline constexpr float kLifecycleDeleteWidth = 66.0f;
-inline constexpr float kLifecycleLayoutWidth = 140.0f;
+inline constexpr float kLifecycleLayoutWidth = 200.0f;
 inline constexpr float kLifecycleBlacklistWidth = 78.0f;
 inline constexpr float kLifecycleConfigureWidth = 86.0f;
 inline constexpr float kLifecycleRemoveWidth = 72.0f;
 inline constexpr float kLifecycleControlGap = 4.0f;
+// The Layout combo now sits on line one beside the identity controls; line
+// two's lifecycle block is the rename draft, Rename, Delete and Blacklist.
 inline constexpr float kActiveLifecycleWidth =
     kLifecycleDraftWidth + kLifecycleControlGap + kLifecycleRenameWidth +
     kLifecycleControlGap + kLifecycleDeleteWidth + kLifecycleControlGap +
-    kLifecycleLayoutWidth + kLifecycleControlGap + kLifecycleBlacklistWidth;
+    kLifecycleBlacklistWidth;
 inline constexpr float kBlacklistedEndpointLabelWidth = 240.0f;
 inline constexpr float kBlacklistedBadgeWidth = 84.0f;
 inline constexpr float kBlacklistedLifecycleWidth =
     kLifecycleDraftWidth + kLifecycleControlGap + kLifecycleRenameWidth +
     kLifecycleControlGap + kLifecycleConfigureWidth + kLifecycleControlGap +
     kLifecycleRemoveWidth;
+// Line one: disclosure, name, kind, status dots, Layout, and (worst case, a
+// Launchpad) Variant.
+inline constexpr float kActiveHeaderLine1Width =
+    kControllerDisclosureWidth + kLifecycleControlGap + kControllerNameWidth +
+    kLifecycleControlGap + kControllerKindWidth + kLifecycleControlGap +
+    kStatusDotsWidth + kLifecycleControlGap + kLifecycleLayoutWidth +
+    kLifecycleControlGap + kVariantFieldWidth;
+// Line two: the endpoints cluster (Input, Output) followed by the lifecycle
+// controls.
+inline constexpr float kActiveHeaderLine2Width =
+    kEndpointFieldWidth + kEndpointBoxGap + kEndpointFieldWidth + kActiveLifecycleWidth +
+    kLifecycleControlGap;
 inline constexpr float kActiveControllerHeaderWidth =
-    kHeaderControlsX + kStatusDotsWidth + kLifecycleControlGap + kEndpointFieldWidth +
-    kEndpointBoxGap + kEndpointFieldWidth + kEndpointBoxGap + kVariantFieldWidth +
-    kEndpointBoxGap + kActiveLifecycleWidth;
-inline constexpr float kBlacklistedControllerHeaderWidth =
+    std::max(kActiveHeaderLine1Width, kActiveHeaderLine2Width);
+// Line one: name, kind, Blacklisted badge.
+inline constexpr float kBlacklistedHeaderLine1Width =
     kControllerNameWidth + kLifecycleControlGap + kControllerKindWidth +
-    kLifecycleControlGap + kBlacklistedBadgeWidth + kLifecycleControlGap +
-    kBlacklistedEndpointLabelWidth + kLifecycleControlGap +
-    kBlacklistedEndpointLabelWidth + kLifecycleControlGap +
-    kBlacklistedLifecycleWidth;
+    kLifecycleControlGap + kBlacklistedBadgeWidth;
+// Line two: the two stored-endpoint labels followed by the lifecycle controls.
+inline constexpr float kBlacklistedHeaderLine2Width =
+    kBlacklistedEndpointLabelWidth + kLifecycleControlGap + kBlacklistedEndpointLabelWidth +
+    kLifecycleControlGap + kBlacklistedLifecycleWidth;
+inline constexpr float kBlacklistedControllerHeaderWidth =
+    std::max(kBlacklistedHeaderLine1Width, kBlacklistedHeaderLine2Width);
 inline constexpr float kControllerHeaderMinWidth =
     std::max(kActiveControllerHeaderWidth, kBlacklistedControllerHeaderWidth);
 inline constexpr float kSectionMaxHeight = 220.0f;
@@ -873,10 +900,10 @@ inline std::vector<ui::ControlOption> BuildLayoutOptions(
 
 inline std::vector<ui::ControlOption> BuildAddControllerKindOptions()
 {
-    return {{"wrldbldr", "WRLD.Bldr"},
-            {"mftwister", "MF Twister"},
-            {"launchpad", "Launchpad"},
-            {"generic", "Generic"}};
+    return {{"wrldbldr", MidiProfileKindDisplayName(MidiProfileKind::WrldBldr)},
+            {"mftwister", MidiProfileKindDisplayName(MidiProfileKind::MfTwister)},
+            {"launchpad", MidiProfileKindDisplayName(MidiProfileKind::Launchpad)},
+            {"generic", MidiProfileKindDisplayName(MidiProfileKind::Generic)}};
 }
 
 inline MidiProfileKind KindFromAddOptionId(const std::string& optionId)
@@ -2560,11 +2587,12 @@ private:
             out.layout.main = ui::Extent::Px(main);
             return out;
         };
-        const auto button = [&](float width, float height = ControllersLayout::kControllerHeaderHeight) {
+        const auto button = [&](float width,
+                                float height = ControllersLayout::kControllerHeaderLineHeight) {
             return style(width, height, pagestyle::kDefaultButton);
         };
         const auto fieldControl = [&](float width,
-                                      float height = ControllersLayout::kControllerHeaderHeight) {
+                                      float height = ControllersLayout::kControllerHeaderLineHeight) {
             return style(width, height, pagestyle::kDefaultPanel);
         };
         const auto columnControl = [](float width, float height) {
@@ -2615,7 +2643,7 @@ private:
                                            discovery.available[candidateIx];
                                        available.Row(
                                            NodeIds::AvailableRow(candidateIx),
-                                           rowLayout(ControllersLayout::kControllerHeaderHeight,
+                                           rowLayout(ControllersLayout::kControllerHeaderLineHeight,
                                                      scrollWidth,
                                                      ControllersLayout::kAvailableControlGap),
                                            [&](ui::Builder& row) {
@@ -3016,124 +3044,181 @@ private:
         const auto emitControllerRow = [&](ui::Builder& scroll,
                                            const MidiControllerRowVM& rowVm,
                                            std::size_t controllerIx) {
-            scroll.Row(NodeIds::ControllerRow(controllerIx),
-                       rowLayout(ControllersLayout::kControllerHeaderHeight,
-                                 scrollWidth,
-                                 ControllersLayout::kLifecycleControlGap),
-                       [&](ui::Builder& row) {
-                           if (rowVm.disposition == MidiControllerDisposition::Blacklisted)
-                           {
-                               row.Label(NodeIds::ControllerName(controllerIx),
+            scroll.Column(
+                NodeIds::ControllerRow(controllerIx),
+                rowLayout(ControllersLayout::kControllerHeaderHeight, scrollWidth, 0.0f),
+                [&](ui::Builder& section) {
+                    if (rowVm.disposition == MidiControllerDisposition::Blacklisted)
+                    {
+                        section.Row(
+                            NodeIds::ControllerRow(controllerIx) + ".line1",
+                            rowLayout(ControllersLayout::kControllerHeaderLineHeight,
+                                     scrollWidth,
+                                     ControllersLayout::kLifecycleControlGap),
+                            [&](ui::Builder& row) {
+                                row.Label(NodeIds::ControllerName(controllerIx),
                                          rowVm.name,
                                          labelStyle(ControllersLayout::kControllerNameWidth));
-                               row.Label(NodeIds::ControllerKind(controllerIx),
-                                         MidiProfileKindName(rowVm.kind),
+                                row.Label(NodeIds::ControllerKind(controllerIx),
+                                         MidiProfileKindDisplayName(rowVm.kind),
                                          labelStyle(ControllersLayout::kControllerKindWidth));
-                               row.Label(NodeIds::ControllerBadge(controllerIx),
+                                row.Label(NodeIds::ControllerBadge(controllerIx),
                                          "Blacklisted",
                                          labelStyle(ControllersLayout::kBlacklistedBadgeWidth));
-                               row.Label(NodeIds::ControllerInputLabel(controllerIx),
-                                         "Input: " +
+                            });
+                        section.Row(
+                            NodeIds::ControllerRow(controllerIx) + ".line2",
+                            rowLayout(ControllersLayout::kControllerHeaderLineHeight,
+                                     scrollWidth,
+                                     ControllersLayout::kLifecycleControlGap),
+                            [&](ui::Builder& row) {
+                                row.Label(NodeIds::ControllerInputLabel(controllerIx),
+                                         "MIDI in: " +
                                              ControllersLayout::StoredEndpointLabel(rowVm.storedInput),
                                          labelStyle(ControllersLayout::kBlacklistedEndpointLabelWidth));
-                               row.Label(NodeIds::ControllerOutputLabel(controllerIx),
-                                         "Output: " +
+                                row.Label(NodeIds::ControllerOutputLabel(controllerIx),
+                                         "MIDI out: " +
                                              ControllersLayout::StoredEndpointLabel(rowVm.storedOutput),
                                          labelStyle(ControllersLayout::kBlacklistedEndpointLabelWidth));
-                               row.TextField(
-                                   NodeIds::ControllerRenameDraft(controllerIx),
-                                   "Rename",
-                                   renameDraftFor(rowVm.name),
-                                   ui::Action::WithValue(
-                                       Actions::kControllerRenameDraft,
-                                       NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                   fieldControl(ControllersLayout::kLifecycleDraftWidth));
-                               row.Button(
-                                   NodeIds::ControllerRename(controllerIx),
-                                   "Rename",
-                                   ui::Action::WithValue(
-                                       Actions::kControllerRename,
-                                       NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                   button(ControllersLayout::kLifecycleRenameWidth));
-                               if (rowVm.hasResolvedWizard)
-                               {
-                                   row.Button(
-                                       NodeIds::ControllerConfigure(controllerIx),
-                                       "Configure",
-                                       ui::Action::WithValue(
-                                           Actions::kControllerConfigure,
-                                           NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                       button(ControllersLayout::kLifecycleConfigureWidth));
-                               }
-                               row.Button(
-                                   NodeIds::ControllerRemoveBlacklist(controllerIx),
-                                   "Remove",
-                                   ui::Action::WithValue(
-                                       Actions::kControllerRemoveBlacklist,
-                                       NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                   button(ControllersLayout::kLifecycleRemoveWidth));
-                               return;
-                           }
+                                ui::ControlStyle blacklistedRenameDraftStyle =
+                                    fieldControl(ControllersLayout::kLifecycleDraftWidth);
+                                blacklistedRenameDraftStyle.caption = "Rename to";
+                                row.TextField(
+                                    NodeIds::ControllerRenameDraft(controllerIx),
+                                    "Rename",
+                                    renameDraftFor(rowVm.name),
+                                    ui::Action::WithValue(
+                                        Actions::kControllerRenameDraft,
+                                        NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                    blacklistedRenameDraftStyle);
+                                row.Button(
+                                    NodeIds::ControllerRename(controllerIx),
+                                    "Rename",
+                                    ui::Action::WithValue(
+                                        Actions::kControllerRename,
+                                        NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                    button(ControllersLayout::kLifecycleRenameWidth));
+                                if (rowVm.hasResolvedWizard)
+                                {
+                                    row.Button(
+                                        NodeIds::ControllerConfigure(controllerIx),
+                                        "Configure",
+                                        ui::Action::WithValue(
+                                            Actions::kControllerConfigure,
+                                            NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                        button(ControllersLayout::kLifecycleConfigureWidth));
+                                }
+                                row.Button(
+                                    NodeIds::ControllerRemoveBlacklist(controllerIx),
+                                    "Remove",
+                                    ui::Action::WithValue(
+                                        Actions::kControllerRemoveBlacklist,
+                                        NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                    button(ControllersLayout::kLifecycleRemoveWidth));
+                            });
+                        return;
+                    }
 
-                           row.Button(NodeIds::ControllerDisclosure(controllerIx),
+                    const bool hasVariant = rowVm.kind == MidiProfileKind::Launchpad;
+                    section.Row(
+                        NodeIds::ControllerRow(controllerIx) + ".line1",
+                        rowLayout(ControllersLayout::kControllerHeaderLineHeight,
+                                 scrollWidth,
+                                 ControllersLayout::kLifecycleControlGap),
+                        [&](ui::Builder& row) {
+                            row.Button(NodeIds::ControllerDisclosure(controllerIx),
                                       rowVm.configExpanded ? "v" : ">",
                                       ui::Action::WithValue(Actions::kToggleConfig,
                                                             std::to_string(controllerIx)),
                                       button(ControllersLayout::kControllerDisclosureWidth));
-                           row.Label(NodeIds::ControllerName(controllerIx),
+                            row.Label(NodeIds::ControllerName(controllerIx),
                                      rowVm.name,
                                      labelStyle(ControllersLayout::kControllerNameWidth));
-                           row.Label(NodeIds::ControllerKind(controllerIx),
-                                     MidiProfileKindName(rowVm.kind),
+                            row.Label(NodeIds::ControllerKind(controllerIx),
+                                     MidiProfileKindDisplayName(rowVm.kind),
                                      labelStyle(ControllersLayout::kControllerKindWidth));
 
-                           const bool hasVariant = rowVm.kind == MidiProfileKind::Launchpad;
-                           const float endpointClusterWidth =
-                               ControllersLayout::kStatusDotsWidth +
-                               ControllersLayout::kEndpointBoxGap +
-                               ControllersLayout::kEndpointFieldWidth +
-                               ControllersLayout::kEndpointBoxGap +
-                               ControllersLayout::kEndpointFieldWidth +
-                               (hasVariant ? ControllersLayout::kEndpointBoxGap +
-                                                 ControllersLayout::kVariantFieldWidth
-                                           : 0.0f);
-                           row.Row(NodeIds::ControllerRow(controllerIx) + ".endpoints",
+                            ui::LayoutOptions dotsCellLayout;
+                            dotsCellLayout.main =
+                                ui::Extent::Px(ControllersLayout::kStatusDotsWidth);
+                            dotsCellLayout.cross = ui::Extent::Px(
+                                ControllersLayout::kControllerHeaderLineHeight);
+                            row.Section(
+                                NodeIds::ControllerStatusDots(controllerIx) + ".cell",
+                                dotsCellLayout,
+                                [&](ui::Builder& dotsCell) {
+                                    const float dotsY =
+                                        (ControllersLayout::kControllerHeaderLineHeight - 8.0f) /
+                                        2.0f;
+                                    dotsCell.Draw(
+                                        NodeIds::ControllerStatusDots(controllerIx),
+                                        {0.0f,
+                                         dotsY,
+                                         ControllersLayout::kStatusDotsWidth,
+                                         8.0f},
+                                        {ui::DrawCommand::FillEllipse(
+                                             {0.0f, 0.0f, 8.0f, 8.0f},
+                                             ControllersLayout::EndpointStatusColor(
+                                                 rowVm.inputStatus)),
+                                         ui::DrawCommand::FillEllipse(
+                                             {14.0f, 0.0f, 8.0f, 8.0f},
+                                             ControllersLayout::EndpointStatusColor(
+                                                 rowVm.outputStatus))}, {});
+                                });
+
+                            {
+                                std::string selectedLayout;
+                                std::vector<ui::ControlOption> layoutOptions =
+                                    ControllersLayout::BuildLayoutOptions(
+                                        vm.Layouts(), rowVm.wizardId, selectedLayout);
+                                ui::ControlStyle layoutStyle =
+                                    fieldControl(ControllersLayout::kLifecycleLayoutWidth);
+                                layoutStyle.caption = "Layout";
+                                row.ComboBox(NodeIds::ControllerLayout(controllerIx),
+                                             std::move(layoutOptions),
+                                             selectedLayout,
+                                             ui::Action::WithValue(Actions::kControllerLayout,
+                                                                   std::to_string(controllerIx)),
+                                             layoutStyle);
+                            }
+                            if (hasVariant)
+                            {
+                                std::string selectedVariant;
+                                ui::ControlStyle variantStyle =
+                                    fieldControl(ControllersLayout::kVariantFieldWidth);
+                                variantStyle.caption = "Variant";
+                                row.ComboBox(
+                                    NodeIds::ControllerVariant(controllerIx),
+                                    ControllersLayout::BuildLaunchpadVariantOptions(
+                                        vm.LaunchpadVariantIndex(controllerIx),
+                                        selectedVariant),
+                                    selectedVariant,
+                                    ui::Action::WithValue(
+                                        Actions::kVariantSelect,
+                                        std::to_string(controllerIx)),
+                                    variantStyle);
+                            }
+                        });
+
+                    section.Row(
+                        NodeIds::ControllerRow(controllerIx) + ".line2",
+                        rowLayout(ControllersLayout::kControllerHeaderLineHeight,
+                                 scrollWidth,
+                                 ControllersLayout::kLifecycleControlGap),
+                        [&](ui::Builder& row) {
+                            const float endpointClusterWidth =
+                                ControllersLayout::kEndpointFieldWidth +
+                                ControllersLayout::kEndpointBoxGap +
+                                ControllersLayout::kEndpointFieldWidth;
+                            row.Row(NodeIds::ControllerRow(controllerIx) + ".endpoints",
                                    layout(ui::Extent::Px(endpointClusterWidth),
-                                          ui::Extent::Px(ControllersLayout::kControllerHeaderHeight),
+                                          ui::Extent::Px(ControllersLayout::kControllerHeaderLineHeight),
                                           ControllersLayout::kEndpointBoxGap),
                                    [&](ui::Builder& endpoints) {
-                                       ui::LayoutOptions dotsCellLayout;
-                                       dotsCellLayout.main =
-                                           ui::Extent::Px(ControllersLayout::kStatusDotsWidth);
-                                       dotsCellLayout.cross = ui::Extent::Px(
-                                           ControllersLayout::kControllerHeaderHeight);
-                                       endpoints.Section(
-                                           NodeIds::ControllerStatusDots(controllerIx) + ".cell",
-                                           dotsCellLayout,
-                                           [&](ui::Builder& dotsCell) {
-                                               const float dotsY =
-                                                   (ControllersLayout::kControllerHeaderHeight - 8.0f) /
-                                                   2.0f;
-                                               dotsCell.Draw(
-                                                   NodeIds::ControllerStatusDots(controllerIx),
-                                                   {0.0f,
-                                                    dotsY,
-                                                    ControllersLayout::kStatusDotsWidth,
-                                                    8.0f},
-                                                   {ui::DrawCommand::FillEllipse(
-                                                        {0.0f, 0.0f, 8.0f, 8.0f},
-                                                        ControllersLayout::EndpointStatusColor(
-                                                            rowVm.inputStatus)),
-                                                    ui::DrawCommand::FillEllipse(
-                                                        {14.0f, 0.0f, 8.0f, 8.0f},
-                                                        ControllersLayout::EndpointStatusColor(
-                                                            rowVm.outputStatus))}, {});
-                                           });
-
                                        std::string selectedInput;
                                        ui::ControlStyle inputStyle =
                                            fieldControl(ControllersLayout::kEndpointFieldWidth);
-                                       inputStyle.caption = "Input";
+                                       inputStyle.caption = "MIDI in";
                                        endpoints.ComboBox(
                                            NodeIds::ControllerInput(controllerIx),
                                            ControllersLayout::BuildEndpointOptions(
@@ -3151,7 +3236,7 @@ private:
                                        std::string selectedOutput;
                                        ui::ControlStyle outputStyle =
                                            fieldControl(ControllersLayout::kEndpointFieldWidth);
-                                       outputStyle.caption = "Output";
+                                       outputStyle.caption = "MIDI out";
                                        endpoints.ComboBox(
                                            NodeIds::ControllerOutput(controllerIx),
                                            ControllersLayout::BuildEndpointOptions(
@@ -3165,73 +3250,46 @@ private:
                                                Actions::kEndpointSelect,
                                                std::to_string(controllerIx) + ":output"),
                                            outputStyle);
-                                       if (hasVariant)
-                                       {
-                                           std::string selectedVariant;
-                                           ui::ControlStyle variantStyle =
-                                               fieldControl(ControllersLayout::kVariantFieldWidth);
-                                           variantStyle.caption = "Variant";
-                                           endpoints.ComboBox(
-                                               NodeIds::ControllerVariant(controllerIx),
-                                               ControllersLayout::BuildLaunchpadVariantOptions(
-                                                   vm.LaunchpadVariantIndex(controllerIx),
-                                                   selectedVariant),
-                                               selectedVariant,
-                                               ui::Action::WithValue(
-                                                   Actions::kVariantSelect,
-                                                   std::to_string(controllerIx)),
-                                               variantStyle);
-                                       }
                                    });
-                           row.TextField(
-                               NodeIds::ControllerRenameDraft(controllerIx),
-                               "Rename",
-                               renameDraftFor(rowVm.name),
-                               ui::Action::WithValue(
-                                   Actions::kControllerRenameDraft,
-                                   NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                               fieldControl(ControllersLayout::kLifecycleDraftWidth));
-                           row.Button(
-                               NodeIds::ControllerRename(controllerIx),
-                               "Rename",
-                               ui::Action::WithValue(
-                                   Actions::kControllerRename,
-                                   NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                               button(ControllersLayout::kLifecycleRenameWidth));
-                           row.Button(NodeIds::ControllerDelete(controllerIx),
+                            ui::ControlStyle activeRenameDraftStyle =
+                                fieldControl(ControllersLayout::kLifecycleDraftWidth);
+                            activeRenameDraftStyle.caption = "Rename to";
+                            row.TextField(
+                                NodeIds::ControllerRenameDraft(controllerIx),
+                                "Rename",
+                                renameDraftFor(rowVm.name),
+                                ui::Action::WithValue(
+                                    Actions::kControllerRenameDraft,
+                                    NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                activeRenameDraftStyle);
+                            row.Button(
+                                NodeIds::ControllerRename(controllerIx),
+                                "Rename",
+                                ui::Action::WithValue(
+                                    Actions::kControllerRename,
+                                    NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                button(ControllersLayout::kLifecycleRenameWidth));
+                            row.Button(NodeIds::ControllerDelete(controllerIx),
                                       "Delete",
                                       ui::Action::WithValue(
                                           Actions::kControllerDelete,
                                           NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
                                       button(ControllersLayout::kLifecycleDeleteWidth));
-                           {
-                               std::string selectedLayout;
-                               std::vector<ui::ControlOption> layoutOptions =
-                                   ControllersLayout::BuildLayoutOptions(
-                                       vm.Layouts(), rowVm.wizardId, selectedLayout);
-                               ui::ControlStyle layoutStyle =
-                                   fieldControl(ControllersLayout::kLifecycleLayoutWidth);
-                               layoutStyle.caption = "Layout";
-                               row.ComboBox(NodeIds::ControllerLayout(controllerIx),
-                                            std::move(layoutOptions),
-                                            selectedLayout,
-                                            ui::Action::WithValue(Actions::kControllerLayout,
-                                                                  std::to_string(controllerIx)),
-                                            layoutStyle);
-                           }
-                           if (rowVm.hasResolvedWizard)
-                           {
-                               ui::ControlStyle blacklist = button(ControllersLayout::kLifecycleBlacklistWidth);
-                               blacklist.enabled = rowVm.hasCompleteEndpointPair;
-                               row.Button(
-                                   NodeIds::ControllerBlacklist(controllerIx),
-                                   "Blacklist",
-                                   ui::Action::WithValue(
-                                       Actions::kControllerBlacklist,
-                                       NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                   blacklist);
-                           }
-                       });
+                            if (rowVm.hasResolvedWizard)
+                            {
+                                ui::ControlStyle blacklist =
+                                    button(ControllersLayout::kLifecycleBlacklistWidth);
+                                blacklist.enabled = rowVm.hasCompleteEndpointPair;
+                                row.Button(
+                                    NodeIds::ControllerBlacklist(controllerIx),
+                                    "Blacklist",
+                                    ui::Action::WithValue(
+                                        Actions::kControllerBlacklist,
+                                        NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                    blacklist);
+                            }
+                        });
+                });
         };
 
         ui::Builder builder;
@@ -3267,6 +3325,60 @@ private:
             });
             page.ScrollArea(NodeIds::kScroll, scrollLayout, [&](ui::Builder& scroll) {
                 emitAvailable(scroll);
+                // The status dots on each controller row carry no legend of their
+                // own (a Label cannot carry three colours), so this row lays out
+                // three in-flow dot/word pairs, each pair its own small Row so the
+                // tight gap inside a pair and the wider gap between pairs can
+                // differ without either being a hand-placed offset.
+                scroll.Row(
+                    std::string(NodeIds::kStatusLegend) + ".row",
+                    rowLayout(ControllersLayout::kStatusRowHeight,
+                             scrollWidth,
+                             ControllersLayout::kStatusLegendPairGap),
+                    [&](ui::Builder& legend) {
+                        struct LegendEntry {
+                            const char* suffix;
+                            const char* word;
+                            MidiEndpointStatus status;
+                        };
+                        const LegendEntry entries[] = {
+                            {".online", "online", MidiEndpointStatus::Online},
+                            {".offline", "offline", MidiEndpointStatus::Offline},
+                            {".not_set", "not set", MidiEndpointStatus::Unconfigured},
+                        };
+                        for (const LegendEntry& entry : entries)
+                        {
+                            const std::string dotId =
+                                std::string(NodeIds::kStatusLegend) + entry.suffix;
+                            const std::string pairId = dotId + ".pair";
+                            const std::string labelId = dotId + ".label";
+                            ui::LayoutOptions pairLayout;
+                            pairLayout.main = ui::Extent::Intrinsic();
+                            pairLayout.padding = 0.0f;
+                            pairLayout.gap = ControllersLayout::kLifecycleControlGap;
+                            legend.Row(pairId, pairLayout, [&](ui::Builder& pair) {
+                                ui::LayoutOptions dotLayout;
+                                dotLayout.main =
+                                    ui::Extent::Px(ControllersLayout::kStatusLegendDotWidth);
+                                const MidiEndpointStatus status = entry.status;
+                                pair.Draw(dotId,
+                                         dotLayout,
+                                         [status](ui::Bounds nodeExtent) {
+                                             constexpr float kDotSize = 8.0f;
+                                             return std::vector<ui::DrawCommand>{
+                                                 ui::DrawCommand::FillEllipse(
+                                                     {(nodeExtent.width - kDotSize) / 2.0f,
+                                                      (nodeExtent.height - kDotSize) / 2.0f,
+                                                      kDotSize,
+                                                      kDotSize},
+                                                     ControllersLayout::EndpointStatusColor(status))};
+                                         });
+                                ui::ControlStyle labelAutoStyle;
+                                labelAutoStyle.textStyle = pagestyle::kDefaultTextStyle;
+                                pair.Label(labelId, entry.word, labelAutoStyle);
+                            });
+                        }
+                    });
                 const auto& controllers = vm.Controllers();
                 for (std::size_t controllerIx = 0; controllerIx < controllers.size(); ++controllerIx)
                 {
@@ -3294,7 +3406,7 @@ private:
                                              fieldControl(180.0f, ControllersLayout::kAddRowHeight));
                                ui::ControlStyle addKindStyle =
                                    fieldControl(190.0f, ControllersLayout::kAddRowHeight);
-                               addKindStyle.caption = "Kind";
+                               addKindStyle.caption = "Device";
                                row.ComboBox(NodeIds::kAddKind,
                                             ControllersLayout::BuildAddControllerKindOptions(),
                                             addControllerKindId.empty() ? "wrldbldr"

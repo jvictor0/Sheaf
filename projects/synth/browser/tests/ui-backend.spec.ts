@@ -42,6 +42,14 @@ test("renders portable controls, canvas draws, and reachable scroll content", as
   }, Array.from(new Uint8Array(frame)));
   await expect(page.locator('[data-synth-node-id="button"][data-synth-node-kind="button"]')).toHaveText("Activate");
   await expect(page.locator('[data-synth-node-id="draw"] canvas')).toBeVisible();
+  // The combo node's bounds are its own width (sru-46); its <select> child
+  // must fill that box rather than sizing to its option text, or the caption
+  // and control overlap once real option labels are longer than the fixture.
+  const comboWidths = await page.locator('[data-synth-node-id="combo"]').evaluate((wrapper) => ({
+    wrapper: wrapper.getBoundingClientRect().width,
+    select: wrapper.querySelector("select")!.getBoundingClientRect().width,
+  }));
+  expect(comboWidths.select).toBeCloseTo(comboWidths.wrapper, 0);
   const scroll = page.locator('[data-synth-node-id="scroll"]');
   await expect(scroll).toHaveJSProperty("scrollHeight", 160);
   await scroll.evaluate((element) => { element.scrollTop = element.scrollHeight; });

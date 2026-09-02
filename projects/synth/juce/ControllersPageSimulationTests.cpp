@@ -75,11 +75,12 @@ bool EndsWith(const std::string& value, const std::string& suffix)
            value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-// The one node class the Controllers page positions out of flow: each row's
+// The Controllers page positions one node class out of flow: each row's
 // status dots are an explicitly bounded Draw hand-centred inside its cell, so
 // they consume no stacking space and a gap measured against them is
-// meaningless. Matched by suffix rather than enumerated because the simulation
-// adds and removes controllers, so the id set changes every step.
+// meaningless; matched by suffix because the simulation adds and removes
+// controllers, so that id set changes every step. The legend row's own
+// dot/word pairs are ordinary in-flow Row children and carry no exemption.
 std::set<std::string> OutOfFlowIds(const synth::ui::NodeTree& tree)
 {
     std::set<std::string> ids;
