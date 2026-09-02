@@ -146,6 +146,10 @@ bool MessageInFullyEquivalent(const MessageIn& a, const MessageIn& b) {
             return a.gridSlotIx == b.gridSlotIx && a.gridX == b.gridX && a.gridY == b.gridY;
         case MessageIn::Type::SelectGrid:
             return a.gridSlotIx == b.gridSlotIx && a.gridIx == b.gridIx;
+        case MessageIn::Type::AppAction:
+            return a.appActionIx == b.appActionIx && a.value == b.value;
+        case MessageIn::Type::HoldDrill:
+            return a.hasBoolValue == b.hasBoolValue && (!a.hasBoolValue || a.boolValue == b.boolValue);
     }
     return false;
 }

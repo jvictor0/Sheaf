@@ -1114,27 +1114,43 @@ void RunControllerWizardParitySimulation()
             "an accepted Submit reports the configured controller through the host status callback");
     Require(harness.Cache().Discovery().available.empty(),
             "the configured pair is no longer an available candidate");
-    Require(fixture.Exists(NodeIds::ControllerReconfigure(0)) &&
+    Require(fixture.Exists(NodeIds::ControllerLayout(0)) &&
                 fixture.Exists(NodeIds::ControllerBlacklist(0)),
-            "a resolved wizard id offers Reconfigure and Blacklist");
+            "a resolved wizard id offers the Layout combo and Blacklist");
+    Require(RequireCombo(fixture.Renderer(), NodeIds::ControllerLayout(0), "submitted record")
+                    .getText() == juce::String(kTwisterDisplayName),
+            "the Layout combo already reads the descriptor that Submit just installed");
 
-    // scw-4: Reconfigure preserves record identity and offers no Ignore.
-    fixture.Click(NodeIds::ControllerReconfigure(0), "reconfigure opens");
-    VerifyTwisterFormDefaults(fixture, "0", "reconfigure seeds exact shape");
-    Require(!fixture.Exists(NodeIds::kWizardIgnore), "reconfiguration offers no Ignore");
-    fixture.TypeInto(kEncoderSlotId, "4", "reconfigure edits slot");
-    fixture.Click(NodeIds::kWizardSubmit, "reconfigure submit");
+    // Choosing Custom clears the installed wizard id and changes nothing else.
+    fixture.SelectOption(NodeIds::ControllerLayout(0), 1, "layout combo selects Custom");
+    {
+        const synth::MidiControllerSlot& custom = RequireController(harness, 0, "custom record");
+        Require(!custom.wizardId.has_value(), "choosing Custom clears the wizard id");
+        Require(custom.kind == synth::MidiProfileKind::MfTwister &&
+                    custom.config.encoderInput.has_value() &&
+                    custom.config.encoderInput->turns.size() == 16,
+                "choosing Custom leaves kind and config untouched");
+    }
+
+    // Reselecting the descriptor through the Layout combo reinstalls its fresh
+    // default profile in one click and preserves record identity.
+    fixture.SelectOption(NodeIds::ControllerLayout(0), 0, "layout combo reselects Twister");
     {
         const synth::MidiControllerSlot& reconfigured =
-            RequireController(harness, 0, "reconfigured record");
+            RequireController(harness, 0, "layout-reselected record");
         Require(harness.Instrument().controllers.size() == 1,
-                "reconfiguration keeps one record in the same position");
+                "choosing a layout keeps one record in the same position");
         Require(reconfigured.name == kTwisterDisplayName &&
                     reconfigured.wizardId.has_value() &&
+                    *reconfigured.wizardId == kTwisterWizardId &&
                     reconfigured.input.identifier == "twister-in-1" &&
-                    reconfigured.output.identifier == "twister-out-1",
-                "reconfiguration preserves name, endpoints, and wizard id");
+                    reconfigured.output.identifier == "twister-out-1" &&
+                    reconfigured.config.encoderInput.has_value() &&
+                    reconfigured.config.encoderInput->turns.size() == 16,
+                "choosing a layout preserves name, endpoints, and wizard id while reinstalling its default profile");
     }
+    Require(harness.Status() == std::string(kTwisterDisplayName) + " installed",
+            "choosing a layout reports the layout's display name through the host status callback");
 
     // sru-4 / D6: blacklisting retains the profile as dormant seed data and the
     // row loses its live endpoint and mapping controls.
@@ -1155,9 +1171,9 @@ void RunControllerWizardParitySimulation()
                 .find("Blacklisted") != std::string::npos,
             "a blacklisted row shows its badge");
 
-    // The dormant profile is observable through Configure seeding slot 4.
+    // The dormant profile is observable through Configure seeding its stored slot.
     fixture.Click(NodeIds::ControllerConfigure(0), "blacklisted configure");
-    VerifyTwisterFormDefaults(fixture, "4", "blacklisted configure seeds dormant slot");
+    VerifyTwisterFormDefaults(fixture, "0", "blacklisted configure seeds dormant slot");
     fixture.Click(NodeIds::kWizardSubmit, "blacklisted configure submit");
     Require(RequireController(harness, 0, "reactivated record").disposition ==
                 synth::MidiControllerDisposition::Active,
@@ -1225,7 +1241,7 @@ void RunControllerWizardParitySimulation()
 // sru-4: a manually added record carries no persisted wizard id, so the
 // registry-gated lifecycle actions are not offered even though its kind is the
 // same hardware kind the wizard installs. This is the negative control for
-// observing an installed wizard id through Reconfigure/Blacklist.
+// observing an installed wizard id through the Layout combo and Blacklist.
 void RunManualRecordSimulation()
 {
     namespace NodeIds = synth::runtime_ui::NodeIds;
@@ -1246,18 +1262,20 @@ void RunManualRecordSimulation()
     Require(fixture.Exists(NodeIds::ControllerRename(0)) &&
                 fixture.Exists(NodeIds::ControllerDelete(0)),
             "a manual record keeps Rename and Delete");
-    Require(!fixture.Exists(NodeIds::ControllerReconfigure(0)) &&
-                !fixture.Exists(NodeIds::ControllerBlacklist(0)) &&
+    Require(!fixture.Exists(NodeIds::ControllerBlacklist(0)) &&
                 !fixture.Exists(NodeIds::ControllerConfigure(0)),
             "a manual record is offered no registry-gated wizard action");
+    Require(RequireCombo(fixture.Renderer(), NodeIds::ControllerLayout(0), "manual record")
+                    .getText() == juce::String("Custom"),
+            "a manual record's Layout combo is present but reads Custom");
 
     std::cout << "ControllerWizardManualRecordSimulation passed\n";
 }
 
-// scw-4: a stored profile the form cannot represent opens the wizard defaults
-// with a destructive-replacement warning, and Submit replaces the whole profile
-// instead of merging the hand-edited shape.
-void RunIncompatibleReconfigureSimulation()
+// A hand edit through the low-level mapping editor clears the installed
+// wizard id, and reselecting the same layout through the Layout combo
+// replaces the hand-edited shape wholesale rather than merging it.
+void RunHandEditedRecordLayoutReselectionSimulation()
 {
     namespace NodeIds = synth::runtime_ui::NodeIds;
     constexpr synth::MidiConfigSection kSystemMessages = synth::MidiConfigSection::SystemMessages;
@@ -1265,31 +1283,30 @@ void RunIncompatibleReconfigureSimulation()
     WizardParityFixture fixture;
     auto& harness = fixture.Harness();
     harness.AddTwisterPair(1);
-    fixture.Tick("incompatible fixture");
-    fixture.Click(NodeIds::kWizardLaunch, "incompatible base form");
-    fixture.Click(NodeIds::kWizardSubmit, "incompatible base submit");
+    fixture.Tick("hand-edited fixture");
+    fixture.Click(NodeIds::kWizardLaunch, "hand-edited base form");
+    fixture.Click(NodeIds::kWizardSubmit, "hand-edited base submit");
     Require(RequireController(harness, 0, "generated record").config.systemMessages.size() == 6,
             "the generated profile carries exactly six side associations");
 
     // The Twister's six side buttons are a closed set, so dropping one through
-    // the low-level editor is how this page produces a shape the form cannot
-    // represent.
+    // the low-level editor is how this page produces a mapping edit.
     fixture.Click(NodeIds::ControllerDisclosure(0), "open low-level editor");
     fixture.Click(NodeIds::SectionToggle(0, kSystemMessages), "open system messages");
     fixture.Click(NodeIds::MappingDelete(0, kSystemMessages, 0), "drop one side association");
-    Require(RequireController(harness, 0, "hand-edited record").config.systemMessages.size() == 5,
-            "the hand edit leaves five side associations");
+    Require(RequireController(harness, 0, "hand-edited record").config.systemMessages.size() == 5 &&
+                !RequireController(harness, 0, "hand-edited record").wizardId.has_value(),
+            "the hand edit leaves five side associations and clears the wizard id");
+    Require(RequireCombo(fixture.Renderer(), NodeIds::ControllerLayout(0), "hand-edited record")
+                    .getText() == juce::String("Custom"),
+            "the Layout combo reads Custom once the installed layout no longer matches");
 
-    fixture.Click(NodeIds::ControllerReconfigure(0), "incompatible reconfigure opens");
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::kWizardWarning, "incompatible reconfigure")
-                .find("replaces the whole profile") != std::string::npos,
-            "an unrepresentable profile warns that Submit replaces the whole profile");
-    VerifyTwisterFormDefaults(fixture, "0", "incompatible reconfigure opens defaults");
-    fixture.Click(NodeIds::kWizardSubmit, "incompatible reconfigure submit");
-    Require(RequireController(harness, 0, "replaced record").config.systemMessages.size() == 6,
-            "Submit replaces the hand-edited profile with the complete generated shape");
+    fixture.SelectOption(NodeIds::ControllerLayout(0), 0, "layout combo reselects Twister");
+    Require(RequireController(harness, 0, "replaced record").config.systemMessages.size() == 6 &&
+                RequireController(harness, 0, "replaced record").wizardId.has_value(),
+            "choosing the layout replaces the hand-edited profile with the complete generated shape");
 
-    std::cout << "ControllerWizardIncompatibleReconfigureSimulation passed\n";
+    std::cout << "ControllerWizardHandEditedRecordLayoutReselectionSimulation passed\n";
 }
 
 // sru-32 / D5: a refused Submit keeps every entered value, commits nothing, and
@@ -1423,7 +1440,7 @@ int main()
     RunGridSimulation();
     RunControllerWizardParitySimulation();
     RunManualRecordSimulation();
-    RunIncompatibleReconfigureSimulation();
+    RunHandEditedRecordLayoutReselectionSimulation();
     RunControllerWizardRefusalSimulation();
 
     // The caption criterion had real subjects across the whole run, and its

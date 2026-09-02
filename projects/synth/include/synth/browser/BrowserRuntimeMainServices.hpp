@@ -78,6 +78,10 @@ public:
         };
         callbacks.setStatus = [](std::string) {};
         callbacks.onBack = std::move(onBack);
+        callbacks.messageCatalog = synth::MakeUISystemMessageChoices(engine_.MidiCatalog());
+        callbacks.analogActionCatalog = synth::MakeAnalogAppActionChoices(engine_.MidiCatalog());
+        callbacks.layouts = synth::MakeControllerWizardRegistry(engine_.MidiCatalog());
+        wizardDiscoveryCache_.SetRegistry(callbacks.layouts);
         return callbacks;
     }
 

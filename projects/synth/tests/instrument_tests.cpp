@@ -1,4 +1,5 @@
 #include "synth/ControllerWizard.hpp"
+#include "synth/MidiAppCatalog.hpp"
 #include "synth/MidiController.hpp"
 #include "synth/RuntimeUIState.hpp"
 
@@ -6,6 +7,7 @@
 #error "synth module tests must not see JUCE headers"
 #endif
 
+#include <chrono>
 #include <iostream>
 #include <limits>
 #include <cstring>
@@ -146,6 +148,12 @@ public:
     std::vector<synth::BasicMidi> received;
 };
 
+struct FakeMidiOutputSink final : synth::IMidiOutputSink {
+    std::vector<synth::BasicMidi> sent;
+
+    void Send(const synth::BasicMidi& midi) override { sent.push_back(midi); }
+};
+
 synth::PolyphonicPressureMapping MakePressureMapping(
     std::uint8_t channel = 3, std::uint8_t note = 42,
     synth::MessageIn pressure = synth::MessageIn::GridPressureChange(0, 1, -1, 7, 0)) {
@@ -153,6 +161,20 @@ synth::PolyphonicPressureMapping MakePressureMapping(
         .address = {.channel = channel, .note = note},
         .pressure = pressure,
     };
+}
+
+MidiControllerProfileConfig MakeHoldDrillProfileConfig(synth::EncoderMode mode) {
+    MidiControllerProfileConfig config;
+    config.encoderInput = synth::EncoderMidiInConfig{};
+    config.encoderInput->mode = mode;
+    config.encoderInput->turns.push_back({.control = {.channel = 0, .cc = 1}, .slotIx = 0, .position = 4});
+    config.encoderInput->turns.push_back({.control = {.channel = 0, .cc = 2}, .slotIx = 0, .position = 5});
+    config.systemMessages.push_back({
+        .control = MidiControlAddress{.channel = 0, .cc = 20},
+        .press = synth::MessageIn::HoldDrill(0, true),
+        .release = synth::MessageIn::HoldDrill(0, false),
+    });
+    return config;
 }
 
 TEST_CASE(KindNameRoundTrip) {
@@ -426,6 +448,108 @@ TEST_CASE(CreateMidiControllerProfileBuildsPressureOnlyAndSharedMixedThruChains)
     REQUIRE_TRUE(end.received.size() == 2);
 }
 
+TEST_CASE(HoldDrillTurnPushesOnceThenPlainTurnAfterRelease) {
+    synth::MessageInBus bus(nullptr, 16);
+    auto config = MakeHoldDrillProfileConfig(synth::EncoderMode::Signed7Bit);
+    auto chain = synth::CreateMidiControllerProfile(
+        config, &bus, nullptr, static_cast<synth::ParameterManager::UIState*>(nullptr), [] { return 500; });
+    REQUIRE_TRUE(chain.holdDrill != nullptr);
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 127));  // hold
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // drills the knob
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // already drilled this hold: nothing
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 0));    // release
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // plain turn again
+
+    REQUIRE_TRUE(bus.Size() == 2);
+    synth::MessageIn push;
+    REQUIRE_TRUE(bus.Pop(push, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(push.type == synth::MessageIn::Type::ParamPush);
+    REQUIRE_TRUE(push.slotIx == 0);
+    REQUIRE_TRUE(push.position == 4);
+
+    synth::MessageIn incDec;
+    REQUIRE_TRUE(bus.Pop(incDec, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(incDec.type == synth::MessageIn::Type::ParamIncDec);
+    REQUIRE_TRUE(incDec.slotIx == 0);
+    REQUIRE_TRUE(incDec.position == 4);
+    REQUIRE_TRUE(bus.Size() == 0);
+}
+
+TEST_CASE(HoldDrillDrillsEachTurnedKnobOnceDuringOneHold) {
+    synth::MessageInBus bus(nullptr, 16);
+    auto config = MakeHoldDrillProfileConfig(synth::EncoderMode::Signed7Bit);
+    auto chain = synth::CreateMidiControllerProfile(
+        config, &bus, nullptr, static_cast<synth::ParameterManager::UIState*>(nullptr), [] { return 501; });
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 127));  // hold
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // drills position 4
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 2, 80));    // drills position 5
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 0));    // release
+
+    REQUIRE_TRUE(bus.Size() == 2);
+    synth::MessageIn first;
+    REQUIRE_TRUE(bus.Pop(first, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(first.type == synth::MessageIn::Type::ParamPush);
+    REQUIRE_TRUE(first.position == 4);
+
+    synth::MessageIn second;
+    REQUIRE_TRUE(bus.Pop(second, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(second.type == synth::MessageIn::Type::ParamPush);
+    REQUIRE_TRUE(second.position == 5);
+    REQUIRE_TRUE(bus.Size() == 0);
+}
+
+TEST_CASE(HoldDrillOnAbsoluteEncoderSkipsAbsoluteFeedbackUntilRelease) {
+    synth::MessageInBus bus(nullptr, 16);
+    auto config = MakeHoldDrillProfileConfig(synth::EncoderMode::Absolute);
+    auto chain = synth::CreateMidiControllerProfile(
+        config, &bus, nullptr, static_cast<synth::ParameterManager::UIState*>(nullptr), [] { return 502; });
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 127));  // hold
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // drills instead of jumping
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 0));    // release
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // first plain absolute turn
+
+    REQUIRE_TRUE(bus.Size() == 2);
+    synth::MessageIn push;
+    REQUIRE_TRUE(bus.Pop(push, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(push.type == synth::MessageIn::Type::ParamPush);
+    REQUIRE_TRUE(push.position == 4);
+
+    synth::MessageIn absolute;
+    REQUIRE_TRUE(bus.Pop(absolute, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(absolute.type == synth::MessageIn::Type::ParamSetAbsolute);
+    REQUIRE_TRUE(absolute.position == 4);
+    REQUIRE_TRUE(bus.Size() == 0);
+}
+
+TEST_CASE(HoldDrillResetsDrilledFlagsOnEachNewHold) {
+    synth::MessageInBus bus(nullptr, 16);
+    auto config = MakeHoldDrillProfileConfig(synth::EncoderMode::Signed7Bit);
+    auto chain = synth::CreateMidiControllerProfile(
+        config, &bus, nullptr, static_cast<synth::ParameterManager::UIState*>(nullptr), [] { return 503; });
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 127));  // first hold
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // drills position 4
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 0));    // release
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 127));  // second hold
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // drills position 4 again
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 0));    // release
+
+    REQUIRE_TRUE(bus.Size() == 2);
+    synth::MessageIn first;
+    REQUIRE_TRUE(bus.Pop(first, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(first.type == synth::MessageIn::Type::ParamPush);
+    REQUIRE_TRUE(first.position == 4);
+
+    synth::MessageIn second;
+    REQUIRE_TRUE(bus.Pop(second, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(second.type == synth::MessageIn::Type::ParamPush);
+    REQUIRE_TRUE(second.position == 4);
+    REQUIRE_TRUE(bus.Size() == 0);
+}
+
 TEST_CASE(GridMessageInFactoriesCarryFlatSemanticFields) {
     const synth::MessageIn press = synth::MessageIn::GridPress(11, 1, -1, 7, 100);
     REQUIRE_TRUE(press.timestamp == 11);
@@ -633,6 +757,33 @@ TEST_CASE(ControllerGesture63SelectsAndEditsManagerGestureWhileBankMaskRemains32
     static_assert(std::is_same_v<decltype(ui->gestures.bankAffectingMask[0].load()), std::uint32_t>);
     REQUIRE_TRUE(ui->gestures.bankAffectingMask[63].load() == 1u);
     REQUIRE_TRUE(ui->gestures.bankAffectingCount[63].load() == 1);
+}
+
+TEST_CASE(AnalogMidiInProcessorPushesAppActionForMatchingControlAndGestureOtherwise) {
+    synth::MessageInBus bus(nullptr, 8);
+    synth::AnalogMidiInConfig config;
+    config.gestures.push_back({.control = {.channel = 1, .cc = 5}, .gestureIx = 3});
+    config.appActions.push_back({
+        .control = {.channel = 1, .cc = 6},
+        .appAction = "app.bank",
+        .appActionValue = "2",
+        .appActionIx = 5,
+    });
+    synth::AnalogMidiInProcessor processor(config, &bus);
+    processor.SetTimestampProvider([] { return 99; });
+
+    processor.Process(synth::BasicMidi::CC(0, 1, 6, 127));
+    synth::MessageIn appAction;
+    REQUIRE_TRUE(bus.Pop(appAction, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(appAction.type == synth::MessageIn::Type::AppAction);
+    REQUIRE_TRUE(appAction.appActionIx == 5);
+    REQUIRE_TRUE(appAction.value == 127.0f / 127.0f);
+
+    processor.Process(synth::BasicMidi::CC(0, 1, 5, 64));
+    synth::MessageIn gesture;
+    REQUIRE_TRUE(bus.Pop(gesture, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(gesture.type == synth::MessageIn::Type::SetGestureValue);
+    REQUIRE_TRUE(gesture.gestureIx == 3);
 }
 
 TEST_CASE(KindNameFromUnknownRejected) {
@@ -992,8 +1143,8 @@ TEST_CASE(SlotValidForKindAcceptsMfTwisterDefaultProfile) {
 }
 
 TEST_CASE(MfTwisterWizardGeneratesAnActiveKindValidInstrumentSlot) {
-    std::unique_ptr<synth::ControllerWizard> wizard =
-        synth::MakeControllerWizard("com.sheaf.midi-fighter-twister");
+    std::unique_ptr<synth::ControllerWizard> wizard = synth::MakeControllerWizard(
+        synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{}), "com.sheaf.midi-fighter-twister");
     REQUIRE_TRUE(wizard != nullptr);
     std::unique_ptr<synth::ControllerConfigForm> baseForm = wizard->ConfigForm(std::nullopt);
     auto* form = dynamic_cast<synth::MfTwisterConfigForm*>(baseForm.get());
@@ -1236,6 +1387,140 @@ TEST_CASE(ControllerProfileJsonWritesSchemaTwoAndRoundTripsPressureInput) {
     REQUIRE_TRUE(mapping.pressure.gridSlotIx == 1);
     REQUIRE_TRUE(mapping.pressure.gridX == -1);
     REQUIRE_TRUE(mapping.pressure.gridY == 7);
+}
+
+TEST_CASE(ControllerProfileJsonRoundTripsOpenSysExByteForByte) {
+    MidiControllerProfileConfig source;
+    source.openSysEx.push_back({0xF0, 0x47, 0x7F, 0x29, 0x60, 0x00, 0x04, 0x41, 0x09, 0x07, 0x01, 0xF7});
+    source.openSysEx.push_back({0xF0, 0x7E, 0x00, 0xF7});
+
+    synth::JsonArena arena(1024 * 1024);
+    const synth::JSON json = synth::ToJSON(arena, source);
+    REQUIRE_TRUE(json.Get("openSysEx").Size() == 2);
+
+    MidiControllerProfileConfig loaded;
+    REQUIRE_TRUE(synth::FromJSON(json, loaded));
+    REQUIRE_TRUE(loaded.openSysEx == source.openSysEx);
+}
+
+TEST_CASE(ControllerProfileJsonWithoutOpenSysExKeyReadsBackEmpty) {
+    // A file written before this field existed has no "openSysEx" key at
+    // all; FromJSON must still succeed and leave the vector empty rather
+    // than failing to parse.
+    synth::JsonArena arena(1024 * 1024);
+    synth::JSON stripped = arena.Object();
+    stripped.SetNew("schema", arena.String(synth::kMidiControllerProfileSchema));
+    stripped.SetNew("schemaVersion", arena.Integer(synth::kMidiControllerProfileSchemaVersion));
+    REQUIRE_TRUE(!JsonObjectHasKey(stripped, "openSysEx"));
+
+    MidiControllerProfileConfig loaded;
+    REQUIRE_TRUE(synth::FromJSON(stripped, loaded));
+    REQUIRE_TRUE(loaded.openSysEx.empty());
+}
+
+TEST_CASE(CreateMidiControllerProfileOmitsOpenSysExOutputWhenEmpty) {
+    synth::MessageInBus bus(nullptr, 8);
+    auto profile = synth::CreateMidiControllerProfile(
+        MidiControllerProfileConfig{}, &bus, nullptr,
+        static_cast<synth::ParameterManager::UIState*>(nullptr));
+    REQUIRE_TRUE(profile.outputs.empty());
+}
+
+TEST_CASE(OpenSysExMidiOutProcessorSendsOnceThenWaitsForReset) {
+    FakeMidiOutputSink sink;
+    synth::MidiSender sender;
+    sender.SetSink(0, &sink);
+    sender.Start();
+
+    const std::vector<std::uint8_t> message = {0xF0, 0x47, 0x7F, 0x29, 0x60, 0x00,
+                                               0x04, 0x41, 0x09, 0x07, 0x01, 0xF7};
+    synth::OpenSysExMidiOutProcessor processor({message}, &sender);
+
+    processor.Process();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sink.sent.size() == 1);
+    REQUIRE_TRUE(sink.sent[0].raw == message);
+
+    processor.Process();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sink.sent.size() == 1);
+
+    processor.Reset();
+    processor.Process();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sink.sent.size() == 2);
+    REQUIRE_TRUE(sink.sent[1].raw == message);
+}
+
+TEST_CASE(OpenSysExMidiOutProcessorSendsMultipleMessagesInOrder) {
+    FakeMidiOutputSink sink;
+    synth::MidiSender sender;
+    sender.SetSink(0, &sink);
+    sender.Start();
+
+    const std::vector<std::uint8_t> first = {0xF0, 0x7E, 0x00, 0xF7};
+    const std::vector<std::uint8_t> second = {0xF0, 0x7E, 0x01, 0xF7};
+    synth::OpenSysExMidiOutProcessor processor({first, second}, &sender);
+
+    processor.Process();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sink.sent.size() == 2);
+    REQUIRE_TRUE(sink.sent[0].raw == first);
+    REQUIRE_TRUE(sink.sent[1].raw == second);
+}
+
+TEST_CASE(AssociationJsonRoundTripsAppActionStringsButNotIndex) {
+    MidiControllerSystemMessageAssociation association;
+    association.control = MidiControlAddress{.channel = 4, .cc = 20};
+    association.press = synth::MessageIn::AppAction(0, 7, 0.0f);
+    association.appAction = "app.test";
+    association.appActionValue = "3";
+    association.feedback = association.press;
+
+    synth::JsonArena arena(1024 * 1024);
+    const synth::JSON json = synth::ToJSON(arena, association);
+    REQUIRE_TRUE(JsonObjectHasKey(json, "appAction"));
+    REQUIRE_TRUE(JsonObjectHasKey(json, "appActionValue"));
+
+    MidiControllerSystemMessageAssociation loaded;
+    REQUIRE_TRUE(synth::FromJSON(json, loaded));
+    REQUIRE_TRUE(loaded.appAction == "app.test");
+    REQUIRE_TRUE(loaded.appActionValue == "3");
+    REQUIRE_TRUE(loaded.press.appActionIx == 0);
+}
+
+TEST_CASE(AssociationJsonOmitsAppActionKeysForNonAppActionPress) {
+    MidiControllerSystemMessageAssociation association = MakeControlOnlyAssociation();
+
+    synth::JsonArena arena(1024 * 1024);
+    const synth::JSON json = synth::ToJSON(arena, association);
+    REQUIRE_TRUE(!JsonObjectHasKey(json, "appAction"));
+    REQUIRE_TRUE(!JsonObjectHasKey(json, "appActionValue"));
+}
+
+TEST_CASE(AnalogMidiInConfigJsonRoundTripsAppActions) {
+    synth::AnalogMidiInConfig source;
+    source.gestures.push_back({.control = {.channel = 0, .cc = 2}, .gestureIx = 0});
+    source.sceneBlend = MidiControlAddress{.channel = 1, .cc = 7};
+    source.appActions.push_back({
+        .control = {.channel = 2, .cc = 30},
+        .appAction = "app.bank",
+        .appActionValue = "4",
+        .appActionIx = 9,
+    });
+
+    synth::JsonArena arena(1024 * 1024);
+    const synth::JSON json = synth::ToJSON(arena, source);
+    synth::AnalogMidiInConfig loaded;
+    REQUIRE_TRUE(synth::FromJSON(json, loaded));
+    REQUIRE_TRUE(loaded.gestures.size() == 1);
+    REQUIRE_TRUE(loaded.gestures[0].control == source.gestures[0].control);
+    REQUIRE_TRUE(loaded.gestures[0].gestureIx == source.gestures[0].gestureIx);
+    REQUIRE_TRUE(loaded.sceneBlend == source.sceneBlend);
+    REQUIRE_TRUE(loaded.appActions.size() == 1);
+    REQUIRE_TRUE(loaded.appActions[0].control == source.appActions[0].control);
+    REQUIRE_TRUE(loaded.appActions[0].appAction == "app.bank");
+    REQUIRE_TRUE(loaded.appActions[0].appActionValue == "4");
 }
 
 TEST_CASE(ControllerProfileJsonReadsVersionOneWithoutPressureAndPreservesLegacyData) {

@@ -44,7 +44,7 @@ bool ValidPatchRoot(JSON root) {
     const JSON schema = root.Get("schema");
     const JSON version = root.Get("schemaVersion");
     return IsString(schema) && std::string_view(schema.StringValue()) == "sheaf.synth.patch" &&
-           IsInteger(version) && version.IntegerValue() == 1;
+           IsInteger(version) && (version.IntegerValue() == 1 || version.IntegerValue() == 2);
 }
 
 std::optional<int> RuntimeConfigVersion(JSON root) {
@@ -325,23 +325,30 @@ const char* RuntimeConfigFileStatusName(RuntimeConfigFileStatus status) {
 JSON BuildPatchJSON(JsonArena& arena, std::string_view patchName,
                     const ParameterManager& manager,
                     const MidiInstrumentConfig& instrument,
-                    const AudioDeviceState& audioDevice) {
-    (void)instrument;
+                    const AudioDeviceState& audioDevice,
+                    bool carryInstrument) {
     (void)audioDevice;
     JSON root = arena.Object();
     root.SetNew("schema", arena.String("sheaf.synth.patch"));
-    root.SetNew("schemaVersion", arena.Integer(1));
+    root.SetNew("schemaVersion", arena.Integer(carryInstrument ? 2 : 1));
     const std::string patchNameText(patchName);
     root.SetNew("patchName", arena.String(patchNameText.c_str()));
     root.SetNew("parameterValues", manager.ParameterValuesToJSON(arena));
+    if (carryInstrument) {
+        root.SetNew("midiInstrument", ToJSON(arena, instrument));
+    }
     return root;
 }
 
 bool LoadPatchJSON(JSON root, ParameterManager& manager,
                    MidiInstrumentConfig& instrument,
-                   AudioDeviceState* audioDevice) {
+                   AudioDeviceState* audioDevice,
+                   std::optional<MidiInstrumentConfig>* loadedInstrument) {
     (void)instrument;
     (void)audioDevice;
+    if (loadedInstrument != nullptr) {
+        loadedInstrument->reset();
+    }
     if (!ValidPatchRoot(root) || !IsString(root.Get("patchName"))) {
         return false;
     }
@@ -355,6 +362,19 @@ bool LoadPatchJSON(JSON root, ParameterManager& manager,
         return false;
     }
     manager.CollectNeutralLocalParameters();
+
+    if (loadedInstrument != nullptr) {
+        const JSON version = root.Get("schemaVersion");
+        if (IsInteger(version) && version.IntegerValue() == 2) {
+            const JSON midiInstrument = root.Get("midiInstrument");
+            if (IsObject(midiInstrument)) {
+                MidiInstrumentConfig parsed;
+                if (FromJSON(midiInstrument, parsed)) {
+                    *loadedInstrument = std::move(parsed);
+                }
+            }
+        }
+    }
     return true;
 }
 
@@ -532,13 +552,14 @@ PatchApplyStatus ApplyPatchMessage(
     const PatchMessageIn& message, ParameterManager& manager,
     MidiInstrumentConfig& instrument, const MidiInstrumentConfig& defaultInstrument,
     AudioDeviceState& audioDevice, const AudioDeviceState& defaultAudioDevice,
-    MessageOutBus& outputBus, PatchSerializationContext context) {
+    MessageOutBus& outputBus, PatchSerializationContext context,
+    bool carryInstrument, std::optional<MidiInstrumentConfig>* loadedInstrument) {
     (void)defaultInstrument;
     (void)defaultAudioDevice;
     switch (message.type) {
     case PatchMessageIn::Type::LoadFromJSON:
         if (message.document.root.IsNull() ||
-            !LoadPatchJSON(message.document.root, manager, instrument, &audioDevice)) {
+            !LoadPatchJSON(message.document.root, manager, instrument, &audioDevice, loadedInstrument)) {
             return PatchApplyStatus::InvalidJSON;
         }
         return PatchApplyStatus::Applied;
@@ -565,7 +586,7 @@ PatchApplyStatus ApplyPatchMessage(
             // PatchManager's single-pending-save gate provides this ordering
             // for all serialize requests that flow through it.
             context.arena->Reset();
-            const JSON root = BuildPatchJSON(*context.arena, patchName, manager, instrument, audioDevice);
+            const JSON root = BuildPatchJSON(*context.arena, patchName, manager, instrument, audioDevice, carryInstrument);
             if (root.IsNull() || context.arena->Failed()) {
                 return PatchApplyStatus::ArenaExhausted;
             }
@@ -583,7 +604,7 @@ PatchApplyStatus ApplyPatchMessage(
         auto arena = std::make_shared<JsonArena>(context.initialArenaCapacity);
         JSON root;
         for (;;) {
-            root = BuildPatchJSON(*arena, patchName, manager, instrument, audioDevice);
+            root = BuildPatchJSON(*arena, patchName, manager, instrument, audioDevice, carryInstrument);
             if (!root.IsNull() && !arena->Failed()) {
                 break;
             }

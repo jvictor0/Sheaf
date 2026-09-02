@@ -372,8 +372,8 @@ struct FakeServices
     {
         ++controllersRefreshCount;
         surface.SetEnumerateDevices(controllerDevices);
-        surface.SetDiscovery(
-            synth::DiscoverControllerWizards(controllerDevices, instrument, synth::ControllerWizardRegistry()));
+        surface.SetDiscovery(synth::DiscoverControllerWizards(
+            controllerDevices, instrument, synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{})));
     }
 
     synth::SyncConfig SnapshotSyncConfiguration()

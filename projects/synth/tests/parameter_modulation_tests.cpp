@@ -13848,6 +13848,180 @@ TEST_CASE(patch_json_rejects_invalid_roots_without_mutating_runtime_configuratio
     REQUIRE_TRUE(synth::ValidatePatchJSON(invalidInstrumentRoot));
 }
 
+TEST_CASE(patch_json_with_carry_instrument_writes_schema_two_and_round_trips_the_instrument) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.63f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "carry-input", "carry-output");
+
+    synth::JsonArena arena(262144);
+    synth::JSON root =
+        synth::BuildPatchJSON(arena, "Carrying Patch", source, instrument, /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(!arena.Failed());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+    REQUIRE_TRUE(!root.Get("midiInstrument").IsNull());
+
+    synth::ParameterManager target;
+    target.SetGestureCount(0);
+    auto& targetGroup = target.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetCutoff = target.CreateParameter(targetGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+
+    synth::MidiInstrumentConfig liveInstrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "keep-in", "keep-out");
+    std::optional<synth::MidiInstrumentConfig> loadedInstrument;
+    REQUIRE_TRUE(synth::LoadPatchJSON(root, target, liveInstrument, nullptr, &loadedInstrument));
+    REQUIRE_NEAR(targetCutoff.SceneCenter(0), 0.63f, 0.000001f);
+
+    // The live instrument argument is never read or modified by LoadPatchJSON.
+    REQUIRE_TRUE(liveInstrument.controllers[0].input.identifier == "keep-in");
+    REQUIRE_TRUE(liveInstrument.controllers[0].output.identifier == "keep-out");
+
+    REQUIRE_TRUE(loadedInstrument.has_value());
+    synth::JsonArena expectedArena(262144);
+    synth::JsonArena actualArena(262144);
+    char* expectedDump = synth::ToJSON(expectedArena, instrument).Dumps(JSON_ENCODE_ANY);
+    char* actualDump = synth::ToJSON(actualArena, *loadedInstrument).Dumps(JSON_ENCODE_ANY);
+    REQUIRE_TRUE(expectedDump != nullptr && actualDump != nullptr);
+    REQUIRE_TRUE(std::string(expectedDump) == std::string(actualDump));
+    std::free(expectedDump);
+    std::free(actualDump);
+}
+
+TEST_CASE(patch_json_without_carry_instrument_matches_pre_change_version_one_output) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.5f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    synth::JsonArena arena(262144);
+    // carryInstrument defaults to false.
+    synth::JSON root = synth::BuildPatchJSON(arena, "No Carry", source, instrument);
+    REQUIRE_TRUE(!arena.Failed());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 1);
+    REQUIRE_TRUE(root.Get("midiInstrument").IsNull());
+    REQUIRE_TRUE(root.Size() == 4);  // schema, schemaVersion, patchName, parameterValues -- no other key
+}
+
+TEST_CASE(patch_json_load_leaves_loaded_instrument_unset_without_a_midi_instrument_section) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.4f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    // A version-1 file.
+    synth::JsonArena versionOneArena(262144);
+    synth::JSON versionOneRoot = synth::BuildPatchJSON(versionOneArena, "V1", source, instrument);
+    synth::ParameterManager targetOne;
+    targetOne.SetGestureCount(0);
+    auto& targetOneGroup = targetOne.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetOneCutoff = targetOne.CreateParameter(targetOneGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig liveOne = instrument;
+    std::optional<synth::MidiInstrumentConfig> loadedOne;
+    loadedOne.emplace();  // pre-seed so REQUIRE below actually proves it was reset, not merely default
+    REQUIRE_TRUE(synth::LoadPatchJSON(versionOneRoot, targetOne, liveOne, nullptr, &loadedOne));
+    REQUIRE_NEAR(targetOneCutoff.SceneCenter(0), 0.4f, 0.000001f);
+    REQUIRE_TRUE(!loadedOne.has_value());
+
+    // A version-2 file without a midiInstrument section.
+    synth::JsonArena versionTwoArena(262144);
+    synth::JSON versionTwoRoot = versionTwoArena.Object();
+    versionTwoRoot.SetNew("schema", versionTwoArena.String("sheaf.synth.patch"));
+    versionTwoRoot.SetNew("schemaVersion", versionTwoArena.Integer(2));
+    versionTwoRoot.SetNew("patchName", versionTwoArena.String("V2 No Section"));
+    versionTwoRoot.SetNew("parameterValues", source.ParameterValuesToJSON(versionTwoArena));
+    REQUIRE_TRUE(synth::ValidatePatchJSON(versionTwoRoot));  // ValidatePatchJSON now accepts version 2
+
+    synth::ParameterManager targetTwo;
+    targetTwo.SetGestureCount(0);
+    auto& targetTwoGroup = targetTwo.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetTwoCutoff = targetTwo.CreateParameter(targetTwoGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig liveTwo = instrument;
+    std::optional<synth::MidiInstrumentConfig> loadedTwo;
+    loadedTwo.emplace();
+    REQUIRE_TRUE(synth::LoadPatchJSON(versionTwoRoot, targetTwo, liveTwo, nullptr, &loadedTwo));
+    REQUIRE_NEAR(targetTwoCutoff.SceneCenter(0), 0.4f, 0.000001f);
+    REQUIRE_TRUE(!loadedTwo.has_value());
+}
+
+TEST_CASE(patch_json_version_two_with_null_loaded_instrument_pointer_loads_parameters_only) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.81f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    synth::JsonArena arena(262144);
+    synth::JSON root =
+        synth::BuildPatchJSON(arena, "V2 Null Out", source, instrument, /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+
+    synth::ParameterManager target;
+    target.SetGestureCount(0);
+    auto& targetGroup = target.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetCutoff = target.CreateParameter(targetGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig live =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "keep-in", "keep-out");
+    REQUIRE_TRUE(synth::LoadPatchJSON(root, target, live));  // loadedInstrument defaults to nullptr
+    REQUIRE_NEAR(targetCutoff.SceneCenter(0), 0.81f, 0.000001f);
+    REQUIRE_TRUE(live.controllers[0].input.identifier == "keep-in");
+    REQUIRE_TRUE(live.controllers[0].output.identifier == "keep-out");
+}
+
 TEST_CASE(patch_file_versioning_writes_collision_safe_sortable_versions) {
     const auto now = std::chrono::system_clock::from_time_t(1700000000);
     const auto tempRoot = std::filesystem::temp_directory_path() /

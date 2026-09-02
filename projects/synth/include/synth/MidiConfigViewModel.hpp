@@ -23,10 +23,14 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 namespace synth {
+
+struct MidiAppCatalog;
+struct ControllerWizardDescriptor;
 
 // Ring buffer tracking a rolling maximum over its last `capacity` writes.
 // Message-thread only (no atomics) -- callers write once per UI timer tick
@@ -105,6 +109,11 @@ struct MidiMappingRowVM {
         WrldBldrY,
         GestureIx,
         SceneBlend,
+        // Analog app-action row's target combo: index into
+        // AnalogActionCatalog() (mirrors MessageKind's index-into-catalog
+        // contract, but against the analog-only catalog rather than
+        // MessageCatalog()).
+        AppAction,
         // Twister side-button system rows only (sru-8/D1): the logical side
         // button 0..5, persisted as control->cc = 8 + button on the fixed
         // channel 3 (display-only, not independently editable). Kept
@@ -171,6 +180,7 @@ struct MidiMappingRowVM {
         EncoderMode,
         EncoderStep,
         AnalogGesture,
+        AnalogAppAction,
         AnalogSceneBlend,
         System,
         Grid,
@@ -213,25 +223,61 @@ enum class UISystemMessage {
     SetSceneBlend,
     NextParamBank,
     PrevParamBank,
+    AppAction,
+    HoldDrill,
 };
 
 struct UISystemMessageChoice {
     std::string label;
     UISystemMessage message = UISystemMessage::Clock;
+    std::string appAction;
+    std::string appActionValue;
+    std::size_t appActionIx = 0;
 };
 
 const std::vector<UISystemMessageChoice>& UISystemMessageCatalog();
 
-// Finds the catalog entry for a message value.  Forms use this instead of
-// duplicating the Controllers page's display labels.
-const UISystemMessageChoice* FindUISystemMessageChoice(UISystemMessage message);
+// Finds the catalog entry for a message value, searching `catalog` (the
+// static library list by default -- forms fixed to the library vocabulary,
+// such as the MF Twister wizard, never pass a different one). For
+// UISystemMessage::AppAction, `appAction`/`appActionValue` narrow the match
+// to the one entry with that action and value (row identity for an
+// app-action choice is the pair, never the bare kind); for every other kind
+// they are ignored. Forms use this instead of duplicating the Controllers
+// page's display labels.
+const UISystemMessageChoice* FindUISystemMessageChoice(
+    UISystemMessage message, const std::vector<UISystemMessageChoice>& catalog = UISystemMessageCatalog(),
+    std::string_view appAction = {}, std::string_view appActionValue = {});
 
 // Builds the press/release/feedback association used by the Controllers
-// page for a catalog message.  `argument` follows the existing low-level
+// page for a catalog choice. `argument` follows the existing low-level
 // mapping policy: Next/Previous Bank store it in slotIx, while Bank Select,
-// Gesture Select, and Scene Select use their respective argument fields.
+// Gesture Select, and Scene Select use their respective argument fields --
+// ignored for AppAction, whose press carries `choice.appActionIx` instead
+// and whose release is always absent (an app action has no hold state at
+// this layer).
 MidiControllerSystemMessageAssociation MakeUISystemMessageAssociation(
-    UISystemMessage message, std::size_t argument = 0);
+    const UISystemMessageChoice& choice, std::size_t argument = 0);
+
+// Builds the offered message list for an app's catalog: an empty catalog
+// (no libraryKinds, no actions) returns a copy of UISystemMessageCatalog()
+// unchanged, so an app with no MidiCatalog() sees exactly today's list.
+// Otherwise returns one library choice per catalog.libraryKinds entry
+// (taken from UISystemMessageCatalog() by kind; HoldDrill has no static
+// catalog entry, so it is produced here directly), followed by one
+// app-action choice per catalog.actions entry (message = AppAction,
+// appAction/appActionValue/appActionIx from that action, label from the
+// action's own label).
+std::vector<UISystemMessageChoice> MakeUISystemMessageChoices(const MidiAppCatalog& catalog);
+
+// Builds the offered target list for an analog app-action row's combo: one
+// choice per catalog.actions entry whose analogRange is set (a plain,
+// non-analog action never appears here -- an analog control's app-action
+// row can only target an action that takes a continuous value), label from
+// the action's own label, message always UISystemMessage::AppAction,
+// appAction/appActionValue/appActionIx from that action and its index in
+// catalog.actions.
+std::vector<UISystemMessageChoice> MakeAnalogAppActionChoices(const MidiAppCatalog& catalog);
 
 // True for every field the renderer formats as a plain integer (no decimal
 // places -- Channel, Cc, SlotIx, Position, GestureIx, LaunchpadX/Y,
@@ -283,6 +329,9 @@ struct MidiControllerRowVM {
     // Registry resolution gates only portable lifecycle affordances. The
     // persisted opaque id remains valid even when this is false.
     bool hasResolvedWizard = false;
+    // The stored opaque wizard id, independent of registry resolution; the
+    // Layout combo reads this to find its current selection.
+    std::optional<std::string> wizardId;
     bool hasCompleteEndpointPair = false;
     MidiEndpointStatus inputStatus = MidiEndpointStatus::Unconfigured;
     MidiEndpointStatus outputStatus = MidiEndpointStatus::Unconfigured;
@@ -328,7 +377,7 @@ struct AnalogSceneBlendRow {
 
 using PresentationRowData =
     std::variant<std::monostate, EncoderMidiMapping, AnalogMidiMapping, MidiControllerSystemMessageAssociation,
-                 GridButton, EncoderModeRow, EncoderStepRow, AnalogSceneBlendRow>;
+                 GridButton, EncoderModeRow, EncoderStepRow, AnalogSceneBlendRow, AnalogAppActionMapping>;
 
 struct PresentationRow {
     MidiMappingRowVM::Kind kind = MidiMappingRowVM::Kind::Individual;
@@ -362,6 +411,31 @@ public:
     void Rebuild(const MidiInstrumentConfig& instrument, const MidiConnectionState& connection);
 
     const std::vector<MidiControllerRowVM>& Controllers() const { return controllers_; }
+
+    // The offered message list for the message-kind combo and its row-index
+    // lookup. Defaults to a copy of UISystemMessageCatalog() so every
+    // existing construction path behaves as today; a host with an app
+    // catalog calls SetMessageCatalog(MakeUISystemMessageChoices(...)) once
+    // at construction.
+    void SetMessageCatalog(std::vector<UISystemMessageChoice> choices);
+    const std::vector<UISystemMessageChoice>& MessageCatalog() const { return messageCatalog_; }
+
+    // The offered target list for an analog app-action row's combo (Field::
+    // AppAction) and its row-index lookup. Defaults to empty, matching an app
+    // with no analog-range actions; a host with an app catalog calls
+    // SetAnalogActionCatalog(MakeAnalogAppActionChoices(...)) once at
+    // construction, beside SetMessageCatalog.
+    void SetAnalogActionCatalog(std::vector<UISystemMessageChoice> choices);
+    const std::vector<UISystemMessageChoice>& AnalogActionCatalog() const { return analogActionCatalog_; }
+
+    // The Layout combo's offered descriptors and the registry every wizard
+    // lookup resolves against. Defaults to MakeControllerWizardRegistry(
+    // MidiAppCatalog{}), i.e. the library's Twister-only registry, so every
+    // existing construction path behaves as today; a host with an app
+    // catalog calls SetLayouts(MakeControllerWizardRegistry(engine.MidiCatalog()))
+    // once at construction, beside SetMessageCatalog.
+    void SetLayouts(std::vector<ControllerWizardDescriptor> layouts);
+    const std::vector<ControllerWizardDescriptor>& Layouts() const;
 
     void ToggleConfig(std::size_t controllerIx);
     void ToggleSection(std::size_t controllerIx, MidiConfigSection section);
@@ -479,9 +553,11 @@ public:
     // already used by that group -- see the .cpp's NextFree* helpers for the
     // exact per-group rule) and commits it. `group` must be one of the row
     // groups SectionRows() can produce for `section` on this controller's
-    // kind (EncoderTurn/EncoderPush for Encoders; AnalogGesture for Analogs;
-    // System for SystemMessages -- EncoderMode/EncoderStep/AnalogSceneBlend
-    // are config-level, never addable, and refused here) -- refused
+    // kind (EncoderTurn/EncoderPush for Encoders; AnalogGesture/
+    // AnalogAppAction for Analogs -- AnalogAppAction refused when
+    // AnalogActionCatalog() is empty; System for SystemMessages --
+    // EncoderMode/EncoderStep/AnalogSceneBlend are config-level, never
+    // addable, and refused here) -- refused
     // otherwise. The section need not be expanded first; this call also
     // works against a section whose presentation has not yet been built
     // (SectionRows() lazily builds on first read either way, per this
@@ -495,7 +571,8 @@ public:
     // shot (sru-11's "+B": "append a block, committed as its expansion").
     // Only legal where blocks apply (EncoderTurn/EncoderPush/AnalogGesture,
     // and System for a kind/message combination that supports blocking --
-    // never MfTwister, D4 point 3); refused with a reason otherwise
+    // never MfTwister, D4 point 3, and never AnalogAppAction, which is
+    // individual-only); refused with a reason otherwise
     // (including "no room for a default block" if no >=2-wide free range
     // exists in the group's domain).
     bool AddBlock(std::size_t controllerIx, MidiConfigSection section, MidiMappingRowVM::RowGroup group,
@@ -535,14 +612,15 @@ public:
 
     // The addable row groups for (controllerIx, section), in RowGroup's
     // canonical declaration order (EncoderTurn < EncoderPush < EncoderMode <
-    // EncoderStep < AnalogGesture < AnalogSceneBlend < System -- the same
-    // order SectionRows()/InsertionIndexForGroup use, matching section
-    // display order): every group for which GroupSupportsAdd(controllerIx,
-    // section, group) is true. Today that is exactly {EncoderTurn,
-    // EncoderPush} for Encoders, {AnalogGesture} for Analogs, and {System}
-    // for SystemMessages -- config-level groups (EncoderMode/EncoderStep/
-    // AnalogSceneBlend) never appear here, same as GroupSupportsAdd's own
-    // refusal for them.
+    // EncoderStep < AnalogGesture < AnalogAppAction < AnalogSceneBlend <
+    // System -- the same order SectionRows()/InsertionIndexForGroup use,
+    // matching section display order): every group for which
+    // GroupSupportsAdd(controllerIx, section, group) is true. Today that is
+    // exactly {EncoderTurn, EncoderPush} for Encoders, {AnalogGesture} (plus
+    // {AnalogAppAction} when AnalogActionCatalog() is non-empty) for
+    // Analogs, and {System} for SystemMessages -- config-level groups
+    // (EncoderMode/EncoderStep/AnalogSceneBlend) never appear here, same as
+    // GroupSupportsAdd's own refusal for them.
     //
     // sru-11 "empty group still offers add": SectionRows()' row-walk in
     // ControllersPage.hpp's SectionBody only emits a RowGroupHeader (and
@@ -564,10 +642,10 @@ public:
     // (AddableGroups above) renders the right columns even though no row
     // exists yet to read them off of. Single source of truth shared with
     // BuildSectionRows()'s own per-group field tables (encoders: Channel,
-    // Cc, SlotIx, Position; analog gesture: Channel, Cc, GestureIx; system:
-    // SystemRowEditableFields(kind), i.e. SystemAddressSchema(kind)'s fields
-    // plus MessageKind/MessageArg) so the two can
-    // never drift apart.
+    // Cc, SlotIx, Position; analog gesture: Channel, Cc, GestureIx; analog
+    // app action: Channel, Cc, AppAction; system: SystemRowEditableFields(kind),
+    // i.e. SystemAddressSchema(kind)'s fields plus MessageKind/MessageArg) so
+    // the two can never drift apart.
     // `group` need not be addable (AddableGroups/GroupSupportsAdd) -- this
     // answers "what would this group's columns be," independent of whether
     // adding into it is currently legal; callers needing the addable subset
@@ -639,6 +717,11 @@ private:
     MidiInstrumentConfig instrument_;
     MidiConnectionState connection_;
     std::vector<MidiControllerRowVM> controllers_;
+    std::vector<UISystemMessageChoice> messageCatalog_ = UISystemMessageCatalog();
+    std::vector<UISystemMessageChoice> analogActionCatalog_;
+    // Empty means "use the default registry"; Layouts() resolves that
+    // default lazily so this header need not depend on ControllerWizard.hpp.
+    std::vector<ControllerWizardDescriptor> layouts_;
     std::map<std::string, ExpandState> expandState_;
     // `mutable`: SectionRows() is const (matching its pre-existing contract
     // used throughout the renderer/tests) but must lazily build a missing

@@ -1,5 +1,6 @@
 #pragma once
 #include "synth/AppContext.hpp"
+#include "synth/MidiAppCatalog.hpp"
 #include "synth/PortableUI.hpp"
 #include "synth/PortableUIBuilders.hpp"
 #include <concepts>
@@ -67,6 +68,16 @@ concept HasProcessFrame = requires(T app) {
 template <typename T>
 concept HasRestoreStartupState = requires(T app) {
     { app.RestoreStartupState() } -> std::same_as<void>;
+};
+
+// Optional MIDI catalog: an app that declares one is offering the
+// Controllers page its actions, library kinds, and device defaults.
+// Detected at compile time, same as the hooks above. The catalog is data,
+// read once at start-up; the engine dispatches its actions to the app's own
+// PortableSurface().
+template <typename T>
+concept HasMidiCatalog = requires(const T app) {
+    { app.MidiCatalog() } -> std::same_as<MidiAppCatalog>;
 };
 
 // Optional UI capability (sprs-17): an app may register exactly one

@@ -1,5 +1,8 @@
 #include "synth/MidiConfigViewModel.hpp"
 
+#include "synth/ControllerWizard.hpp"
+#include "synth/MidiAppCatalog.hpp"
+
 #ifdef JUCE_MAJOR_VERSION
 #error "synth module tests must not see JUCE headers"
 #endif
@@ -59,6 +62,8 @@ using synth::FieldShortLabel;
 using synth::MidiEndpointConnection;
 using synth::MidiEndpointRef;
 using synth::MidiEndpointStatus;
+using synth::MidiAppAction;
+using synth::MidiAppCatalog;
 using synth::MidiInstrumentConfig;
 using synth::MidiMappingRowVM;
 using synth::MidiProfileKind;
@@ -917,6 +922,24 @@ TEST_CASE(SetLaunchpadVariantRewritesAllPositionsXToProMk3) {
     REQUIRE_TRUE(vm.LaunchpadVariantIndex(0) == 1);
 }
 
+TEST_CASE(SetLaunchpadVariantClearsWizardId) {
+    // A variant change rewrites every association's controller field, same
+    // as any other slot-mutating edit, so it drops wizardId the same way
+    // ApplyMappingEdit, DeleteRow, AddSingle and AddBlock do.
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument;
+    MidiControllerSlot slot = MakeLaunchpadSlot("pads");
+    slot.wizardId = "froggers.launchpad";
+    instrument.AddController(std::move(slot));
+    vm.Rebuild(instrument, MakeSingleControllerConnection());
+
+    MidiInstrumentConfig out;
+    std::string reason;
+    const bool ok = vm.SetLaunchpadVariant(0, 1, out, &reason);  // 1 = Launchpad Pro MK3
+    REQUIRE_TRUE(ok);
+    REQUIRE_TRUE(!out.controllers[0].wizardId.has_value());
+}
+
 TEST_CASE(SetLaunchpadVariantOpenPresentationSurvivesFollowingEdits) {
     MidiInstrumentConfig instrument;
     MidiControllerSlot slot = MakeLaunchpadSlot("pads");
@@ -1679,6 +1702,8 @@ double SafeValueFor(MidiMappingRowVM::Field field) {
         case Field::BlockOutputFeedback:
             return 1.0;
         case Field::BlockMessageType:
+            return 0.0;
+        case Field::AppAction:
             return 0.0;
         case Field::AddressType:
         case Field::GridSlotIx:
@@ -3858,6 +3883,10 @@ TEST_CASE(UISystemMessageCatalogExpansionCoversPressAndReleaseSemantics) {
 
     for (std::size_t ix = 0; ix < catalog.size(); ++ix) {
         REQUIRE_TRUE(catalog[ix].message == expected[ix].message);
+        // Every kept-library-kind choice carries no app-action identity --
+        // that only appears on a choice sourced from an app's own catalog.
+        REQUIRE_TRUE(catalog[ix].appAction.empty());
+        REQUIRE_TRUE(catalog[ix].appActionValue.empty());
 
         MidiInstrumentConfig instrument;
         MidiControllerSlot slot = MakeGenericSlot("generic");
@@ -3901,6 +3930,329 @@ TEST_CASE(UISystemMessageCatalogExpansionCoversPressAndReleaseSemantics) {
                                           MidiMappingRowVM::Field::MessageArg) != rows[0].editableFields.end();
         REQUIRE_TRUE(exposesArg == expected[ix].hasArg);
     }
+}
+
+// AppAction and HoldDrill are not offered through UISystemMessageCatalog()
+// (that list is app-populated by a later change), so unlike the catalog
+// walk above, this constructs their associations directly -- the same
+// pattern SystemMessageRowsDescribeGridMessageSemantics uses for the other
+// MessageIn::Type kinds the catalog also doesn't offer -- to cover
+// UISystemMessageForAssociation and DescribeMessage's handling of the two
+// new kinds.
+TEST_CASE(SystemMessageRowsDescribeAppActionAndHoldDrillSemantics) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument;
+    MidiControllerSlot slot = MakeGenericSlot("generic");
+    slot.config.systemMessages.clear();
+
+    MidiControllerSystemMessageAssociation appAction;
+    appAction.control = MidiControlAddress{.channel = 0, .cc = 20};
+    appAction.press = synth::MessageIn::AppAction(0, 2, 0.0f);
+    appAction.feedback = appAction.press;
+    slot.config.systemMessages.push_back(appAction);
+
+    MidiControllerSystemMessageAssociation holdDrillOn;
+    holdDrillOn.control = MidiControlAddress{.channel = 0, .cc = 21};
+    holdDrillOn.press = synth::MessageIn::HoldDrill(0, true);
+    holdDrillOn.feedback = holdDrillOn.press;
+    slot.config.systemMessages.push_back(holdDrillOn);
+
+    MidiControllerSystemMessageAssociation holdDrillOff;
+    holdDrillOff.control = MidiControlAddress{.channel = 0, .cc = 22};
+    holdDrillOff.press = synth::MessageIn::HoldDrill(0, false);
+    holdDrillOff.feedback = holdDrillOff.press;
+    slot.config.systemMessages.push_back(holdDrillOff);
+
+    REQUIRE_TRUE(instrument.AddController(slot));
+
+    MidiConnectionState connection;
+    connection.controllers.push_back(MidiControllerConnection{});
+    vm.Rebuild(instrument, connection);
+    vm.ToggleConfig(0);
+    vm.ToggleSection(0, MidiConfigSection::SystemMessages);
+
+    // Rebuild sorts systemMessages by SystemMessageSortKey, which orders
+    // HoldDrill's (hasBoolValue, boolValue) tuple false before true -- so
+    // the off row precedes the on row regardless of insertion order.
+    const std::vector<MidiMappingRowVM> rows = vm.SectionRows(0, MidiConfigSection::SystemMessages);
+    REQUIRE_TRUE(rows.size() == 3);
+    REQUIRE_TRUE(rows[0].label.find("app action 2") != std::string::npos);
+    REQUIRE_TRUE(rows[1].label.find("hold drill off") != std::string::npos);
+    REQUIRE_TRUE(rows[2].label.find("hold drill on") != std::string::npos);
+}
+
+MidiAppCatalog MakeFakeAppCatalog() {
+    MidiAppCatalog catalog;
+    catalog.libraryKinds = {UISystemMessage::ParamIncDec, UISystemMessage::HoldDrill};
+    catalog.actions.push_back(MidiAppAction{.action = "app.a", .value = "", .label = "A"});
+    catalog.actions.push_back(MidiAppAction{.action = "app.b", .value = "2", .label = "B 3"});
+    return catalog;
+}
+
+TEST_CASE(MakeUISystemMessageChoicesOrdersLibraryKindsThenActions) {
+    const MidiAppCatalog catalog = MakeFakeAppCatalog();
+    const std::vector<synth::UISystemMessageChoice> choices = synth::MakeUISystemMessageChoices(catalog);
+
+    REQUIRE_TRUE(choices.size() == 4);
+
+    REQUIRE_TRUE(choices[0].message == UISystemMessage::ParamIncDec);
+    REQUIRE_TRUE(choices[0].label == "Param Inc/Dec");
+    REQUIRE_TRUE(choices[0].appAction.empty());
+    REQUIRE_TRUE(choices[0].appActionValue.empty());
+
+    REQUIRE_TRUE(choices[1].message == UISystemMessage::HoldDrill);
+    REQUIRE_TRUE(choices[1].label == "Hold Drill");
+    REQUIRE_TRUE(choices[1].appAction.empty());
+    REQUIRE_TRUE(choices[1].appActionValue.empty());
+
+    REQUIRE_TRUE(choices[2].message == UISystemMessage::AppAction);
+    REQUIRE_TRUE(choices[2].label == "A");
+    REQUIRE_TRUE(choices[2].appAction == "app.a");
+    REQUIRE_TRUE(choices[2].appActionValue.empty());
+    REQUIRE_TRUE(choices[2].appActionIx == 0);
+
+    REQUIRE_TRUE(choices[3].message == UISystemMessage::AppAction);
+    REQUIRE_TRUE(choices[3].label == "B 3");
+    REQUIRE_TRUE(choices[3].appAction == "app.b");
+    REQUIRE_TRUE(choices[3].appActionValue == "2");
+    REQUIRE_TRUE(choices[3].appActionIx == 1);
+
+    // An app with no MidiCatalog() (no libraryKinds, no actions) must see
+    // exactly today's list, unchanged.
+    const std::vector<synth::UISystemMessageChoice>& library = synth::UISystemMessageCatalog();
+    const std::vector<synth::UISystemMessageChoice> fromEmptyCatalog =
+        synth::MakeUISystemMessageChoices(MidiAppCatalog{});
+    REQUIRE_TRUE(fromEmptyCatalog.size() == library.size());
+    for (std::size_t ix = 0; ix < library.size(); ++ix) {
+        REQUIRE_TRUE(fromEmptyCatalog[ix].message == library[ix].message);
+        REQUIRE_TRUE(fromEmptyCatalog[ix].label == library[ix].label);
+    }
+}
+
+TEST_CASE(ViewModelOffersAppCatalogChoicesThroughMessageCatalog) {
+    MidiConfigViewModel vm;
+    vm.SetMessageCatalog(synth::MakeUISystemMessageChoices(MakeFakeAppCatalog()));
+
+    // The message-kind combo (ControllersPageUI.hpp) reads MessageCatalog();
+    // this is that same accessor.
+    const std::vector<synth::UISystemMessageChoice>& offered = vm.MessageCatalog();
+    REQUIRE_TRUE(offered.size() == 4);
+    REQUIRE_TRUE(offered[0].message == UISystemMessage::ParamIncDec);
+    REQUIRE_TRUE(offered[1].message == UISystemMessage::HoldDrill);
+    REQUIRE_TRUE(offered[2].appAction == "app.a");
+    REQUIRE_TRUE(offered[3].appAction == "app.b");
+}
+
+TEST_CASE(ViewModelLayoutsDefaultsToTheLibraryTwisterOnlyRegistry) {
+    MidiConfigViewModel vm;
+
+    const std::vector<synth::ControllerWizardDescriptor>& defaultLayouts = vm.Layouts();
+    REQUIRE_TRUE(defaultLayouts.size() == 1);
+    REQUIRE_TRUE(defaultLayouts.front().id == "com.sheaf.midi-fighter-twister");
+    REQUIRE_TRUE(defaultLayouts.front().displayName == "MIDI Fighter Twister");
+    REQUIRE_TRUE(defaultLayouts.front().kind == synth::MidiProfileKind::MfTwister);
+
+    synth::MidiAppCatalog catalog;
+    synth::MidiAppDeviceDefault deviceDefault;
+    deviceDefault.id = "froggers.apc40.generic";
+    deviceDefault.displayName = "Akai APC40 mkII (Generic)";
+    deviceDefault.kind = synth::MidiProfileKind::Generic;
+    catalog.deviceDefaults.push_back(std::move(deviceDefault));
+    std::vector<synth::ControllerWizardDescriptor> appLayouts =
+        synth::MakeControllerWizardRegistry(catalog);
+    vm.SetLayouts(appLayouts);
+    REQUIRE_TRUE(vm.Layouts().size() == 1);
+    REQUIRE_TRUE(vm.Layouts().front().id == "froggers.apc40.generic");
+}
+
+TEST_CASE(SystemMessageRowFromAppActionChoiceRoundTripsRowIdentity) {
+    MidiConfigViewModel vm;
+    const std::vector<synth::UISystemMessageChoice> catalog = synth::MakeUISystemMessageChoices(MakeFakeAppCatalog());
+    vm.SetMessageCatalog(catalog);
+    const int bThreeIx = 3;
+    REQUIRE_TRUE(catalog[static_cast<std::size_t>(bThreeIx)].label == "B 3");
+
+    MidiInstrumentConfig instrument;
+    instrument.AddController(MakeGenericSlot("gen"));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+    vm.ToggleConfig(0);
+    vm.ToggleSection(0, MidiConfigSection::SystemMessages);
+
+    // Add the default row, then switch its kind to the "B 3" app-action
+    // choice -- the same two-step add-then-edit the page performs.
+    MidiInstrumentConfig afterAdd;
+    std::string reason;
+    REQUIRE_TRUE(
+        vm.AddSingle(0, MidiConfigSection::SystemMessages, MidiMappingRowVM::RowGroup::System, afterAdd, &reason));
+    vm.Rebuild(afterAdd, connection);
+
+    MidiInstrumentConfig committed;
+    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::SystemMessages, 0, MidiMappingRowVM::Field::MessageKind,
+                                     static_cast<double>(bThreeIx), committed, &reason));
+
+    const MidiControllerSystemMessageAssociation& out = committed.controllers[0].config.systemMessages[0];
+    REQUIRE_TRUE(out.press.type == synth::MessageIn::Type::AppAction);
+    REQUIRE_TRUE(out.press.appActionIx == 1);
+    REQUIRE_TRUE(out.appAction == "app.b");
+    REQUIRE_TRUE(out.appActionValue == "2");
+    REQUIRE_TRUE(!out.release.has_value());
+
+    // Re-open the row from the committed instrument and confirm it resolves
+    // back to the SAME choice index -- row identity by action and value,
+    // not by kind alone (a second AppAction choice, "A", shares the kind
+    // but neither string).
+    MidiConfigViewModel reopened;
+    reopened.SetMessageCatalog(catalog);
+    reopened.Rebuild(committed, connection);
+    reopened.ToggleConfig(0);
+    reopened.ToggleSection(0, MidiConfigSection::SystemMessages);
+    reopened.SectionRows(0, MidiConfigSection::SystemMessages);
+    REQUIRE_TRUE(reopened.UISystemMessageIndex(0, MidiConfigSection::SystemMessages, 0) == bThreeIx);
+}
+
+// --- Analog app-action rows (RowGroup::AnalogAppAction) --------------------
+
+MidiAppCatalog MakeAnalogFakeAppCatalog() {
+    MidiAppCatalog catalog;
+    catalog.actions.push_back(MidiAppAction{.action = "app.plain", .value = "", .label = "Plain"});
+    catalog.actions.push_back(MidiAppAction{.action = "app.bpm",
+                                            .value = "",
+                                            .label = "BPM",
+                                            .analogRange = std::make_pair(30.0f, 300.0f)});
+    return catalog;
+}
+
+TEST_CASE(MakeAnalogAppActionChoicesReturnsOnlyAnalogRangeActions) {
+    const MidiAppCatalog catalog = MakeAnalogFakeAppCatalog();
+    const std::vector<synth::UISystemMessageChoice> choices = synth::MakeAnalogAppActionChoices(catalog);
+
+    REQUIRE_TRUE(choices.size() == 1);
+    REQUIRE_TRUE(choices[0].label == "BPM");
+    REQUIRE_TRUE(choices[0].message == UISystemMessage::AppAction);
+    REQUIRE_TRUE(choices[0].appAction == "app.bpm");
+    REQUIRE_TRUE(choices[0].appActionValue.empty());
+    REQUIRE_TRUE(choices[0].appActionIx == 1);
+}
+
+TEST_CASE(AddAndCommitAnalogAppActionRowWritesAppActionsWithoutTouchingGestures) {
+    MidiConfigViewModel vm;
+    const std::vector<synth::UISystemMessageChoice> catalog =
+        synth::MakeAnalogAppActionChoices(MakeAnalogFakeAppCatalog());
+    vm.SetAnalogActionCatalog(catalog);
+
+    MidiInstrumentConfig instrument;
+    instrument.AddController(MakeGenericSlot("gen"));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+    vm.ToggleConfig(0);
+    vm.ToggleSection(0, MidiConfigSection::Analogs);
+
+    // The empty section has no analog input container yet, so this add both
+    // creates it and appends the sole row (sru-11's "first add creates an
+    // absent container", mirrored from AnalogGesture's own coverage above).
+    MidiInstrumentConfig afterAdd;
+    std::string reason;
+    REQUIRE_TRUE(vm.AddSingle(0, MidiConfigSection::Analogs, MidiMappingRowVM::RowGroup::AnalogAppAction, afterAdd,
+                              &reason));
+    vm.Rebuild(afterAdd, connection);
+
+    MidiInstrumentConfig committed;
+    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::Analogs, 0, MidiMappingRowVM::Field::Channel, 0.0,
+                                     committed, &reason));
+    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::Analogs, 0, MidiMappingRowVM::Field::Cc, 14.0, committed,
+                                     &reason));
+    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::Analogs, 0, MidiMappingRowVM::Field::AppAction, 0.0,
+                                     committed, &reason));
+    REQUIRE_TRUE(reason.empty());
+
+    const synth::AnalogMidiInConfig& analogInput = *committed.controllers[0].config.analogInput;
+    REQUIRE_TRUE(analogInput.gestures.empty());
+    REQUIRE_TRUE(analogInput.appActions.size() == 1);
+    REQUIRE_TRUE(analogInput.appActions[0].control.channel == 0);
+    REQUIRE_TRUE(analogInput.appActions[0].control.cc == 14);
+    REQUIRE_TRUE(analogInput.appActions[0].appAction == "app.bpm");
+    REQUIRE_TRUE(analogInput.appActions[0].appActionValue.empty());
+
+    // Re-open the row from the committed instrument and confirm it resolves
+    // back to the SAME target choice -- row identity by (appAction,
+    // appActionValue), mirroring the system-message app-action round trip
+    // above.
+    MidiConfigViewModel reopened;
+    reopened.SetAnalogActionCatalog(catalog);
+    reopened.Rebuild(committed, connection);
+    reopened.ToggleConfig(0);
+    reopened.ToggleSection(0, MidiConfigSection::Analogs);
+    const std::vector<MidiMappingRowVM> reopenedRows = reopened.SectionRows(0, MidiConfigSection::Analogs);
+    std::size_t reopenedRowIx = SIZE_MAX;
+    for (std::size_t ix = 0; ix < reopenedRows.size(); ++ix) {
+        if (reopenedRows[ix].group == MidiMappingRowVM::RowGroup::AnalogAppAction) {
+            reopenedRowIx = ix;
+            break;
+        }
+    }
+    REQUIRE_TRUE(reopenedRowIx != SIZE_MAX);
+    double target = -1.0;
+    REQUIRE_TRUE(reopened.RowFieldValue(0, MidiConfigSection::Analogs, reopenedRowIx,
+                                        MidiMappingRowVM::Field::AppAction, target));
+    REQUIRE_TRUE(target == 0.0);
+}
+
+TEST_CASE(SecondAnalogAppActionRowOnSameAddressIsRejectedLikeADuplicateGesture) {
+    MidiConfigViewModel vm;
+    const std::vector<synth::UISystemMessageChoice> catalog =
+        synth::MakeAnalogAppActionChoices(MakeAnalogFakeAppCatalog());
+    vm.SetAnalogActionCatalog(catalog);
+
+    MidiInstrumentConfig instrument;
+    instrument.AddController(MakeGenericSlot("gen"));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+
+    MidiInstrumentConfig afterFirstAdd;
+    std::string reason;
+    REQUIRE_TRUE(vm.AddSingle(0, MidiConfigSection::Analogs, MidiMappingRowVM::RowGroup::AnalogAppAction,
+                              afterFirstAdd, &reason));
+    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::Analogs, 0, MidiMappingRowVM::Field::Cc, 14.0,
+                                     afterFirstAdd, &reason));
+    vm.Rebuild(afterFirstAdd, connection);
+
+    MidiInstrumentConfig afterSecondAdd;
+    REQUIRE_TRUE(vm.AddSingle(0, MidiConfigSection::Analogs, MidiMappingRowVM::RowGroup::AnalogAppAction,
+                              afterSecondAdd, &reason));
+    // The second row's default cc dodges the first row's -- move it onto the
+    // same (channel, cc) to force the collision this test checks for.
+    REQUIRE_TRUE(afterSecondAdd.controllers[0].config.analogInput->appActions[1].control.cc != 14);
+    vm.Rebuild(afterSecondAdd, connection);
+
+    MidiInstrumentConfig collided;
+    const bool ok = vm.ApplyMappingEdit(0, MidiConfigSection::Analogs, 1, MidiMappingRowVM::Field::Cc, 14.0, collided,
+                                        &reason);
+    REQUIRE_TRUE(!ok);
+    REQUIRE_TRUE(reason.find("duplicate") != std::string::npos);
+}
+
+TEST_CASE(EmptyAnalogActionCatalogOffersNoAppActionAddRow) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument;
+    instrument.AddController(MakeGenericSlot("gen"));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+    REQUIRE_TRUE(vm.AnalogActionCatalog().empty());
+
+    REQUIRE_TRUE(!vm.GroupSupportsAdd(0, MidiConfigSection::Analogs, MidiMappingRowVM::RowGroup::AnalogAppAction));
+    REQUIRE_TRUE(
+        !vm.GroupSupportsBlocks(0, MidiConfigSection::Analogs, MidiMappingRowVM::RowGroup::AnalogAppAction));
+
+    const std::vector<MidiMappingRowVM::RowGroup> groups = vm.AddableGroups(0, MidiConfigSection::Analogs);
+    REQUIRE_TRUE(std::find(groups.begin(), groups.end(), MidiMappingRowVM::RowGroup::AnalogAppAction) ==
+                groups.end());
+
+    MidiInstrumentConfig out;
+    std::string reason;
+    REQUIRE_TRUE(!vm.AddSingle(0, MidiConfigSection::Analogs, MidiMappingRowVM::RowGroup::AnalogAppAction, out,
+                              &reason));
+    REQUIRE_TRUE(!reason.empty());
 }
 
 TEST_CASE(TwisterSystemMessageKindEditDoesNotReorderOpenRows) {

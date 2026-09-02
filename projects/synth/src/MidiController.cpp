@@ -228,6 +228,10 @@ const char* MessageTypeName(MessageIn::Type type) {
         return "gridPressureChange";
     case MessageIn::Type::SelectGrid:
         return "selectGrid";
+    case MessageIn::Type::AppAction:
+        return "appAction";
+    case MessageIn::Type::HoldDrill:
+        return "holdDrill";
     }
     return "clock";
 }
@@ -279,6 +283,10 @@ bool ParseMessageType(std::string_view value, MessageIn::Type& type) {
         type = MessageIn::Type::GridPressureChange;
     } else if (value == "selectGrid") {
         type = MessageIn::Type::SelectGrid;
+    } else if (value == "appAction") {
+        type = MessageIn::Type::AppAction;
+    } else if (value == "holdDrill") {
+        type = MessageIn::Type::HoldDrill;
     } else {
         return false;
     }
@@ -664,11 +672,13 @@ AbsoluteFeedbackCoordinator::Snapshot(RouteReservation route) {
 
 EncoderMidiInProcessor::EncoderMidiInProcessor(EncoderMidiInConfig config, MessageInBus* bus,
                                                AbsoluteFeedbackCoordinator* absoluteFeedback,
-                                               std::size_t controllerSlot)
+                                               std::size_t controllerSlot,
+                                               HoldDrillState* holdDrill)
     : MidiInProcessor(bus),
       config_(std::move(config)),
       absoluteFeedback_(absoluteFeedback),
-      controllerSlot_(controllerSlot) {
+      controllerSlot_(controllerSlot),
+      holdDrill_(holdDrill) {
     ReserveAbsoluteRoutes();
 }
 
@@ -695,6 +705,17 @@ void EncoderMidiInProcessor::ReserveAbsoluteRoutes() {
 void EncoderMidiInProcessor::Process(const BasicMidi& midi) {
     if (midi.IsCC()) {
         if (const EncoderMidiMapping* mapping = FindTurn(midi)) {
+            if (holdDrill_ != nullptr && holdDrill_->held) {
+                const std::size_t mappingIx = static_cast<std::size_t>(mapping - config_.turns.data());
+                if (holdDrill_->drilled.size() != config_.turns.size()) {
+                    holdDrill_->drilled.assign(config_.turns.size(), false);
+                }
+                if (!holdDrill_->drilled[mappingIx]) {
+                    holdDrill_->drilled[mappingIx] = true;
+                    Push(MessageIn::ParamPush(NextTimestamp(), mapping->slotIx, mapping->position));
+                }
+                return;
+            }
             if (config_.mode == EncoderMode::Absolute) {
                 if (absoluteFeedback_ == nullptr) {
                     Push(MessageIn::ParamSetAbsolute(NextTimestamp(), mapping->slotIx, mapping->position,
@@ -781,6 +802,18 @@ std::optional<float> EncoderMidiInProcessor::DecodeDelta(std::uint8_t value) con
     return static_cast<float>(ticks) * config_.turnStep;
 }
 
+namespace {
+
+template <typename Mapping>
+const Mapping* FindByControl(const std::vector<Mapping>& mappings, const BasicMidi& midi) {
+    const MidiControlAddress address{.channel = midi.Channel(), .cc = midi.GetCC()};
+    const auto itr = std::find_if(mappings.begin(), mappings.end(),
+                                  [address](const Mapping& mapping) { return mapping.control == address; });
+    return itr == mappings.end() ? nullptr : &*itr;
+}
+
+}  // namespace
+
 AnalogMidiInProcessor::AnalogMidiInProcessor(AnalogMidiInConfig config, MessageInBus* bus)
     : MidiInProcessor(bus),
       config_(std::move(config)) {}
@@ -801,6 +834,11 @@ void AnalogMidiInProcessor::Process(const BasicMidi& midi) {
         return;
     }
 
+    if (const AnalogAppActionMapping* mapping = FindAppAction(midi)) {
+        Push(MessageIn::AppAction(NextTimestamp(), mapping->appActionIx, normalized));
+        return;
+    }
+
     const MidiControlAddress address{.channel = midi.Channel(), .cc = midi.GetCC()};
     if (config_.sceneBlend.has_value() && *config_.sceneBlend == address) {
         Push(MessageIn::SetSceneBlend(NextTimestamp(), normalized));
@@ -811,10 +849,11 @@ void AnalogMidiInProcessor::Process(const BasicMidi& midi) {
 }
 
 const AnalogMidiMapping* AnalogMidiInProcessor::FindGesture(const BasicMidi& midi) const {
-    const MidiControlAddress address{.channel = midi.Channel(), .cc = midi.GetCC()};
-    const auto itr = std::find_if(config_.gestures.begin(), config_.gestures.end(),
-                                  [address](const AnalogMidiMapping& mapping) { return mapping.control == address; });
-    return itr == config_.gestures.end() ? nullptr : &*itr;
+    return FindByControl(config_.gestures, midi);
+}
+
+const AnalogAppActionMapping* AnalogMidiInProcessor::FindAppAction(const BasicMidi& midi) const {
+    return FindByControl(config_.appActions, midi);
 }
 
 namespace {
@@ -875,9 +914,11 @@ void PolyphonicPressureMidiInProcessor::Process(const BasicMidi& midi) {
     Push(pressure);
 }
 
-SystemButtonMidiInProcessor::SystemButtonMidiInProcessor(SystemButtonMidiInConfig config, MessageInBus* bus)
+SystemButtonMidiInProcessor::SystemButtonMidiInProcessor(SystemButtonMidiInConfig config, MessageInBus* bus,
+                                                          HoldDrillState* holdDrill)
     : MidiInProcessor(bus),
-      config_(std::move(config)) {}
+      config_(std::move(config)),
+      holdDrill_(holdDrill) {}
 
 void SystemButtonMidiInProcessor::SetConfig(SystemButtonMidiInConfig config) {
     config_ = std::move(config);
@@ -898,6 +939,23 @@ void SystemButtonMidiInProcessor::Process(const BasicMidi& midi) {
 
     const bool isPress = midi.IsCC() ? midi.GetValue() > 0
                                     : midi.Status() == BasicMidi::kStatusNote && midi.GetValue() > 0;
+
+    if (association->press.type == MessageIn::Type::HoldDrill) {
+        // Hold Drill state lives in the profile's input chain, never the bus:
+        // a knob turned while held is drilled instead of moved (see
+        // EncoderMidiInProcessor::Process), so neither edge is pushed here.
+        if (holdDrill_ == nullptr) {
+            return;
+        }
+        if (isPress) {
+            holdDrill_->held = true;
+            holdDrill_->drilled.clear();
+        } else {
+            holdDrill_->held = false;
+        }
+        return;
+    }
+
     if (isPress) {
         PushStamped(association->press);
         return;
@@ -1794,6 +1852,8 @@ SystemMessageOutputState SystemMessageOutputInfo::Evaluate(const MessageIn& mess
     case MessageIn::Type::SetGestureValue:
     case MessageIn::Type::SetSceneBlend:
     case MessageIn::Type::SelectGrid:
+    case MessageIn::Type::AppAction:
+    case MessageIn::Type::HoldDrill:
         return {};
     case MessageIn::Type::GridPress:
     case MessageIn::Type::GridRelease:
@@ -1979,6 +2039,28 @@ void LaunchpadGridMidiOutProcessor::Process() {
 }
 
 bool LaunchpadGridMidiOutProcessor::Enqueue(const BasicMidi& midi) {
+    return sender_ != nullptr && !midi.raw.empty() && sender_->Enqueue(sinkIx_, midi);
+}
+
+OpenSysExMidiOutProcessor::OpenSysExMidiOutProcessor(std::vector<std::vector<std::uint8_t>> messages,
+                                                     MidiSender* sender, std::size_t sinkIx)
+    : messages_(std::move(messages)), sender_(sender), sinkIx_(sinkIx) {}
+
+void OpenSysExMidiOutProcessor::Reset() {
+    pending_ = true;
+}
+
+void OpenSysExMidiOutProcessor::Process() {
+    if (!pending_) {
+        return;
+    }
+    pending_ = false;
+    for (const std::vector<std::uint8_t>& message : messages_) {
+        Enqueue(BasicMidi::SysEx(0, message));
+    }
+}
+
+bool OpenSysExMidiOutProcessor::Enqueue(const BasicMidi& midi) {
     return sender_ != nullptr && !midi.raw.empty() && sender_->Enqueue(sinkIx_, midi);
 }
 
@@ -2172,6 +2254,33 @@ bool FromJSON(JSON json, AnalogMidiMapping& value) {
     return true;
 }
 
+JSON ToJSON(JsonArena& arena, const AnalogAppActionMapping& value) {
+    JSON json = arena.Object();
+    json.SetNew("control", ToJSON(arena, value.control));
+    json.SetNew("appAction", arena.String(value.appAction.c_str()));
+    json.SetNew("appActionValue", arena.String(value.appActionValue.c_str()));
+    return json;
+}
+
+bool FromJSON(JSON json, AnalogAppActionMapping& value) {
+    if (!IsObject(json)) {
+        return false;
+    }
+    AnalogAppActionMapping parsed;
+    if (!FromJSON(json.Get("control"), parsed.control)) {
+        return false;
+    }
+    const JSON appAction = json.Get("appAction");
+    const JSON appActionValue = json.Get("appActionValue");
+    if (!IsString(appAction) || !IsString(appActionValue)) {
+        return false;
+    }
+    parsed.appAction = appAction.StringValue();
+    parsed.appActionValue = appActionValue.StringValue();
+    value = parsed;
+    return true;
+}
+
 JSON ToJSON(JsonArena& arena, const AnalogMidiInConfig& value) {
     JSON json = arena.Object();
     json.SetNew("gestures", VectorToJSON(arena, value.gestures));
@@ -2180,6 +2289,7 @@ JSON ToJSON(JsonArena& arena, const AnalogMidiInConfig& value) {
     } else {
         json.SetNew("sceneBlend", arena.Null());
     }
+    json.SetNew("appActions", VectorToJSON(arena, value.appActions));
     return json;
 }
 
@@ -2198,6 +2308,9 @@ bool FromJSON(JSON json, AnalogMidiInConfig& value) {
             return false;
         }
         parsed.sceneBlend = address;
+    }
+    if (ObjectHasKey(json, "appActions") && !VectorFromJSON(json.Get("appActions"), parsed.appActions)) {
+        return false;
     }
     value = std::move(parsed);
     return true;
@@ -2272,6 +2385,10 @@ JSON ToJSON(JsonArena& arena, const MessageIn& value) {
         json.SetNew("gridSlot", arena.Integer(static_cast<int64_t>(value.gridSlotIx)));
         json.SetNew("grid", arena.Integer(static_cast<int64_t>(value.gridIx)));
         return json;
+    case MessageIn::Type::AppAction:
+        // appActionIx is not persisted -- an app's action list can reorder
+        // between runs, so only the type name round-trips.
+        return json;
     case MessageIn::Type::ParamIncDec:
     case MessageIn::Type::ParamSetAbsolute:
     case MessageIn::Type::ParamSetAbsoluteOnBank:
@@ -2291,6 +2408,7 @@ JSON ToJSON(JsonArena& arena, const MessageIn& value) {
     case MessageIn::Type::SetGestureValue:
     case MessageIn::Type::SceneSelect:
     case MessageIn::Type::SetSceneBlend:
+    case MessageIn::Type::HoldDrill:
         break;
     }
     json.SetNew("slotIx", arena.Integer(static_cast<int64_t>(value.slotIx)));
@@ -2339,6 +2457,10 @@ bool FromJSON(JSON json, MessageIn& value) {
         }
         value = parsed;
         return true;
+    case MessageIn::Type::AppAction:
+        // appActionIx round-trips as 0 -- ToJSON never wrote it.
+        value = parsed;
+        return true;
     case MessageIn::Type::ParamIncDec:
     case MessageIn::Type::ParamSetAbsolute:
     case MessageIn::Type::ParamSetAbsoluteOnBank:
@@ -2358,6 +2480,7 @@ bool FromJSON(JSON json, MessageIn& value) {
     case MessageIn::Type::SetGestureValue:
     case MessageIn::Type::SceneSelect:
     case MessageIn::Type::SetSceneBlend:
+    case MessageIn::Type::HoldDrill:
         break;
     }
     if (!ReadSize(json.Get("slotIx"), parsed.slotIx) || !ReadSize(json.Get("position"), parsed.position) ||
@@ -2471,6 +2594,10 @@ JSON ToJSON(JsonArena& arena, const MidiControllerSystemMessageAssociation& valu
     }
     json.SetNew("feedback", ToJSON(arena, value.feedback));
     json.SetNew("outputFeedback", arena.Boolean(value.outputFeedback));
+    if (value.press.type == MessageIn::Type::AppAction) {
+        json.SetNew("appAction", arena.String(value.appAction.c_str()));
+        json.SetNew("appActionValue", arena.String(value.appActionValue.c_str()));
+    }
     return json;
 }
 
@@ -2518,6 +2645,20 @@ bool FromJSON(JSON json, MidiControllerSystemMessageAssociation& value) {
     if (!outputFeedback.IsNull() && !ReadBool(outputFeedback, parsed.outputFeedback)) {
         return false;
     }
+    if (ObjectHasKey(json, "appAction")) {
+        const JSON appAction = json.Get("appAction");
+        if (!IsString(appAction)) {
+            return false;
+        }
+        parsed.appAction = appAction.StringValue();
+    }
+    if (ObjectHasKey(json, "appActionValue")) {
+        const JSON appActionValue = json.Get("appActionValue");
+        if (!IsString(appActionValue)) {
+            return false;
+        }
+        parsed.appActionValue = appActionValue.StringValue();
+    }
     value = std::move(parsed);
     return true;
 }
@@ -2545,6 +2686,15 @@ JSON ToJSON(JsonArena& arena, const MidiControllerProfileConfig& value) {
         json.SetNew("pressureInput", ToJSON(arena, *value.pressureInput));
     }
     json.SetNew("systemMessages", VectorToJSON(arena, value.systemMessages));
+    JSON openSysEx = arena.Array();
+    for (const std::vector<std::uint8_t>& message : value.openSysEx) {
+        JSON messageJson = arena.Array();
+        for (std::uint8_t byte : message) {
+            messageJson.AppendNew(arena.Integer(byte));
+        }
+        openSysEx.AppendNew(messageJson);
+    }
+    json.SetNew("openSysEx", openSysEx);
     return json;
 }
 
@@ -2600,6 +2750,31 @@ bool FromJSON(JSON json, MidiControllerProfileConfig& value) {
     const JSON systemMessages = json.Get("systemMessages");
     if (!systemMessages.IsNull() && !VectorFromJSON(systemMessages, parsed.systemMessages)) {
         return false;
+    }
+    const JSON openSysEx = json.Get("openSysEx");
+    if (!openSysEx.IsNull()) {
+        if (!IsArray(openSysEx)) {
+            return false;
+        }
+        std::vector<std::vector<std::uint8_t>> parsedOpenSysEx;
+        parsedOpenSysEx.reserve(openSysEx.Size());
+        for (std::size_t ix = 0; ix < openSysEx.Size(); ++ix) {
+            const JSON messageJson = openSysEx.GetAt(ix);
+            if (!IsArray(messageJson)) {
+                return false;
+            }
+            std::vector<std::uint8_t> message;
+            message.reserve(messageJson.Size());
+            for (std::size_t byteIx = 0; byteIx < messageJson.Size(); ++byteIx) {
+                const JSON byteJson = messageJson.GetAt(byteIx);
+                if (!IsInteger(byteJson) || byteJson.IntegerValue() < 0 || byteJson.IntegerValue() > 0xFF) {
+                    return false;
+                }
+                message.push_back(static_cast<std::uint8_t>(byteJson.IntegerValue()));
+            }
+            parsedOpenSysEx.push_back(std::move(message));
+        }
+        parsed.openSysEx = std::move(parsedOpenSysEx);
     }
     value = std::move(parsed);
     return true;
@@ -2782,6 +2957,8 @@ MidiControllerProfileResult CreateMidiControllerProfileImpl(
     AbsoluteFeedbackCoordinator* absoluteFeedback, std::size_t controllerSlot,
     std::optional<MidiProfileKind> profileKind) {
     MidiControllerProfileResult result;
+    result.holdDrill = std::make_unique<HoldDrillState>();
+    HoldDrillState* const holdDrill = result.holdDrill.get();
     const EncoderMode feedbackMode =
         config.encoderInput.has_value() ? config.encoderInput->mode : EncoderMode::Signed7Bit;
     AbsoluteFeedbackCoordinator* activeAbsoluteFeedback =
@@ -2802,7 +2979,7 @@ MidiControllerProfileResult CreateMidiControllerProfileImpl(
 
     if (config.encoderInput.has_value()) {
         appendInput(std::make_unique<EncoderMidiInProcessor>(
-            *config.encoderInput, bus, activeAbsoluteFeedback, controllerSlot));
+            *config.encoderInput, bus, activeAbsoluteFeedback, controllerSlot, holdDrill));
     }
     if (config.analogInput.has_value()) {
         appendInput(std::make_unique<AnalogMidiInProcessor>(*config.analogInput, bus));
@@ -2818,7 +2995,7 @@ MidiControllerProfileResult CreateMidiControllerProfileImpl(
                 .release = association.release,
             });
         }
-        appendInput(std::make_unique<SystemButtonMidiInProcessor>(std::move(systemInput), bus));
+        appendInput(std::make_unique<SystemButtonMidiInProcessor>(std::move(systemInput), bus, holdDrill));
     }
     if (config.pressureInput.has_value()) {
         appendInput(std::make_unique<PolyphonicPressureMidiInProcessor>(*config.pressureInput, bus));
@@ -2926,6 +3103,11 @@ MidiControllerProfileResult CreateMidiControllerProfileImpl(
             result.outputs.push_back(std::make_unique<LaunchpadGridMidiOutProcessor>(
                 std::move(launchpadMiniOutput), sender, parameterUIState, sinkIx));
         }
+    }
+
+    if (!config.openSysEx.empty()) {
+        result.outputs.push_back(
+            std::make_unique<OpenSysExMidiOutProcessor>(config.openSysEx, sender, sinkIx));
     }
 
     return result;
@@ -3227,6 +3409,11 @@ bool ProfileConfigValidForKind(MidiProfileKind kind, const MidiControllerProfile
         for (const AnalogMidiMapping& mapping : config.analogInput->gestures) {
             if (mapping.control.type != MidiControlType::Cc) {
                 return Fail(reason, "analog gestures must use CC control addresses");
+            }
+        }
+        for (const AnalogAppActionMapping& mapping : config.analogInput->appActions) {
+            if (mapping.control.type != MidiControlType::Cc) {
+                return Fail(reason, "analog app actions must use CC control addresses");
             }
         }
     }

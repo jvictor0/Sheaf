@@ -241,11 +241,22 @@ struct EncoderMidiInConfig {
     void KeepFirstPositions(std::size_t count);
 };
 
+// While its held button is down, a knob turn drills that knob once instead
+// of moving its value: the first turn on a mapping pushes a ParamPush and
+// marks the mapping drilled, and every further turn on that mapping while
+// still held is dropped. Release clears held and drilled so each knob is a
+// plain knob again and the next hold starts fresh.
+struct HoldDrillState {
+    bool held = false;
+    std::vector<bool> drilled;  // one flag per encoder-turn mapping
+};
+
 class EncoderMidiInProcessor final : public MidiInProcessor {
 public:
     EncoderMidiInProcessor(EncoderMidiInConfig config, MessageInBus* bus = nullptr,
                            AbsoluteFeedbackCoordinator* absoluteFeedback = nullptr,
-                           std::size_t controllerSlot = 0);
+                           std::size_t controllerSlot = 0,
+                           HoldDrillState* holdDrill = nullptr);
 
     void SetConfig(EncoderMidiInConfig config);
     const EncoderMidiInConfig& Config() const { return config_; }
@@ -261,6 +272,7 @@ private:
     AbsoluteFeedbackCoordinator* absoluteFeedback_ = nullptr;
     std::size_t controllerSlot_ = 0;
     std::vector<AbsoluteFeedbackCoordinator::RouteReservation> absoluteTurnRoutes_;
+    HoldDrillState* holdDrill_ = nullptr;
 };
 
 struct AnalogMidiMapping {
@@ -268,9 +280,17 @@ struct AnalogMidiMapping {
     std::size_t gestureIx = 0;
 };
 
+struct AnalogAppActionMapping {
+    MidiControlAddress control;
+    std::string appAction;
+    std::string appActionValue;
+    std::size_t appActionIx = 0;
+};
+
 struct AnalogMidiInConfig {
     std::vector<AnalogMidiMapping> gestures;
     std::optional<MidiControlAddress> sceneBlend;
+    std::vector<AnalogAppActionMapping> appActions;
 };
 
 class AnalogMidiInProcessor final : public MidiInProcessor {
@@ -283,6 +303,7 @@ public:
 
 private:
     const AnalogMidiMapping* FindGesture(const BasicMidi& midi) const;
+    const AnalogAppActionMapping* FindAppAction(const BasicMidi& midi) const;
 
     AnalogMidiInConfig config_;
 };
@@ -358,7 +379,8 @@ struct SystemButtonMidiInConfig {
 
 class SystemButtonMidiInProcessor final : public MidiInProcessor {
 public:
-    SystemButtonMidiInProcessor(SystemButtonMidiInConfig config, MessageInBus* bus = nullptr);
+    SystemButtonMidiInProcessor(SystemButtonMidiInConfig config, MessageInBus* bus = nullptr,
+                                HoldDrillState* holdDrill = nullptr);
 
     void SetConfig(SystemButtonMidiInConfig config);
     const SystemButtonMidiInConfig& Config() const { return config_; }
@@ -369,6 +391,7 @@ private:
     void PushStamped(MessageIn message);
 
     SystemButtonMidiInConfig config_;
+    HoldDrillState* holdDrill_ = nullptr;
 };
 
 enum class MidiSchedulingCapability : std::uint8_t {
@@ -862,6 +885,25 @@ private:
     std::size_t sinkIx_ = 0;
 };
 
+// Sends each configured message once after construction and once after
+// every Reset(); further Process() calls between resets send nothing.
+class OpenSysExMidiOutProcessor final : public MidiOutputProcessor {
+public:
+    OpenSysExMidiOutProcessor(std::vector<std::vector<std::uint8_t>> messages, MidiSender* sender,
+                              std::size_t sinkIx = 0);
+
+    void Reset() override;
+    void Process() override;
+
+private:
+    bool Enqueue(const BasicMidi& midi);
+
+    std::vector<std::vector<std::uint8_t>> messages_;
+    MidiSender* sender_ = nullptr;
+    std::size_t sinkIx_ = 0;
+    bool pending_ = true;
+};
+
 struct MidiControllerSystemMessageAssociation {
     std::optional<MidiControlAddress> control;
     std::optional<WrldBldrSystemPosition> wrldBldrPosition;
@@ -870,6 +912,8 @@ struct MidiControllerSystemMessageAssociation {
     std::optional<MessageIn> release;
     MessageIn feedback;
     bool outputFeedback = true;
+    std::string appAction;
+    std::string appActionValue;
 };
 
 struct MidiControllerProfileConfig {
@@ -878,12 +922,19 @@ struct MidiControllerProfileConfig {
     std::optional<AnalogMidiInConfig> analogInput;
     std::optional<PolyphonicPressureMidiInConfig> pressureInput;
     std::vector<MidiControllerSystemMessageAssociation> systemMessages;
+
+    // Complete MIDI messages (each F0 ... F7) sent once whenever this
+    // controller's output opens or reopens. Not tied to any control or
+    // system message; a device that needs a mode message on connect uses
+    // this field regardless of what else the profile maps.
+    std::vector<std::vector<std::uint8_t>> openSysEx;
 };
 
 struct MidiControllerProfileResult {
     std::unique_ptr<MidiInProcessor> input;
     std::vector<std::unique_ptr<MidiInProcessor>> inputThru;
     std::vector<std::unique_ptr<MidiOutputProcessor>> outputs;
+    std::unique_ptr<HoldDrillState> holdDrill;
 };
 
 MidiControllerProfileResult CreateBlacklistedMidiControllerProfile();
@@ -1022,6 +1073,8 @@ JSON ToJSON(JsonArena& arena, const EncoderMidiInConfig& value);
 bool FromJSON(JSON json, EncoderMidiInConfig& value);
 JSON ToJSON(JsonArena& arena, const AnalogMidiMapping& value);
 bool FromJSON(JSON json, AnalogMidiMapping& value);
+JSON ToJSON(JsonArena& arena, const AnalogAppActionMapping& value);
+bool FromJSON(JSON json, AnalogAppActionMapping& value);
 JSON ToJSON(JsonArena& arena, const AnalogMidiInConfig& value);
 bool FromJSON(JSON json, AnalogMidiInConfig& value);
 JSON ToJSON(JsonArena& arena, const EncoderMidiOutMapping& value);

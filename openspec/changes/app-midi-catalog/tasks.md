@@ -1,0 +1,127 @@
+# Tasks — app-midi-catalog
+
+## 1. Implementation
+
+- [x] 1.1 `HasMidiCatalog<App>` concept and `MidiAppCatalog`/`MidiAppAction`/
+      `MidiAppDeviceDefault` types.
+      Files: `include/synth/AppConcepts.hpp`, `include/synth/MidiAppCatalog.hpp`.
+      Test: `engine_tests.cpp: engine_dispatches_catalog_app_actions_to_surface`.
+- [x] 1.2 `MessageIn::Type::AppAction`/`HoldDrill` and `UISystemMessage::AppAction`/
+      `HoldDrill`, appended after the existing enumerators.
+      Files: `include/synth/ParameterModulation.hpp`,
+      `include/synth/MidiConfigViewModel.hpp`, `src/MidiController.cpp`
+      (`MessageTypeName`/`ParseMessageType`).
+      Test: `instrument_tests.cpp: AssociationJsonRoundTripsAppActionStringsButNotIndex`.
+- [x] 1.3 Audio-thread forwarding: `ParameterMessageOut::AppAction`/
+      `AppEncoderPress`, `MessageInBus::SetAppActionOut`, `MessageInBus::Apply`'s
+      `AppAction`/`ParamPush`/`HoldDrill` cases, `Engine`'s constructor wiring
+      of `uiBus_`/`midiBus_`.
+      Files: `include/synth/ParameterModulation.hpp`, `src/ParameterModulation.cpp`,
+      `include/synth/Engine.hpp`.
+      Test: `engine_tests.cpp: engine_dispatches_catalog_app_actions_to_surface`,
+      `engine_app_action_out_of_range_dispatches_nothing`,
+      `engine_forwards_encoder_press_to_catalog_action_instead_of_opening_modulation_view`,
+      `engine_encoder_press_without_catalog_forwarding_opens_modulation_view_as_today`.
+- [x] 1.4 Message-thread dispatch: `MessageThreadTick` drains `AppAction`/
+      `AppEncoderPress` and dispatches `ui::Action`s to `app_.PortableSurface()`,
+      with analog-range value formatting.
+      File: `include/synth/Engine.hpp`.
+      Test: `engine_tests.cpp: engine_dispatches_catalog_app_actions_to_surface`.
+- [x] 1.5 Association `appAction`/`appActionValue` fields and JSON, index not
+      persisted.
+      Files: `include/synth/MidiController.hpp`, `src/MidiController.cpp`.
+      Test: `instrument_tests.cpp: AssociationJsonRoundTripsAppActionStringsButNotIndex`,
+      `AssociationJsonOmitsAppActionKeysForNonAppActionPress`.
+- [x] 1.6 `AnalogAppActionMapping`, `AnalogMidiInConfig::appActions`, analog
+      dispatch branch, JSON.
+      Files: `include/synth/MidiController.hpp`, `src/MidiController.cpp`.
+      Test: `instrument_tests.cpp: AnalogMidiInConfigJsonRoundTripsAppActions`,
+      `AnalogMidiInProcessorPushesAppActionForMatchingControlAndGestureOtherwise`.
+- [x] 1.7 `Engine::ResolveAppActionsAgainstCatalog`: resolves app-action rows
+      of a copy of each controller's config against the catalog in
+      `RebuildMidiProcessors`, drops unresolved rows from the copy with one
+      log line, leaves the persisted config untouched.
+      File: `include/synth/Engine.hpp`.
+      Test: `engine_tests.cpp: engine_rebuild_resolves_app_action_rows_and_drops_unknown_ones`.
+- [x] 1.8 `HoldDrillState`, held/drilled semantics in
+      `EncoderMidiInProcessor::Process` and `SystemButtonMidiInProcessor::Process`,
+      one instance per profile via `MidiControllerProfileResult::holdDrill`.
+      Files: `include/synth/MidiController.hpp`, `src/MidiController.cpp`.
+      Test: `instrument_tests.cpp: HoldDrillTurnPushesOnceThenPlainTurnAfterRelease`,
+      `HoldDrillDrillsEachTurnedKnobOnceDuringOneHold`,
+      `HoldDrillOnAbsoluteEncoderSkipsAbsoluteFeedbackUntilRelease`,
+      `HoldDrillResetsDrilledFlagsOnEachNewHold`.
+- [x] 1.9 `MidiControllerProfileConfig::openSysEx` and
+      `OpenSysExMidiOutProcessor` (sends once after construction and after
+      every `Reset()`), JSON.
+      Files: `include/synth/MidiController.hpp`, `src/MidiController.cpp`.
+      Test: `instrument_tests.cpp: ControllerProfileJsonRoundTripsOpenSysExByteForByte`,
+      `ControllerProfileJsonWithoutOpenSysExKeyReadsBackEmpty`,
+      `CreateMidiControllerProfileOmitsOpenSysExOutputWhenEmpty`,
+      `OpenSysExMidiOutProcessorSendsOnceThenWaitsForReset`,
+      `OpenSysExMidiOutProcessorSendsMultipleMessagesInOrder`.
+- [x] 1.10 `MakeUISystemMessageChoices`/`MakeAnalogAppActionChoices`,
+      `MidiConfigViewModel::SetMessageCatalog`/`SetAnalogActionCatalog`,
+      Controllers page callbacks wired from the app catalog (library default
+      when the app supplies none).
+      Files: `include/synth/MidiConfigViewModel.hpp`, `src/MidiConfigViewModel.cpp`,
+      `include/synth/ControllersPageUI.hpp`.
+      Test: `viewmodel_tests.cpp: MakeUISystemMessageChoicesOrdersLibraryKindsThenActions`,
+      `ViewModelOffersAppCatalogChoicesThroughMessageCatalog`,
+      `SystemMessageRowsDescribeAppActionAndHoldDrillSemantics`,
+      `SystemMessageRowFromAppActionChoiceRoundTripsRowIdentity`,
+      `MakeAnalogAppActionChoicesReturnsOnlyAnalogRangeActions`,
+      `AddAndCommitAnalogAppActionRowWritesAppActionsWithoutTouchingGestures`,
+      `SecondAnalogAppActionRowOnSameAddressIsRejectedLikeADuplicateGesture`,
+      `EmptyAnalogActionCatalogOffersNoAppActionAddRow`.
+- [x] 1.11 `MakeControllerWizardRegistry(catalog)` replacing the static
+      `ControllerWizardRegistry()`; `AppDefaultControllerWizard`/
+      `AppDefaultConfigForm`; every registry caller and
+      `ControllerWizardDiscoveryCache::SetRegistry` updated to take the
+      vector.
+      Files: `include/synth/ControllerWizard.hpp`, `src/ControllerWizard.cpp`,
+      `include/synth/ControllerWizardDiscoveryCache.hpp`.
+      Test: `controller_wizard_tests.cpp:
+      MakeControllerWizardRegistryWithEmptyCatalogReturnsTheOneTwisterDescriptor`,
+      `MakeControllerWizardRegistryWithAppDefaultsReturnsOneDescriptorPerDefault`,
+      `AppDefaultControllerWizardValidatesEmptyFormAndGeneratesTheStoredConfig`,
+      `DiscoveryWithAppRegistryClassifiesDeviceByFirstDefaultsInputAlias`.
+- [x] 1.12 Per-controller Layout combo: `BuildLayoutOptions`,
+      `Actions::kControllerLayout`/`HandleControllerLayout` (install + commit
+      + save, or clear `wizardId` for Custom); `Actions::kControllerReconfigure`
+      and its button removed for Active records.
+      File: `include/synth/ControllersPageUI.hpp`.
+      Test: `controllers_page_ui_tests.cpp: TestLayoutComboOffersLayoutNamesThenCustom`,
+      `TestChoosingALayoutInstallsItsConfigAndSetsWizardId`,
+      `TestChoosingCustomClearsWizardIdWithoutTouchingConfig`.
+- [x] 1.13 `slot.wizardId.reset()` on every slot-mutating edit
+      (`ApplyMappingEdit`, `DeleteRow`, `AddSingle`, `AddBlock`,
+      `SetLaunchpadVariant`).
+      File: `src/MidiConfigViewModel.cpp`.
+      Test: `controllers_page_ui_tests.cpp: TestChoosingALayoutInstallsItsConfigAndSetsWizardId`
+      (mapping-field-commit branch), `viewmodel_tests.cpp: SetLaunchpadVariantClearsWizardId`.
+- [x] 1.14 `BuildPatchJSON`/`LoadPatchJSON`/`ApplyPatchMessage` gain
+      `carryInstrument`/`loadedInstrument`; schema version 2 with
+      `midiInstrument` only when requested; `Engine` stages a loaded
+      instrument and applies it on the message thread through
+      `EditInstrument`.
+      Files: `include/synth/PatchPersistence.hpp`, `src/PatchPersistence.cpp`,
+      `include/synth/Engine.hpp`.
+      Test: `engine_tests.cpp: engine_patch_load_restores_saved_instrument_when_catalog_carries_mappings`,
+      `engine_patch_load_leaves_instrument_untouched_when_catalog_does_not_carry_mappings`,
+      `engine_ignores_version_two_midi_instrument_section_when_catalog_does_not_carry_mappings`.
+- [x] 1.15 Build + run `cd projects/synth && nice make -j2 test`; confirm the
+      suite is green apart from the two known pre-existing 96kHz-deadline
+      failures.
+      Verified complete per this submodule's working-tree test run logs
+      (`run_engine_tests.log`, `run_instrument_tests.log`,
+      `run_parameter_modulation_tests.log`, `run_miniapp_system_tests.log`,
+      `run_braid4_system_tests.log`).
+
+## 2. Postflight and delivery
+
+- [ ] 2.1 Postflight against these artifacts: implementation versus
+      proposal, plus a duplication pass over the whole diff.
+- [ ] 2.2 Commits append to the branch this submodule is pinned to
+      (`app-midi-catalog`), which is the branch of the open upstream pull
+      request.

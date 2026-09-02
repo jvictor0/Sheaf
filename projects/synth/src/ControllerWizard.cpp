@@ -1,4 +1,5 @@
 #include "synth/ControllerWizard.hpp"
+#include "synth/MidiAppCatalog.hpp"
 #include "synth/RuntimePageStyle.hpp"
 
 #include <algorithm>
@@ -180,6 +181,8 @@ bool TwisterArgumentEnabled(UISystemMessage message) {
         case UISystemMessage::SetSceneBlend:
         case UISystemMessage::NextParamBank:
         case UISystemMessage::PrevParamBank:
+        case UISystemMessage::AppAction:
+        case UISystemMessage::HoldDrill:
             return false;
     }
     return false;
@@ -388,6 +391,9 @@ UISystemMessage TwisterMessageForAssociation(const MidiControllerSystemMessageAs
         case MessageIn::Type::GridRelease:
         case MessageIn::Type::GridPressureChange:
         case MessageIn::Type::SelectGrid:
+        case MessageIn::Type::ParamSetAbsoluteOnBank:
+        case MessageIn::Type::AppAction:
+        case MessageIn::Type::HoldDrill:
             return UISystemMessage::ParamIncDec;
     }
     return UISystemMessage::ParamIncDec;
@@ -781,7 +787,7 @@ ExtractMfTwisterWizardSeed(const MidiControllerProfileConfig& profile) {
         }
         const std::size_t argument = TwisterArgument(association, message);
         MidiControllerSystemMessageAssociation expectedAssociation =
-            MakeUISystemMessageAssociation(message, argument);
+            MakeUISystemMessageAssociation(*FindUISystemMessageChoice(message), argument);
         if (message == UISystemMessage::SelectParamBank ||
             message == UISystemMessage::NextParamBank ||
             message == UISystemMessage::PrevParamBank) {
@@ -817,7 +823,7 @@ WizardGenerationResult MfTwisterControllerWizard::GenerateTypedProfile(
         const std::size_t argument =
             TwisterArgumentEnabled(button.message) ? ParseSizeTOrAssert(button.argumentText) : 0;
         MidiControllerSystemMessageAssociation association =
-            MakeUISystemMessageAssociation(button.message, argument);
+            MakeUISystemMessageAssociation(*FindUISystemMessageChoice(button.message), argument);
 
         if (button.message == UISystemMessage::SelectParamBank ||
             button.message == UISystemMessage::NextParamBank ||
@@ -842,15 +848,104 @@ WizardGenerationResult MfTwisterControllerWizard::GenerateTypedProfile(
     return {.controller = std::move(controller)};
 }
 
-const std::vector<ControllerWizardDescriptor>& ControllerWizardRegistry() {
-    static const std::vector<ControllerWizardDescriptor> registry = {
-        ControllerWizardDescriptor{
+namespace {
+
+// The form an app default's wizard presents: no fields, since the default's
+// config is fixed and nothing on it is user-editable.
+class AppDefaultConfigForm final : public ControllerConfigForm {
+public:
+    explicit AppDefaultConfigForm(std::string wizardId) : wizardId_(std::move(wizardId)) {}
+
+    std::string_view WizardId() const override { return wizardId_; }
+
+    ui::NodeTree BuildTree() override {
+        namespace Layout = TwisterFormLayout;
+        const ui::Bounds preview{0.0f, 0.0f, Layout::kPreviewSurfaceWidth, Layout::kPreviewSurfaceHeight};
+        ui::Builder builder;
+        builder.Root(wizardId_ + ".form", preview);
+        return builder.Build(preview);
+    }
+
+    void SetActionHandler(ActionHandler handler) override { actionHandler_ = std::move(handler); }
+
+    void DispatchAction(const ui::Action& action) override {
+        if (actionHandler_) {
+            actionHandler_(action);
+        }
+    }
+
+    bool Validate(std::string& error) const override {
+        error.clear();
+        return true;
+    }
+
+private:
+    std::string wizardId_;
+    ActionHandler actionHandler_;
+};
+
+// The wizard behind an app default's Layout combo entry: it does not derive
+// its result from any form input, only from the default's own config, so it
+// implements ControllerWizard directly rather than through
+// TypedControllerWizard.
+class AppDefaultControllerWizard final : public ControllerWizard {
+public:
+    AppDefaultControllerWizard(std::string id, MidiProfileKind kind, MidiControllerProfileConfig config)
+        : id_(std::move(id)), kind_(kind), config_(std::move(config)) {}
+
+    std::string_view Id() const override { return id_; }
+
+    std::unique_ptr<ControllerConfigForm>
+    ConfigForm(const std::optional<MidiControllerSlot>&) const override {
+        return std::make_unique<AppDefaultConfigForm>(id_);
+    }
+
+    WizardGenerationResult GenerateProfile(
+        const ControllerConfigForm&, const WizardGenerationContext& context) const override {
+        MidiControllerSlot controller;
+        controller.name = context.name;
+        controller.kind = kind_;
+        controller.disposition = MidiControllerDisposition::Active;
+        controller.wizardId = id_;
+        controller.config = config_;
+        controller.input = context.input;
+        controller.output = context.output;
+        return {.controller = std::move(controller)};
+    }
+
+private:
+    std::string id_;
+    MidiProfileKind kind_;
+    MidiControllerProfileConfig config_;
+};
+
+}  // namespace
+
+std::vector<ControllerWizardDescriptor> MakeControllerWizardRegistry(const MidiAppCatalog& catalog) {
+    if (catalog.deviceDefaults.empty()) {
+        return {ControllerWizardDescriptor{
             .id = std::string(kMfTwisterWizardId),
             .displayName = std::string(kMfTwisterDisplayName),
             .kind = MidiProfileKind::MfTwister,
             .inputAliases = {std::string(kMfTwisterAlias)},
             .outputAliases = {std::string(kMfTwisterAlias)},
             .factory = [] { return std::make_unique<MfTwisterControllerWizard>(); }}};
+    }
+
+    std::vector<ControllerWizardDescriptor> registry;
+    registry.reserve(catalog.deviceDefaults.size());
+    for (const MidiAppDeviceDefault& deviceDefault : catalog.deviceDefaults) {
+        registry.push_back(ControllerWizardDescriptor{
+            .id = deviceDefault.id,
+            .displayName = deviceDefault.displayName,
+            .kind = deviceDefault.kind,
+            .inputAliases = deviceDefault.inputAliases,
+            .outputAliases = deviceDefault.outputAliases,
+            .factory = [deviceDefault] {
+                return std::make_unique<AppDefaultControllerWizard>(
+                    deviceDefault.id, deviceDefault.kind, deviceDefault.config);
+            }});
+    }
     return registry;
 }
 
@@ -892,8 +987,8 @@ WizardDiscovery DiscoverControllerWizards(
     return discovery;
 }
 
-std::unique_ptr<ControllerWizard> MakeControllerWizard(std::string_view id) {
-    const std::vector<ControllerWizardDescriptor>& registry = ControllerWizardRegistry();
+std::unique_ptr<ControllerWizard> MakeControllerWizard(
+    const std::vector<ControllerWizardDescriptor>& registry, std::string_view id) {
     for (const ControllerWizardDescriptor& descriptor : registry) {
         if (descriptor.id == id) {
             if (!descriptor.factory) {

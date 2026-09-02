@@ -161,6 +161,12 @@ public:
         manager_.SetParameterMessageOutBus(&parameterMessageOutBus_);
         uiBus_.SetGridManager(&gridManager_);
         midiBus_.SetGridManager(&gridManager_);
+        if constexpr (HasMidiCatalog<App>) {
+            midiCatalog_ = app_.MidiCatalog();
+            const bool forwardPress = !midiCatalog_.encoderPressAction.empty();
+            uiBus_.SetAppActionOut(&parameterMessageOutBus_, forwardPress);
+            midiBus_.SetAppActionOut(&parameterMessageOutBus_, forwardPress);
+        }
         patchManager_.SetBuses(&patchInputBus_, &patchOutputBus_);
         serializationContext_.arena = &serializationArena_;
         serializationContext_.initialArenaCapacity = initialArenaCapacity;
@@ -365,6 +371,7 @@ public:
                 PatchMessageIn stashed = std::move(*pendingPatchMessage_);
                 pendingPatchMessage_.reset();
                 PatchApplyStatus retryStatus;
+                std::optional<MidiInstrumentConfig> loadedInstrument;
                 {
                     // Patch-message application is a rare, user-initiated
                     // event within the sanctioned patch-boundary non-RT
@@ -377,8 +384,10 @@ public:
                     const std::lock_guard<std::mutex> lock(audioDeviceStateMutex_);
                     retryStatus = ApplyPatchMessageAndNotifyApp(stashed, manager_, instrumentConfig_, defaultInstrumentConfig_,
                                                     audioDeviceState_, defaultAudioDeviceState_, patchOutputBus_,
-                                                    serializationContext_);
+                                                    serializationContext_, midiCatalog_.patchCarriesMappings,
+                                                    midiCatalog_.patchCarriesMappings ? &loadedInstrument : nullptr);
                 }
+                StashLoadedPatchInstrument(loadedInstrument);
                 LogPatchApplyOutcome(stashed, retryStatus);
                 if (retryStatus == PatchApplyStatus::Applied || retryStatus == PatchApplyStatus::Reverted) {
                     DrainPatchInputBus();
@@ -488,6 +497,31 @@ public:
     void MessageThreadTick() {
         ParameterMessageOut parameterMessage;
         while (parameterMessageOutBus_.Pop(parameterMessage)) {
+            // App actions and forwarded encoder presses arrive here from the
+            // audio thread and are dispatched to the app's surface on this
+            // thread.
+            if constexpr (HasMidiCatalog<App>) {
+                if (parameterMessage.type == ParameterMessageOut::Type::AppAction) {
+                    if (parameterMessage.appActionIx < midiCatalog_.actions.size()) {
+                        const MidiAppAction& action = midiCatalog_.actions[parameterMessage.appActionIx];
+                        std::string value = action.value;
+                        if (action.analogRange.has_value()) {
+                            const float min = action.analogRange->first;
+                            const float max = action.analogRange->second;
+                            value = std::to_string(min + parameterMessage.value * (max - min));
+                        }
+                        ui::Action dispatched = ui::Action::WithValue(action.action, value);
+                        app_.PortableSurface().DispatchAction(dispatched);
+                    }
+                    continue;
+                }
+                if (parameterMessage.type == ParameterMessageOut::Type::AppEncoderPress) {
+                    ui::Action dispatched = ui::Action::WithValue(midiCatalog_.encoderPressAction,
+                                                                    std::to_string(parameterMessage.position));
+                    app_.PortableSurface().DispatchAction(dispatched);
+                    continue;
+                }
+            }
             if (parameterMessage.type != ParameterMessageOut::Type::ParameterStorageBatchNeeded ||
                 parameterMessage.group == nullptr) {
                 continue;
@@ -514,6 +548,23 @@ public:
             // the session log.
             INFO("MessageThreadTick: patch command result status=%s path=%s",
                  PatchCommandStatusName(patchResult.status), patchResult.path.string().c_str());
+        }
+
+        // A loaded patch's midiInstrument section (staged by the patch
+        // drain through StashLoadedPatchInstrument, only ever set for an app
+        // whose catalog declares patchCarriesMappings) replaces the live
+        // instrument here, on the message thread, through EditInstrument --
+        // never applied by the patch-apply call itself.
+        std::optional<MidiInstrumentConfig> instrumentToApply;
+        {
+            const std::lock_guard<std::mutex> lock(pendingPatchInstrumentMutex_);
+            instrumentToApply = std::move(pendingPatchInstrument_);
+            pendingPatchInstrument_.reset();
+        }
+        if (instrumentToApply.has_value()) {
+            EditInstrument([&instrumentToApply](MidiInstrumentConfig& live) {
+                live = std::move(*instrumentToApply);
+            });
         }
 
         for (MidiControllerProfileResult& processors : midiProcessors_) {
@@ -548,7 +599,7 @@ public:
                                                        std::memory_order_acq_rel, std::memory_order_relaxed)) {
             // Null-check both buffers exactly as ProcessBlock's publish
             // site does (design 1.1 trace obligation: mirror
-            // Engine.hpp:415/:418) — Initialize() may not have run yet, so
+            // Engine.hpp:424/:427) — Initialize() may not have run yet, so
             // uiState_/gridUIState_ can still be nullptr here.
             if (uiState_ != nullptr) {
                 manager_.PopulateUIState(*uiState_);
@@ -570,6 +621,7 @@ public:
     }
 
     App& Application() { return app_; }
+    const MidiAppCatalog& MidiCatalog() const { return midiCatalog_; }
     AppContext& Context() { return context_; }
     ParameterManager& Manager() { return manager_; }
     GridManager& GridManagerForTest() { return gridManager_; }
@@ -906,10 +958,14 @@ public:
                 rebuilt.push_back(CreateBlacklistedMidiControllerProfile());
                 continue;
             }
+            MidiControllerProfileConfig config = controllers[ix].config;
+            if constexpr (HasMidiCatalog<App>) {
+                ResolveAppActionsAgainstCatalog(config);
+            }
             // Instrument controller slots are stable route identities, and
             // MidiSender uses the same slot ordinal as its sink index. Keep
             // both arguments explicit even while their values are equal.
-            rebuilt.push_back(CreateMidiControllerProfile(controllers[ix].config, &midiBus_, &midiSender_,
+            rebuilt.push_back(CreateMidiControllerProfile(config, &midiBus_, &midiSender_,
                                                            &runtimeUIState_, timestampProvider_, ix,
                                                            &absoluteFeedbackCoordinator_, ix,
                                                            controllers[ix].kind));
@@ -972,6 +1028,43 @@ public:
 private:
     void PublishClockDiagnostics() noexcept {
         clockDiagnosticsPublication_.Publish(masterClock_.DiagnosticsSnapshot());
+    }
+
+    // Resolves every AppAction row of one controller's profile config
+    // against midiCatalog_, called from RebuildMidiProcessors on a copy of
+    // the slot's persisted config (never on instrumentConfig_ itself, so an
+    // action the running catalog does not know about stays in the saved
+    // instrument and comes back once a later app version adds it). A row
+    // whose (action, value) the catalog has sets its resolved index; a row
+    // it does not have is dropped from the copy, logged once by name.
+    void ResolveAppActionsAgainstCatalog(MidiControllerProfileConfig& config) {
+        for (auto it = config.systemMessages.begin(); it != config.systemMessages.end();) {
+            if (it->press.type != MessageIn::Type::AppAction) {
+                ++it;
+                continue;
+            }
+            if (const auto ix = FindMidiAppAction(midiCatalog_, it->appAction, it->appActionValue)) {
+                it->press.appActionIx = *ix;
+                ++it;
+            } else {
+                INFO("RebuildMidiProcessors: dropping unresolved app action action=%s value=%s",
+                     it->appAction.c_str(), it->appActionValue.c_str());
+                it = config.systemMessages.erase(it);
+            }
+        }
+        if (config.analogInput.has_value()) {
+            std::vector<AnalogAppActionMapping>& appActions = config.analogInput->appActions;
+            for (auto it = appActions.begin(); it != appActions.end();) {
+                if (const auto ix = FindMidiAppAction(midiCatalog_, it->appAction, it->appActionValue)) {
+                    it->appActionIx = *ix;
+                    ++it;
+                } else {
+                    INFO("RebuildMidiProcessors: dropping unresolved app action action=%s value=%s",
+                         it->appAction.c_str(), it->appActionValue.c_str());
+                    it = appActions.erase(it);
+                }
+            }
+        }
     }
 
     static bool IsRealtimeMessage(const MessageIn& message) noexcept {
@@ -1086,12 +1179,15 @@ private:
         PatchMessageIn patchMessage;
         while (patchInputBus_.Pop(patchMessage)) {
             PatchApplyStatus status;
+            std::optional<MidiInstrumentConfig> loadedInstrument;
             {
                 const std::lock_guard<std::mutex> lock(audioDeviceStateMutex_);
                 status = ApplyPatchMessageAndNotifyApp(patchMessage, manager_, instrumentConfig_, defaultInstrumentConfig_,
                                            audioDeviceState_, defaultAudioDeviceState_, patchOutputBus_,
-                                           serializationContext_);
+                                           serializationContext_, midiCatalog_.patchCarriesMappings,
+                                           midiCatalog_.patchCarriesMappings ? &loadedInstrument : nullptr);
             }
+            StashLoadedPatchInstrument(loadedInstrument);
             LogPatchApplyOutcome(patchMessage, status);
             if (status == PatchApplyStatus::ArenaExhausted) {
                 pendingPatchMessage_ = std::move(patchMessage);
@@ -1183,24 +1279,45 @@ private:
         return status;
     }
 
+    // Publishes a loaded patch's instrument (populated by the
+    // ApplyPatchMessageAndNotifyApp call this local optional was just passed
+    // to) into pendingPatchInstrument_ for MessageThreadTick to apply. A
+    // no-op when nothing was staged -- a revert/serialize message, a patch
+    // without a midiInstrument section, or an app whose catalog does not set
+    // patchCarriesMappings. Safe to call from the audio thread: this is the
+    // same rare, user-initiated patch-boundary window audioDeviceStateMutex_
+    // is already documented to accept a lock in on the audio thread (see its
+    // doc comment, and the ProcessBlock retry-stash branch above it).
+    void StashLoadedPatchInstrument(std::optional<MidiInstrumentConfig>& loaded) {
+        if (!loaded.has_value()) {
+            return;
+        }
+        const std::lock_guard<std::mutex> lock(pendingPatchInstrumentMutex_);
+        pendingPatchInstrument_ = std::move(loaded);
+    }
+
     void ApplyPendingPatchMessages() {
         PatchMessageIn message;
         while (patchInputBus_.Pop(message)) {
             PatchApplyStatus status;
+            std::optional<MidiInstrumentConfig> loadedInstrument;
             {
                 const std::lock_guard<std::mutex> lock(audioDeviceStateMutex_);
                 status = ApplyPatchMessageAndNotifyApp(message, manager_, instrumentConfig_, defaultInstrumentConfig_,
                                            audioDeviceState_, defaultAudioDeviceState_, patchOutputBus_,
-                                           serializationContext_);
+                                           serializationContext_, midiCatalog_.patchCarriesMappings,
+                                           midiCatalog_.patchCarriesMappings ? &loadedInstrument : nullptr);
                 if (status == PatchApplyStatus::ArenaExhausted) {
                     // Pre-audio only: growing here is safe because the audio
                     // thread has not started running ProcessBlock yet.
                     serializationArena_.GrowAndReset();
                     status = ApplyPatchMessageAndNotifyApp(message, manager_, instrumentConfig_, defaultInstrumentConfig_,
                                                audioDeviceState_, defaultAudioDeviceState_, patchOutputBus_,
-                                               serializationContext_);
+                                               serializationContext_, midiCatalog_.patchCarriesMappings,
+                                               midiCatalog_.patchCarriesMappings ? &loadedInstrument : nullptr);
                 }
             }
+            StashLoadedPatchInstrument(loadedInstrument);
         }
     }
 
@@ -1229,8 +1346,12 @@ private:
     // RebuildMidiProcessors()'s doc comment). LiveInstrument()/EditInstrument()
     // are the pre-audio/locked read and message-thread write surface;
     // InstrumentSnapshot() is the locked running-state read surface (use this
-    // one once audio may be live). Patch files no longer contain active MIDI
-    // configuration, so patch load/revert leaves this member untouched.
+    // one once audio may be live). ApplyPatchMessage/LoadPatchJSON never write
+    // this member directly, whether or not the app's patch files carry an
+    // instrument section. When they do (midiCatalog_.patchCarriesMappings) and
+    // a load parses one, the parsed instrument is staged in
+    // pendingPatchInstrument_ and applied here only later, on the message
+    // thread, through EditInstrument.
     MidiInstrumentConfig instrumentConfig_;
     // Default = the app's Init-configured instrument; revert/new restore
     // this. Snapshotted from instrumentConfig_ in Initialize(), immediately
@@ -1252,6 +1373,23 @@ private:
     // (patchInputBus_.Pop() returning false costs nothing extra; see
     // DrainPatchInputBus's doc comment).
     mutable std::mutex audioDeviceStateMutex_;
+
+    // Guards pendingPatchInstrument_ (below) only. A loaded patch's
+    // midiInstrument section, once parsed, is staged here by whichever
+    // thread drains patchInputBus_ (audio-thread ProcessBlock/
+    // DrainPatchInputBus, or the pre-audio ApplyPendingPatchMessages) and
+    // taken by MessageThreadTick to apply through EditInstrument. Separate
+    // from audioDeviceStateMutex_ because that lock is already held for the
+    // duration of the ApplyPatchMessage call itself; this one is taken only
+    // afterward, briefly, to publish the result -- the same rare,
+    // user-initiated patch-boundary window audioDeviceStateMutex_ is
+    // documented to accept a lock in on the audio thread.
+    mutable std::mutex pendingPatchInstrumentMutex_;
+    // Set only when a loaded patch's midiInstrument section parsed
+    // (implies midiCatalog_.patchCarriesMappings, the only case
+    // ApplyPatchMessage is asked to parse one). Cleared once
+    // MessageThreadTick takes it.
+    std::optional<MidiInstrumentConfig> pendingPatchInstrument_;
 
     // Engine-owned audio device selection. Hosts update it through
     // SetAudioDeviceFromHost; runtime configuration loading seeds it during
@@ -1275,6 +1413,9 @@ private:
     RuntimeDataPaths dataPaths_;
     AppContext context_;
     App app_;
+    // Empty unless App declares MidiCatalog() (HasMidiCatalog<App>); read
+    // once, in the constructor.
+    MidiAppCatalog midiCatalog_;
     std::unique_ptr<ParameterManager::UIState> uiState_;
     std::unique_ptr<GridManager::UIState> gridUIState_;
     RuntimeUIState runtimeUIState_;

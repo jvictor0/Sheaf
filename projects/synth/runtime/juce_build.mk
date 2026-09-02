@@ -48,7 +48,8 @@ SYNTH_RUNTIME_SRC := $(SYNTH_ROOT)/runtime/HostDataPaths.cpp
 # JUCE target compiles against (RuntimeConfig, AudioBlock and its input views,
 # Engine<App>). They were absent from this list, so an edit to the contract
 # itself did not rebuild the apps or the JUCE test binaries that depend on it.
-SYNTH_HEADERS := $(SYNTH_ROOT)/include/synth/AppConcepts.hpp $(SYNTH_ROOT)/include/synth/AppContext.hpp \
+SYNTH_HEADERS := $(SYNTH_ROOT)/include/synth/AppConcepts.hpp $(SYNTH_ROOT)/include/synth/MidiAppCatalog.hpp \
+	$(SYNTH_ROOT)/include/synth/AppContext.hpp \
 	$(SYNTH_ROOT)/include/synth/Engine.hpp \
 	$(SYNTH_ROOT)/include/synth/AtomicColor.hpp $(SYNTH_ROOT)/include/synth/ButtonGrid.hpp \
 	$(SYNTH_ROOT)/include/synth/ParameterModulation.hpp $(SYNTH_ROOT)/include/synth/MidiController.hpp \

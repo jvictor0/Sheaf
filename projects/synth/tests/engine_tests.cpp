@@ -2961,6 +2961,434 @@ TEST_CASE(engine_instrument_snapshot_is_deep_copy_equal_to_live_instrument) {
     EngineTestApp::wantEncoderMidiInput = false;  // restore default for subsequent tests
 }
 
+namespace {
+
+// Records every dispatched action so tests can assert what the engine sent
+// to the app's own surface.
+struct MidiCatalogTestSurface final : synth::ui::Surface {
+    std::vector<synth::ui::Action> dispatched;
+
+    synth::ui::NodeTree BuildTree() override {
+        constexpr synth::ui::Bounds bounds{0.0f, 0.0f, 100.0f, 100.0f};
+        synth::ui::Builder builder;
+        builder.Root("midi-catalog-test.root", bounds);
+        return builder.Build(bounds);
+    }
+    void SetActionHandler(ActionHandler) override {}
+    void DispatchAction(const synth::ui::Action& action) override { dispatched.push_back(action); }
+};
+
+// An app with a MIDI catalog: satisfies HasMidiCatalog<App> and, via
+// PortableSurface(), SynthApplication<App>. Its bank/slot layout gives
+// position 5 a pressable encoder with one modulator, so a ParamPush that
+// reaches the library (catalog forwarding off) opens the modulation view,
+// exactly as it does for an app without a catalog.
+struct MidiCatalogTestApp {
+    static inline synth::MidiAppCatalog catalog;
+    synth::AppContext* context = nullptr;
+    synth::BankSlot* probeSlot = nullptr;
+    MidiCatalogTestSurface surface;
+
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "MidiCatalogTest";
+        config.numAudioOutputs = 2;
+        return config;
+    }
+
+    void Init(synth::AppContext* ctx) {
+        context = ctx;
+        auto& group = ctx->parameterManager->CreateGroup({.numVoices = 1,
+                                                           .numModulators = 1,
+                                                           .numScenes = 1,
+                                                           .maxParameters = 4});
+        for (synth::ModulatorMetadata& metadata : group.GetModulators().Metadata()) {
+            metadata.connected = true;
+        }
+        auto& carrier = ctx->parameterManager->CreateParameter(group, {.name = "Carrier", .defaultValue = 0.4f});
+        auto& bank = ctx->parameterManager->CreateBank();
+        bank.AddMapping(5, carrier);
+        probeSlot = &ctx->parameterManager->CreateBankSlot();
+        for (synth::PhysicalEncoderId encoderId = 0; encoderId <= 5; ++encoderId) {
+            probeSlot->AddPhysicalEncoder(encoderId);
+        }
+        probeSlot->SelectBank(&bank);
+    }
+    void ProcessBlock(synth::AudioBlock&) {}
+    synth::ui::Surface& PortableSurface() { return surface; }
+    synth::MidiAppCatalog MidiCatalog() const { return catalog; }
+};
+
+}  // namespace
+
+TEST_CASE(engine_dispatches_catalog_app_actions_to_surface) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.plain", .value = "3", .label = "Plain"});
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.analog",
+                                                    .value = "",
+                                                    .label = "Analog",
+                                                    .analogRange = std::make_pair(30.0f, 300.0f)});
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::AppAction(0, 0, 0.0f)));
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::AppAction(0, 1, 0.5f)));
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    const auto& dispatched = engine.Application().surface.dispatched;
+    REQUIRE_TRUE(dispatched.size() == 2);
+    REQUIRE_TRUE(dispatched[0].name == "test.plain");
+    REQUIRE_TRUE(dispatched[0].value == "3");
+    REQUIRE_TRUE(dispatched[1].name == "test.analog");
+    REQUIRE_TRUE(dispatched[1].value == std::to_string(165.0f));
+}
+
+TEST_CASE(engine_app_action_out_of_range_dispatches_nothing) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.plain", .value = "3", .label = "Plain"});
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::AppAction(0, 5, 0.0f)));
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(engine.Application().surface.dispatched.empty());
+}
+
+TEST_CASE(engine_rebuild_resolves_app_action_rows_and_drops_unknown_ones) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.known", .value = "1", .label = "Known"});
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "catalog-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+
+        synth::MidiControllerSystemMessageAssociation known;
+        known.control = synth::MidiControlAddress{.channel = 0, .cc = 10};
+        known.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+        known.appAction = "test.known";
+        known.appActionValue = "1";
+        known.feedback = known.press;
+
+        synth::MidiControllerSystemMessageAssociation unknown;
+        unknown.control = synth::MidiControlAddress{.channel = 0, .cc = 11};
+        unknown.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+        unknown.appAction = "test.unknown";
+        unknown.appActionValue = "9";
+        unknown.feedback = unknown.press;
+
+        slot.config.systemMessages.push_back(known);
+        slot.config.systemMessages.push_back(unknown);
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    // The persisted instrument keeps both rows, including the one the
+    // catalog cannot currently resolve, so a later catalog that knows it
+    // gets it back.
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    REQUIRE_TRUE(snapshot.controllers.front().config.systemMessages.size() == 2);
+
+    synth::MidiInProcessor* processor = engine.MidiInputProcessor(0);
+    REQUIRE_TRUE(processor != nullptr);
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+
+    processor->Process(synth::BasicMidi::CC(0, 0, 10, 127));
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    const auto& dispatched = engine.Application().surface.dispatched;
+    REQUIRE_TRUE(dispatched.size() == 1);
+    REQUIRE_TRUE(dispatched[0].name == "test.known");
+
+    // The unresolved row was dropped from the built profile, so its control
+    // address has no association left to match.
+    processor->Process(synth::BasicMidi::CC(0, 0, 11, 127));
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+    REQUIRE_TRUE(engine.Application().surface.dispatched.size() == 1);
+}
+
+TEST_CASE(engine_forwards_encoder_press_to_catalog_action_instead_of_opening_modulation_view) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.encoderPressAction = "test.press";
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::ParamPush(0, 0, 5)));
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    const auto& dispatched = engine.Application().surface.dispatched;
+    REQUIRE_TRUE(dispatched.size() == 1);
+    REQUIRE_TRUE(dispatched[0].name == "test.press");
+    REQUIRE_TRUE(dispatched[0].value == "5");
+    REQUIRE_TRUE(!engine.Application().probeSlot->SelectedBank()->ShowingModulation());
+}
+
+TEST_CASE(engine_encoder_press_without_catalog_forwarding_opens_modulation_view_as_today) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.encoderPressAction.clear();
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::ParamPush(0, 0, 5)));
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(engine.Application().surface.dispatched.empty());
+    REQUIRE_TRUE(engine.Application().probeSlot->SelectedBank()->ShowingModulation());
+}
+
+TEST_CASE(engine_patch_load_restores_saved_instrument_when_catalog_carries_mappings) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = true;
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "saved-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "saved-in";
+        slot.output.identifier = "saved-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    const std::filesystem::path saveDir =
+        std::filesystem::temp_directory_path() / "engine-patch-carries-instrument-save-dir";
+    std::filesystem::remove_all(saveDir);
+
+    const synth::PatchCommandResult saveResult = engine.Patches().SavePatchAs(saveDir);
+    REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::Pending);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    const synth::PatchCommandResult written = engine.Patches().ProcessResponses();
+    REQUIRE_TRUE(written.status == synth::PatchCommandStatus::Written);
+
+    // The saved file itself carries the instrument under schemaVersion 2 --
+    // confirm the real file on disk, not just the engine's in-memory path.
+    const std::string savedText = synth::LoadPatchVersionText(written.path);
+    synth::JsonArena checkArena(65536);
+    const synth::JSON savedRoot = checkArena.Loads(savedText.c_str());
+    REQUIRE_TRUE(!savedRoot.IsNull());
+    REQUIRE_TRUE(savedRoot.Get("schemaVersion").IntegerValue() == 2);
+    REQUIRE_TRUE(!savedRoot.Get("midiInstrument").IsNull());
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        instrument.controllers.clear();
+        synth::MidiControllerSlot slot;
+        slot.name = "changed-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "changed-in";
+        slot.output.identifier = "changed-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+    REQUIRE_TRUE(engine.InstrumentSnapshot().controllers.front().name == "changed-controller");
+
+    const synth::PatchCommandResult loadResult = engine.Patches().LoadPatch(saveDir);
+    REQUIRE_TRUE(loadResult.status == synth::PatchCommandStatus::Ok);
+
+    {
+        // ProcessBlock's drain parses the midiInstrument section and stages
+        // it; only MessageThreadTick's EditInstrument call actually replaces
+        // the live instrument.
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    REQUIRE_TRUE(engine.InstrumentSnapshot().controllers.front().name == "changed-controller");
+    engine.MessageThreadTick();
+
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    REQUIRE_TRUE(snapshot.controllers.front().name == "saved-controller");
+    REQUIRE_TRUE(snapshot.controllers.front().input.identifier == "saved-in");
+    REQUIRE_TRUE(snapshot.controllers.front().output.identifier == "saved-out");
+
+    std::filesystem::remove_all(saveDir);
+}
+
+TEST_CASE(engine_patch_load_leaves_instrument_untouched_when_catalog_does_not_carry_mappings) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = false;
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "saved-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "saved-in";
+        slot.output.identifier = "saved-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    const std::filesystem::path saveDir =
+        std::filesystem::temp_directory_path() / "engine-patch-no-carry-instrument-save-dir";
+    std::filesystem::remove_all(saveDir);
+
+    const synth::PatchCommandResult saveResult = engine.Patches().SavePatchAs(saveDir);
+    REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::Pending);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    const synth::PatchCommandResult written = engine.Patches().ProcessResponses();
+    REQUIRE_TRUE(written.status == synth::PatchCommandStatus::Written);
+
+    // Without a catalog that carries mappings, the saved file stays
+    // version 1 with no midiInstrument section, byte-for-byte what a
+    // parameter-only patch has always written.
+    const std::string savedText = synth::LoadPatchVersionText(written.path);
+    synth::JsonArena checkArena(65536);
+    const synth::JSON savedRoot = checkArena.Loads(savedText.c_str());
+    REQUIRE_TRUE(!savedRoot.IsNull());
+    REQUIRE_TRUE(savedRoot.Get("schemaVersion").IntegerValue() == 1);
+    REQUIRE_TRUE(savedRoot.Get("midiInstrument").IsNull());
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        instrument.controllers.clear();
+        synth::MidiControllerSlot slot;
+        slot.name = "changed-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "changed-in";
+        slot.output.identifier = "changed-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    const synth::PatchCommandResult loadResult = engine.Patches().LoadPatch(saveDir);
+    REQUIRE_TRUE(loadResult.status == synth::PatchCommandStatus::Ok);
+
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+
+    // No section was ever written, so nothing is staged to apply: the
+    // instrument the operator changed to after saving stays live.
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    REQUIRE_TRUE(snapshot.controllers.front().name == "changed-controller");
+    REQUIRE_TRUE(snapshot.controllers.front().input.identifier == "changed-in");
+    REQUIRE_TRUE(snapshot.controllers.front().output.identifier == "changed-out");
+
+    std::filesystem::remove_all(saveDir);
+}
+
+TEST_CASE(engine_ignores_version_two_midi_instrument_section_when_catalog_does_not_carry_mappings) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = false;
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        instrument.controllers.clear();
+        synth::MidiControllerSlot slot;
+        slot.name = "changed-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "changed-in";
+        slot.output.identifier = "changed-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    // A schemaVersion-2 patch file whose midiInstrument section is valid and
+    // carries a different controller -- written directly, not through this
+    // engine (whose catalog never asks BuildPatchJSON to carry the
+    // section), so the file's presence alone is what this test exercises.
+    synth::ParameterManager scratchManager;
+    auto& scratchGroup = scratchManager.CreateGroup(
+        {.numVoices = 1, .numModulators = 1, .numScenes = 1, .maxParameters = 4});
+    scratchManager.CreateParameter(scratchGroup, {.name = "Carrier", .defaultValue = 0.4f});
+    scratchManager.CaptureDefaultControlState();
+    scratchManager.ComputeAllParameters();
+
+    synth::MidiInstrumentConfig sectionInstrument;
+    synth::MidiControllerSlot sectionSlot;
+    sectionSlot.name = "smuggled-controller";
+    sectionSlot.kind = synth::MidiProfileKind::Generic;
+    sectionSlot.input.identifier = "smuggled-in";
+    sectionSlot.output.identifier = "smuggled-out";
+    sectionInstrument.controllers.push_back(std::move(sectionSlot));
+
+    synth::JsonArena buildArena(64 * 1024);
+    synth::JSON root = synth::BuildPatchJSON(buildArena, "Smuggled Patch", scratchManager, sectionInstrument,
+                                              /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(!root.IsNull());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+    char* dumped = root.Dumps(JSON_ENCODE_ANY);
+    REQUIRE_TRUE(dumped != nullptr);
+    const std::string jsonText(dumped);
+    std::free(dumped);
+
+    const std::filesystem::path patchDir =
+        std::filesystem::temp_directory_path() / "engine-no-carry-smuggled-instrument-dir";
+    std::filesystem::remove_all(patchDir);
+    synth::SavePatchVersionInDirectory(patchDir, jsonText, std::chrono::system_clock::now());
+
+    const synth::PatchCommandResult loadResult = engine.Patches().LoadPatch(patchDir);
+    REQUIRE_TRUE(loadResult.status == synth::PatchCommandStatus::Ok);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+
+    // The section was never even parsed (the catalog does not carry
+    // mappings), so nothing was staged to apply: the live instrument stays
+    // exactly what it was before the load.
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    REQUIRE_TRUE(snapshot.controllers.front().name == "changed-controller");
+    REQUIRE_TRUE(snapshot.controllers.front().input.identifier == "changed-in");
+    REQUIRE_TRUE(snapshot.controllers.front().output.identifier == "changed-out");
+
+    std::filesystem::remove_all(patchDir);
+}
+
 int main() {
     int failed = 0;
     for (const auto& test : Registry()) {

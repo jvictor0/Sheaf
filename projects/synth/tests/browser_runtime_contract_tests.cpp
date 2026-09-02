@@ -986,29 +986,10 @@ void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
             "browser Rename immediately reports a real runtime-configuration save");
     requirePersisted(3, "browser Rename persists the renamed controller record");
 
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerReconfigure(2));
-    fixture.runtime.DispatchAction("controller-wizard.twister.encoder-slot", "7");
-    fixture.runtime.Engine().EditInstrument([](synth::MidiInstrumentConfig& instrument) {
-        instrument.controllers[2].output.identifier = "stale-output";
-    });
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
-    Require(!fixture.runtime.ConsumePersistenceDirty(),
-            "refused browser reconfigure does not report a runtime-configuration save");
-    synth::MidiInstrumentConfig refusedPersisted;
-    synth::AudioDeviceState refusedAudio;
-    synth::SyncConfig refusedSync;
-    Require(synth::LoadRuntimeConfigFile(
-                fixture.Paths().configFile, refusedPersisted, refusedAudio, refusedSync) ==
-                synth::RuntimeConfigFileStatus::Ok &&
-                refusedPersisted.controllers[2].output.identifier == "twister-out",
-            "refused browser reconfigure leaves the previously persisted configuration authoritative");
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardCancel, "");
-
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerReconfigure(2));
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
+    dispatchNode(synth::runtime_ui::NodeIds::ControllerLayout(2), ":0");
     Require(fixture.runtime.ConsumePersistenceDirty(),
-            "browser Reconfigure immediately reports a real runtime-configuration save");
-    requirePersisted(3, "browser Reconfigure persists the replacement profile");
+            "choosing a layout in the browser immediately reports a real runtime-configuration save");
+    requirePersisted(3, "choosing a layout in the browser persists the replacement profile");
 
     dispatchNode(synth::runtime_ui::NodeIds::ControllerBlacklist(2));
     Require(fixture.runtime.ConsumePersistenceDirty(),

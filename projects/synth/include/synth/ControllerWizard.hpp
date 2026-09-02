@@ -160,10 +160,14 @@ struct ControllerWizardDescriptor {
     std::function<std::unique_ptr<ControllerWizard>()> factory;
 };
 
-const std::vector<ControllerWizardDescriptor>& ControllerWizardRegistry();
+// The registry the Controllers page's Layout combo and discovery draw from:
+// one descriptor per app device default when the catalog supplies any,
+// else the library's single Twister descriptor.
+std::vector<ControllerWizardDescriptor> MakeControllerWizardRegistry(const MidiAppCatalog& catalog);
 WizardDiscovery DiscoverControllerWizards(
     const MidiDeviceList&, const MidiInstrumentConfig&,
     const std::vector<ControllerWizardDescriptor>&);
-std::unique_ptr<ControllerWizard> MakeControllerWizard(std::string_view id);
+std::unique_ptr<ControllerWizard> MakeControllerWizard(
+    const std::vector<ControllerWizardDescriptor>& registry, std::string_view id);
 
 }  // namespace synth

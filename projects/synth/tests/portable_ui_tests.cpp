@@ -2723,9 +2723,9 @@ void Except(std::map<std::string, std::string>& into, std::string id, std::strin
     into.emplace(std::move(id), std::move(reason));
 }
 
-// 12 rows x {input, output, rename_draft}, the two add-row fields, and the 13
-// mapping cells row 0's expanded encoders section publishes. Stated so a new
-// control cannot arrive unexamined under an exception.
+// 12 rows x {input, output, rename_draft, layout}, the two add-row fields,
+// and the 13 mapping cells row 0's expanded encoders section publishes.
+// Stated so a new control cannot arrive unexamined under an exception.
 // A mapping table's cells are identified by their COLUMN HEADING rather than by
 // a per-cell caption, and a caption on every cell would repeat the heading on
 // every row. That is a design, not a residual -- but it is only a design while
@@ -2772,7 +2772,7 @@ std::map<std::string, std::string> MappingCellExceptions(const synth::ui::NodeTr
     return exceptions;
 }
 
-constexpr std::size_t kFixtureControllerExpectedControls = 12 * 3 + 2 + 13;
+constexpr std::size_t kFixtureControllerExpectedControls = 12 * 4 + 2 + 13;
 
 std::map<std::string, std::string> ControllerCaptionExceptions(std::size_t controllers,
                                                                const synth::ui::NodeTree& tree)
