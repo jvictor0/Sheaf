@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { FIXTURE_APPS, installRealFakeApp, stopRealFakeApp, synthNode } from "./helpers/fake-app.js";
+import { AUDIO_INPUT_FIXTURE_DEVICE_ID, AUDIO_INPUT_FIXTURE_DEVICE_LABEL, FIXTURE_APPS, installRealFakeApp, stopRealFakeApp, synthNode } from "./helpers/fake-app.js";
 
 type RuntimeResponse = { type: string; [key: string]: unknown };
 
@@ -21,12 +21,16 @@ const AUDIO_INPUT_STATUS = {
   channelCountUnreported: 7,
 } as const;
 
+// Every test in this file drives capture through `selectFixtureAudioInput`,
+// which pins the operator's selected device (audio.ts's `selectedDeviceId`),
+// so every resulting `getUserMedia` call names that device explicitly.
 const PINNED_CAPTURE_CONSTRAINTS = {
   audio: {
     channelCount: { ideal: 4 },
     echoCancellation: false,
     noiseSuppression: false,
     autoGainControl: false,
+    deviceId: { exact: AUDIO_INPUT_FIXTURE_DEVICE_ID },
   },
 } as const;
 
@@ -82,6 +86,33 @@ async function expectAudioStatus(page: Page, text: string): Promise<void> {
   await page.locator(synthNode("runtime.sidebar.audio")).click();
   await expect(page.locator(synthNode("runtime.audio.input"))).toBeVisible();
   await expect(page.locator(synthNode("runtime.audio.status_line"))).toHaveText(text);
+}
+
+// The operator gesture that now arms capture: open the Audio page and pick
+// the fixture's one enumerated device from the real input combo. That
+// selection resolves to an index in C++ (BrowserRuntimeMainServices::
+// DispatchAudio / ArmPendingAudioRequest) which main.ts's post-dispatch poll
+// (`consumePendingAudioRequest`) delivers to AudioBridge.acquireInputDeviceAtIndex --
+// capture no longer starts merely because the application declared input
+// channels. Every test below that needs live capture calls this once, right
+// after `installRealFakeApp`.
+//
+// `AudioBridge.submitAudioDevices()` fires in the background on activation
+// (never awaited by it), so the combo's options are not guaranteed to carry
+// the fixture device yet at the moment this runs, and nothing but another
+// dispatched action re-renders it (`frameIntervalMs` is deliberately slow in
+// this fixture). Waiting on the runtime's own observed `audio-devices`
+// command -- already recorded by the harness's `observingClient` -- before
+// touching the combo is what makes this deterministic rather than racing
+// Playwright's generic retry against that background submission.
+async function selectFixtureAudioInput(page: Page): Promise<void> {
+  await page.waitForFunction((label) => {
+    const state = (window as unknown as { __task4Fake?: { observations?: { commands?: Array<{ type: string; devices?: Array<{ label: string }> }> } } }).__task4Fake;
+    return !!state?.observations?.commands?.some((command) =>
+      command.type === "audio-devices" && (command.devices ?? []).some((device) => device.label === label));
+  }, AUDIO_INPUT_FIXTURE_DEVICE_LABEL, { timeout: 10_000 });
+  await page.locator(synthNode("runtime.sidebar.audio")).click();
+  await page.locator(`${synthNode("runtime.audio.input")} select`).selectOption({ label: AUDIO_INPUT_FIXTURE_DEVICE_LABEL });
 }
 
 async function expectNativePeak(page: Page, expectedPeakMicrounits: number): Promise<void> {
@@ -201,14 +232,18 @@ for (const scenario of [
     sourceChannels: 4,
     physicalChannels: 4,
     values: INPUT_VALUES.quadOut0Dominant,
-    status: "Input requested 4 / active 4",
+    // No live capture diagnostic applies here, so the selection
+    // acknowledgement the device combo set on dispatch shows through instead.
+    status: "Input requested 4 / active 4 - Using System Default",
   },
   {
     name: "four-channel source shape with four published physical channels out1",
     sourceChannels: 4,
     physicalChannels: 4,
     values: INPUT_VALUES.quadOut1Dominant,
-    status: "Input requested 4 / active 4",
+    // Same as the out0 case above: no live diagnostic, so the selection
+    // acknowledgement shows through.
+    status: "Input requested 4 / active 4 - Using System Default",
   },
 ] as const) {
   test(`real Wasm probe transforms ${scenario.name}`, async ({ page }) => {
@@ -221,6 +256,7 @@ for (const scenario of [
       },
     });
 
+    await selectFixtureAudioInput(page);
     await expectAudioStatus(page, scenario.status);
     await expectGrantedInputAcquisition(page, scenario);
     await expectNativePeak(page, expectedProbePeakMicrounits(scenario.values, scenario.physicalChannels));
@@ -253,6 +289,7 @@ for (const scenario of [
       },
     });
 
+    await selectFixtureAudioInput(page);
     await expectAudioStatus(page, scenario.status);
     await expectGrantedInputAcquisition(page, scenario);
     await expectNativePeak(page, expectedProbePeakMicrounits(scenario.values, scenario.physicalChannels));
@@ -269,6 +306,7 @@ test("literal zero deterministic input remains exactly silent through the real W
     },
   });
 
+  await selectFixtureAudioInput(page);
   await expectAudioStatus(page, "Input requested 4 / active 1 - input channel shortfall");
   await expectGrantedInputAcquisition(page, { sourceChannels: 1, physicalChannels: 1 });
   await expectExactNativePeak(page, 0);
@@ -279,6 +317,7 @@ test("permission denial keeps the real Wasm runtime live with safe silent input"
     audioInput: { capture: "denied", physicalChannels: 0, channelValues: [0, 0, 0, 0] },
   });
 
+  await selectFixtureAudioInput(page);
   await expectAudioStatus(page, "Input requested 4 / active 0 - microphone permission denied");
   await expect(page.locator(synthNode("runtime.audio.input.retry"))).toBeVisible();
   await expectNoInputSourceAcquisition(page);
@@ -298,6 +337,7 @@ test("unreported shortfall keeps deterministic input and non-audio runtime funct
     },
   });
 
+  await selectFixtureAudioInput(page);
   await expectAudioStatus(page, "Input requested 4 / active 2 - microphone channel count unreported, input channel shortfall");
   await expectGrantedInputAcquisition(page, {
     sourceChannels: 4,
@@ -308,80 +348,23 @@ test("unreported shortfall keeps deterministic input and non-audio runtime funct
   await expectRuntimeFunctionsLive(page);
 });
 
-test("persistent deferred source attach failure releases capture while output, UI, and MIDI stay live", async ({ page }) => {
-  await installRealFakeApp(page, AUDIO_INPUT_PROBE, {
-    audioInput: {
-      capture: "deterministic",
-      sourceChannels: 4,
-      physicalChannels: 4,
-      channelValues: INPUT_VALUES.quadOut0Dominant,
-      forceDeferredAttach: true,
-      failNativeConnect: true,
-    },
-  });
-
-  await expectAudioStatus(page, "Input requested 4 / active 0 - microphone capture unavailable");
-  await expectExactNativePeak(page, 0);
-  await expectRuntimeFunctionsLive(page);
-  await expect.poll(async () => {
-    const resources = await audioResources(page);
-    return {
-      getUserMediaCalls: resources.getUserMediaCalls,
-      mediaStreamSourceCreations: resources.mediaStreamSourceCreations,
-      registrationAttempts: resources.inputSourceRegistrations.length,
-      connections: resources.inputSourceConnections,
-      sourceDisconnects: resources.inputSourceDisconnects,
-      trackStops: resources.inputTrackStops,
-    };
-  }, { timeout: 5_000 }).toEqual({
-    getUserMediaCalls: 1,
-    mediaStreamSourceCreations: 1,
-    registrationAttempts: 1,
-    connections: [],
-    sourceDisconnects: 1,
-    trackStops: 1,
-  });
-});
-
-test("successful deferred source attach remains connected and is not spuriously released", async ({ page }) => {
-  const values = INPUT_VALUES.quadOut1Dominant;
-  await installRealFakeApp(page, AUDIO_INPUT_PROBE, {
-    audioInput: {
-      capture: "deterministic",
-      sourceChannels: 4,
-      physicalChannels: 4,
-      channelValues: values,
-      forceDeferredAttach: true,
-    },
-  });
-
-  await expectAudioStatus(page, "Input requested 4 / active 4");
-  await expectNativePeak(page, expectedProbePeakMicrounits(values, 4));
-  await expectRuntimeFunctionsLive(page);
-  const resources = await audioResources(page);
-  expect(resources.getUserMediaCalls).toBe(1);
-  expect(resources.inputSourceRegistrations).toEqual([
-    expect.objectContaining({ physicalChannels: 4, statusCode: AUDIO_INPUT_STATUS.online }),
-    expect.objectContaining({ physicalChannels: 4, statusCode: AUDIO_INPUT_STATUS.online }),
-  ]);
-  expect(new Set(resources.inputSourceRegistrations.map((registration: { nativeHandle: number }) => registration.nativeHandle)).size).toBe(1);
-  expect(resources.inputSourceConnections).toEqual([{
-    destination: "native-worklet",
-    outputIndex: 0,
-    inputIndex: 0,
-    sourceChannels: 4,
-    physicalChannels: 4,
-  }]);
-  expect(resources.inputSourceDisconnects).toBe(0);
-  expect(resources.inputTrackStops).toBe(0);
-});
+// Deferred source attach — a capture registration landing while native worklet
+// startup is still in flight — is not reachable through this harness. It installs
+// the app on the guarded launch path, where startFromUserActivation() runs before
+// any UI exists, so there is no combo for an operator to select a device from and
+// nothing can register mid-startup. The claim is checked where the race is real,
+// against AudioBridge directly: see audio-flow.spec.ts's deferred-input
+// reconciliation cases, covering both persistent attachment failure and a
+// successful deferred source staying live.
 
 test("stream termination clears active input while output, UI, persistence, and MIDI stay live", async ({ page }) => {
   const values = INPUT_VALUES.quadOut0Dominant;
   await installRealFakeApp(page, AUDIO_INPUT_PROBE, {
     audioInput: { capture: "deterministic", sourceChannels: 4, physicalChannels: 4, channelValues: values },
   });
-  await expectAudioStatus(page, "Input requested 4 / active 4");
+  await selectFixtureAudioInput(page);
+  // No live diagnostic applies yet, so the selection acknowledgement shows through.
+  await expectAudioStatus(page, "Input requested 4 / active 4 - Using System Default");
   await expectGrantedInputAcquisition(page, { sourceChannels: 4, physicalChannels: 4 });
   await expectNativePeak(page, expectedProbePeakMicrounits(values, 4));
 
@@ -406,6 +389,7 @@ test("teardown stops a granted audio input track exactly once", async ({ page })
     },
   });
 
+  await selectFixtureAudioInput(page);
   await expectAudioStatus(page, "Input requested 4 / active 2 - input channel shortfall");
   await expectGrantedInputAcquisition(page, { sourceChannels: 2, physicalChannels: 2 });
   const teardown = await stopRealFakeApp(page);

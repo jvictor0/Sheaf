@@ -1050,7 +1050,6 @@ TEST_CASE(smartgrid_dsp_public_headers_are_dependency_clean) {
     #ifdef JUCE_MAJOR_VERSION
     throw std::runtime_error("DSP headers must not include JUCE");
     #endif
-    REQUIRE_TRUE(std::is_default_constructible_v<synth::BoundedAudioBuffer>);
     REQUIRE_TRUE(std::is_default_constructible_v<synth::BitCrusher>);
     REQUIRE_TRUE(std::is_default_constructible_v<synth::Meter>);
     REQUIRE_TRUE(std::is_default_constructible_v<synth::Ola<12>>);
@@ -1257,96 +1256,6 @@ TEST_CASE(noise_modulator_registers_directly_as_pointer_backed_group_source) {
     group.UpdateModValues();
     REQUIRE_TRUE(group.GetModulators().Value(0, 0) == processor.Output(0));
     REQUIRE_TRUE(group.GetModulators().Value(1, 0) == processor.Output(1));
-}
-
-TEST_CASE(bounded_audio_buffer_reads_fractional_midpoints_and_normalized_positions) {
-    synth::BoundedAudioBuffer buffer;
-    buffer.samples = {0.0f, 10.0f, 20.0f};
-
-    REQUIRE_NEAR(buffer.ReadRealTime(0.5), 5.0f, 0.0001f);
-    REQUIRE_NEAR(buffer.ReadRealTime(1.5), 15.0f, 0.0001f);
-    REQUIRE_NEAR(buffer.ReadNormalized(0.25), 5.0f, 0.0001f);
-    REQUIRE_NEAR(buffer.ReadNormalized(1.0), 20.0f, 0.0001f);
-}
-
-TEST_CASE(bounded_audio_buffer_computes_section_extrema_and_clears) {
-    synth::BoundedAudioBuffer buffer;
-    buffer.samples.resize(synth::BoundedAudioBuffer::kNumSections * 2, 0.0f);
-    buffer.samples[0] = -0.25f;
-    buffer.samples[1] = 0.5f;
-    buffer.samples[buffer.samples.size() - 2] = -0.75f;
-    buffer.samples[buffer.samples.size() - 1] = 0.25f;
-
-    buffer.ComputeSectionExtrema();
-
-    REQUIRE_NEAR(buffer.sectionMinimums[0], -0.25f, 0.0001f);
-    REQUIRE_NEAR(buffer.sectionMaximums[0], 0.5f, 0.0001f);
-    REQUIRE_NEAR(buffer.sectionMinimums[synth::BoundedAudioBuffer::kNumSections - 1], -0.75f, 0.0001f);
-    REQUIRE_NEAR(buffer.sectionMaximums[synth::BoundedAudioBuffer::kNumSections - 1], 0.25f, 0.0001f);
-
-    buffer.Clear();
-    REQUIRE_TRUE(buffer.samples.empty());
-    REQUIRE_NEAR(buffer.sectionMinimums[0], 0.0f, 0.0001f);
-    REQUIRE_NEAR(buffer.sectionMaximums[0], 0.0f, 0.0001f);
-}
-
-TEST_CASE(rolling_buffer_reports_min_and_max_over_ring_storage) {
-    synth::RollingBuffer<4> buffer;
-    buffer.Write(1.0f);
-    buffer.Write(-2.0f);
-    buffer.Write(3.0f);
-    buffer.Write(4.0f);
-
-    REQUIRE_NEAR(buffer.Min(), -2.0f, 0.0001f);
-    REQUIRE_NEAR(buffer.Max(), 4.0f, 0.0001f);
-
-    buffer.Write(-5.0f);
-    REQUIRE_NEAR(buffer.Min(), -5.0f, 0.0001f);
-    REQUIRE_NEAR(buffer.Max(), 4.0f, 0.0001f);
-}
-
-TEST_CASE(buffer_resampler_copies_when_rates_match) {
-    const std::vector<float> input{0.0f, 0.25f, -0.5f, 0.75f};
-    std::vector<float> output(input.size(), 0.0f);
-    std::size_t written = 0;
-
-    REQUIRE_TRUE(synth::BufferResampler::OutputFrameCount(input.size(), 48000.0, 48000.0) == input.size());
-    REQUIRE_TRUE(synth::BufferResampler::ResampleToRate(
-        input.data(), input.size(), 48000.0, 48000.0, output.data(), output.size(), &written));
-
-    REQUIRE_TRUE(written == input.size());
-    for (std::size_t i = 0; i < input.size(); ++i) {
-        REQUIRE_NEAR(output[i], input[i], 0.0001f);
-    }
-}
-
-TEST_CASE(buffer_resampler_downsampling_attenuates_high_frequency_content) {
-    auto downsampleRms = [](float normalizedFrequency) {
-        constexpr std::size_t kInputSize = 4096;
-        std::vector<float> input(kInputSize, 0.0f);
-        for (std::size_t i = 0; i < input.size(); ++i) {
-            input[i] = synth::DefaultDspMath::Sin2Pi(normalizedFrequency * static_cast<float>(i));
-        }
-
-        const std::size_t outputCount = synth::BufferResampler::OutputFrameCount(input.size(), 48000.0, 12000.0);
-        std::vector<float> output(outputCount, 0.0f);
-        std::size_t written = 0;
-        REQUIRE_TRUE(synth::BufferResampler::ResampleToRate(
-            input.data(), input.size(), 48000.0, 12000.0, output.data(), output.size(), &written));
-        REQUIRE_TRUE(written == outputCount);
-
-        double energy = 0.0;
-        std::size_t measured = 0;
-        for (std::size_t i = 128; i < output.size(); ++i) {
-            energy += static_cast<double>(output[i]) * static_cast<double>(output[i]);
-            ++measured;
-        }
-        return std::sqrt(energy / static_cast<double>(measured));
-    };
-
-    const double lowFrequencyRms = downsampleRms(0.02f);
-    const double highFrequencyRms = downsampleRms(0.35f);
-    REQUIRE_TRUE(lowFrequencyRms > highFrequencyRms * 8.0);
 }
 
 TEST_CASE(bit_crusher_passes_zero_amount_and_quantizes_at_full_amount) {

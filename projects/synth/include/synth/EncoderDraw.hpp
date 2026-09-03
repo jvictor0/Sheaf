@@ -677,7 +677,10 @@ inline std::vector<DrawCommand> BuildEncoderDrawCommands(const EncoderDrawState&
     };
     commands.push_back(DrawCommand::FillEllipse(
         body,
-        state.hasVisualizerUnderlay ? Color::Rgba(18, 20, 22, 150) : Color::Rgb(18, 20, 22)));
+        state.hasVisualizerUnderlay
+            ? Color::Rgba(synth::kSurfaceBackground.r, synth::kSurfaceBackground.g,
+                          synth::kSurfaceBackground.b, 150)
+            : synth::kSurfaceBackground));
     {
         const float inset = baseRadius * 0.07f;
         commands.push_back(DrawCommand::FillEllipse(

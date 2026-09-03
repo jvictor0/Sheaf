@@ -15,9 +15,19 @@ synth_browser::RuntimeAbi* RuntimeFor(synth_browser_runtime* handle)
 // can name a missing secure context, a permissions-policy block, and a missing
 // launch-owned AudioContext individually (sbw-10). A v3 module rejects those
 // codes, so the launcher must not be able to hand them to one.
+//
+// v6 renamed `synth_browser_consume_pending_audio_input_request` to
+// `synth_browser_consume_pending_audio_request` and added an `outControl`
+// parameter, generalizing the one pending-request slot to also carry an
+// audio output selection alongside input retry/select. A v5 module exports
+// the old one-argument symbol under the old name; a host built against v6
+// would call a symbol that either does not exist on that module or, if it
+// happened to share the old name, would be called with an extra argument the
+// module never reads. The version gate keeps that mismatch from ever being
+// attempted.
 extern "C" std::uint32_t synth_browser_abi_version()
 {
-    return 4;
+    return 6;
 }
 
 // Every Wasm package exports this independently of the shell bundle, so it must
@@ -94,9 +104,16 @@ extern "C" int synth_browser_clear_audio_input_source(synth_browser_runtime* run
                : RuntimeFor(runtime)->ClearAudioInputSource(statusCode);
 }
 
-extern "C" int synth_browser_consume_audio_input_retry(synth_browser_runtime* runtime)
+extern "C" int synth_browser_consume_pending_audio_request(synth_browser_runtime* runtime,
+                                                             std::uint32_t* outControl)
 {
-    return RuntimeFor(runtime) == nullptr ? 0 : RuntimeFor(runtime)->ConsumeAudioInputRetry();
+    if (RuntimeFor(runtime) == nullptr) {
+        if (outControl != nullptr) {
+            *outControl = 0;
+        }
+        return synth_browser::kNoPendingAudioRequest;
+    }
+    return RuntimeFor(runtime)->ConsumePendingAudioRequest(outControl);
 }
 
 extern "C" int synth_browser_set_timestamp_epoch_offset(
@@ -147,6 +164,13 @@ extern "C" int synth_browser_submit_midi_endpoints(synth_browser_runtime* runtim
                                                      std::uint32_t count)
 {
     return RuntimeFor(runtime) == nullptr ? -1 : RuntimeFor(runtime)->SubmitMidiEndpoints(endpoints, count);
+}
+
+extern "C" int synth_browser_submit_audio_devices(synth_browser_runtime* runtime,
+                                                    const synth_browser::AudioDeviceDescriptor* devices,
+                                                    std::uint32_t count)
+{
+    return RuntimeFor(runtime) == nullptr ? -1 : RuntimeFor(runtime)->SubmitAudioDevices(devices, count);
 }
 
 extern "C" int synth_browser_dequeue_midi_action(synth_browser_runtime* runtime,

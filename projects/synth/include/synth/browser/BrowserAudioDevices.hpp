@@ -5,10 +5,47 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace synth_browser {
+
+// One browser-enumerated audio device, submitted by JS through
+// `synth_browser_submit_audio_devices` (BrowserRuntime.hpp). `deviceId` is the
+// browser's opaque, privacy-scoped `MediaDeviceInfo.deviceId`; `label` is the
+// human-readable name, empty for an entry the page has no permission to name
+// (see the empty-label rule on `BuildBrowserAudioSnapshot` below).
+enum class BrowserAudioDeviceKind : std::uint32_t { Input = 0, Output = 1 };
+
+struct BrowserAudioDevice {
+    std::string deviceId;
+    std::string label;
+    BrowserAudioDeviceKind kind = BrowserAudioDeviceKind::Input;
+};
+
+// Consumed alongside `synth_browser_consume_pending_audio_request`
+// (BrowserRuntime.hpp / BrowserRuntimeAbi.cpp), which reports this index
+// together with a `BrowserAudioDeviceKind` saying which control (audio input
+// or audio output) it applies to. One pending slot is shared by every control:
+// retrying input, selecting an input device, and selecting an output device
+// all arm the same slot with different arguments, so at most one request is
+// ever outstanding. Mirrored manually by `browser/src/audio.ts`, the same
+// convention `BrowserAudioInputStatus` below already follows (its own mirror
+// there is `AudioInputStatusCode`): -1 means nothing is pending, -2 means
+// release the armed control (release capture for input -- the user
+// selected/retried into No Input -- or revert to the platform default sink
+// for output), and any value >= 0 is an index into the device list most
+// recently submitted through `synth_browser_submit_audio_devices`, filtered
+// to entries of the armed control's kind -- JS already holds that exact
+// array, so an index alone identifies the device to route to (getUserMedia
+// for input, setSinkId for output).
+inline constexpr std::int32_t kNoPendingAudioRequest = -1;
+inline constexpr std::int32_t kReleaseAudioRequest = -2;
+// Asks for capture permission without naming a device. An unpermitted page
+// enumerates input devices with empty labels, so there is no index to arm and
+// nothing to release; this sentinel is the only pending request that reaches a
+// permission prompt, and the stream it opens is closed before it is observed.
+inline constexpr std::int32_t kRequestPermissionAudioRequest = -3;
 
 // The browser capture states the launcher realm publishes through
 // `synth_browser_set_audio_input_source` / `synth_browser_clear_audio_input_source`.
@@ -134,6 +171,15 @@ inline std::string BrowserAudioInputStatusText(BrowserAudioInputStatus status)
     return {};
 }
 
+// Reported once by the browser host through the same dispatch-action channel
+// BrowserAudioInputStatusText's codes travel, when this browser exposes no
+// way to route to a specific output device at all (no Web Audio Output
+// Devices API). Folded into the Audio page's status line the same way an
+// input diagnostic is (RefreshAudio, BrowserRuntimeMainServices.hpp), so the
+// operator sees why the output combo only ever offers System Default instead
+// of the combo silently going quiet.
+inline constexpr const char* kOutputRoutingUnsupportedText = "output device selection unavailable";
+
 // The diagnostic half of the status line. Shortfall is orthogonal to the
 // capture state -- a device can be online, or online with an unreported count,
 // and still supply fewer channels than the application asked for -- so it is
@@ -176,46 +222,114 @@ inline std::string ComposeBrowserAudioStatusLine(const BrowserAudioInputState& i
     return text;
 }
 
+// Both option lists derive from the devices JS most recently submitted
+// through `synth_browser_submit_audio_devices`, built through the same
+// `Layout::BuildDeviceOptions` the JUCE hosts use (JuceRuntimeMainServices.hpp,
+// RuntimePagesJuce.hpp) -- an option's id and label are both the device's
+// `label`, matching how a JUCE device's name doubles as its persisted
+// identity. An entry with an empty label carries no identity to offer (a
+// page with no permission for a device enumerates it with both `deviceId`
+// and `label` empty) and is filtered out before the option list is built.
 inline synth::runtime_ui::AudioPageSnapshot BuildBrowserAudioSnapshot(
     const synth::AudioDeviceState& state,
-    const BrowserAudioInputState& input = {})
+    const BrowserAudioInputState& input = {},
+    const std::vector<BrowserAudioDevice>& devices = {})
 {
     synth::runtime_ui::AudioPageSnapshot snapshot;
-    snapshot.outputOptions = {{synth::runtime_ui::kSystemDefaultOptionId,
-                               synth::runtime_ui::kSystemDefaultOptionLabel}};
-    snapshot.selectedOutputId = synth::runtime_ui::kSystemDefaultOptionId;
+
+    std::vector<std::string> outputNames;
+    std::vector<std::string> inputNames;
+    std::size_t unnamedInputCount = 0;
+    for (const BrowserAudioDevice& device : devices)
+    {
+        if (device.label.empty())
+        {
+            if (device.kind == BrowserAudioDeviceKind::Input)
+            {
+                ++unnamedInputCount;
+            }
+            continue;
+        }
+        if (device.kind == BrowserAudioDeviceKind::Output)
+        {
+            outputNames.push_back(device.label);
+        }
+        else
+        {
+            inputNames.push_back(device.label);
+        }
+    }
+
+    snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        outputNames,
+        {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+    snapshot.selectedOutputId = synth::runtime_ui::Layout::SelectedDeviceOptionId(
+        state.outputDeviceName, snapshot.outputOptions, synth::runtime_ui::kSystemDefaultOptionId);
+
     snapshot.showInputCombo = input.requestedChannels > 0;
     snapshot.inputOptions.clear();
     if (!snapshot.showInputCombo)
     {
         return snapshot;
     }
-    // D6: System Default only. Browser device ids are privacy-scoped, so nothing
-    // is enumerated here and a persisted name from another host still resolves to
-    // the default rather than to a device this host cannot name.
-    snapshot.inputOptions = {{synth::runtime_ui::kSystemDefaultOptionId,
-                              synth::runtime_ui::kSystemDefaultOptionLabel}};
+    // No Input is always the first (and default/startup) entry; a stored
+    // selection naming a device absent from the current list falls back to
+    // it via SelectedDeviceOptionId rather than claiming that device.
+    snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        inputNames,
+        {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
     snapshot.selectedInputId = synth::runtime_ui::Layout::SelectedDeviceOptionId(
-        state.inputDeviceName, snapshot.inputOptions);
+        state.inputDeviceName, snapshot.inputOptions, synth::runtime_ui::kNoInputOptionId);
     snapshot.showInputRetry = BrowserAudioInputOffline(input.status);
+    // Devices are present but none can be named, which is what a page holding
+    // no capture permission enumerates. Selecting is impossible (there is no
+    // option to select) and retry re-requests the current selection, which is
+    // No Input, so asking for access is the only move that changes anything.
+    // Named devices, or no input devices at all, both leave this false: the
+    // first has nothing to ask for and the second has nothing to ask about.
+    snapshot.showInputPermissionRequest = unnamedInputCount > 0 && inputNames.empty();
     snapshot.statusLineText = ComposeBrowserAudioStatusLine(input, BrowserAudioInputDetail(input));
     return snapshot;
 }
 
-inline std::string BrowserOutputDeviceName(const std::string& optionId)
+// Resolves a selected output option id against the devices JS most recently
+// submitted, returning the device name to persist (empty for System Default,
+// or for an id naming a device no longer in the submitted list -- a stale id
+// falls back rather than claiming a device this host cannot currently name).
+inline std::string BrowserOutputDeviceName(const std::string& optionId,
+                                           const std::vector<BrowserAudioDevice>& devices)
 {
-    if (optionId != synth::runtime_ui::kSystemDefaultOptionId)
+    if (optionId == synth::runtime_ui::kSystemDefaultOptionId)
     {
-        throw std::invalid_argument("browser audio supports only system_default output");
+        return {};
+    }
+    for (const BrowserAudioDevice& device : devices)
+    {
+        if (device.kind == BrowserAudioDeviceKind::Output && !device.label.empty() &&
+            device.label == optionId)
+        {
+            return device.label;
+        }
     }
     return {};
 }
 
-inline std::string BrowserInputDeviceName(const std::string& optionId)
+// Resolves a selected input option id the same way; No Input and a stale id
+// both persist as the empty input name.
+inline std::string BrowserInputDeviceName(const std::string& optionId,
+                                          const std::vector<BrowserAudioDevice>& devices)
 {
-    if (optionId != synth::runtime_ui::kSystemDefaultOptionId)
+    if (optionId == synth::runtime_ui::kNoInputOptionId)
     {
-        throw std::invalid_argument("browser audio supports only system_default input");
+        return {};
+    }
+    for (const BrowserAudioDevice& device : devices)
+    {
+        if (device.kind == BrowserAudioDeviceKind::Input && !device.label.empty() &&
+            device.label == optionId)
+        {
+            return device.label;
+        }
     }
     return {};
 }

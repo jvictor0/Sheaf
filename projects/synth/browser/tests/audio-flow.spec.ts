@@ -34,7 +34,15 @@ type CaptureScenario = {
   endTrackDuringRegistration?: boolean;
 };
 
-type CaptureStep = "retry" | "end-track" | "stop" | "stop-again" | "clear-fails" | "replace" | "release-now";
+// "select" is the operator picking a device from the Audio page's input
+// combo -- the only other entry point `AudioBridge.acquireInput()` is
+// reachable from besides "retry" (audio.ts). This harness never submits a
+// device list to `AudioBridge`, so at this level "select" exercises the same
+// default-device acquisition "retry" does; the two are kept as distinct
+// steps because they stand for distinct operator gestures (an initial
+// selection vs. a later Retry Input click), even though both bottom out in
+// the same call here.
+type CaptureStep = "select" | "retry" | "end-track" | "stop" | "stop-again" | "clear-fails" | "replace" | "release-now";
 
 type CaptureRun = {
   started: { started: boolean; diagnostic?: string };
@@ -175,10 +183,24 @@ async function runCapture(page: Page, scenario: CaptureScenario, steps: CaptureS
 
     const options = scenario.omitAudioContext ? {} : { audioContext };
     let bridge = new AudioBridge(worker, options);
-    const started = await bridge.startFromUserActivation();
+    const startPromise = bridge.startFromUserActivation();
+    if (scenario.nativeStartWaitsForRegistration || scenario.nativeStartFailsAfterRegistration) {
+      // These two scenarios make the fake native worklet start wait for a
+      // capture registration before it resolves, so `reconcileInputAfterWorkletStart`
+      // (or the release path a failed start takes) has something to
+      // reconcile. Capture is only ever armed by an operator's own
+      // selection now, so this drives that selection concurrently with the
+      // still-pending native start -- the same interleaving audio.ts's
+      // `startFromUserActivation` comment says the no-activation-lease path
+      // can still hit -- rather than relying on it happening by itself.
+      for (let turn = 0; turn < 8 && !calls.includes("startAudioWorklet"); turn++)
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      await bridge.retryInput();
+    }
+    const started = await startPromise;
     await bridge.whenInputSettled();
     for (const step of steps) {
-      if (step === "retry") await bridge.retryInput();
+      if (step === "select" || step === "retry") await bridge.retryInput();
       if (step === "end-track") {
         tracks[tracks.length - 1].onended();
         await bridge.whenInputSettled();
@@ -202,6 +224,10 @@ async function runCapture(page: Page, scenario: CaptureScenario, steps: CaptureS
         await bridge.stop();
         bridge = new AudioBridge(worker, options);
         await bridge.startFromUserActivation();
+        // The successor application's own operator selects a device too --
+        // capture is never inherited or resumed automatically across the
+        // replacement.
+        await bridge.retryInput();
         await bridge.whenInputSettled();
       }
     }
@@ -257,8 +283,28 @@ test("never touches the media device API for a zero-input application", async ({
   });
 });
 
-test("requests System Default capture with the pinned multichannel constraints from activation", async ({ page }) => {
+// Inverts what this test used to pin: capture no longer starts merely
+// because the application declared input channels. Activation alone must
+// leave capture untouched -- see the companion test right below for the
+// pinned-constraints claim this one used to also carry, now exercised under
+// the operator selection that actually triggers it.
+test("requests no capture from activation alone; only an operator's device selection arms it", async ({ page }) => {
   const result = await runCapture(page, { requestedChannels: 4, trackChannelCount: 4 });
+
+  expect(result.calls).toEqual(["audioInputChannels", "startAudioWorklet"]);
+  expect(result.constraints).toEqual([]);
+  expect(result.registrations).toEqual([]);
+  expect(result.inputState).toEqual({
+    requestedChannels: 4,
+    activeChannels: 0,
+    statusCode: INPUT_STATUS.notRequested,
+    diagnostic: "",
+    nativeHandle: 0,
+  });
+});
+
+test("requests System Default capture with the pinned multichannel constraints once the operator selects a device", async ({ page }) => {
+  const result = await runCapture(page, { requestedChannels: 4, trackChannelCount: 4 }, ["select"]);
 
   expect(result.constraints).toEqual([{
     audio: {
@@ -291,7 +337,7 @@ test("requests System Default capture with the pinned multichannel constraints f
 });
 
 test("clamps a device that supplies more channels than the application requested", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 6 });
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 6 }, ["select"]);
 
   expect(result.registrations).toEqual([
     { physicalChannels: 2, statusCode: INPUT_STATUS.online, sourceIx: 0, nativeHandle: 91 },
@@ -300,7 +346,7 @@ test("clamps a device that supplies more channels than the application requested
 });
 
 test("reports a channel shortfall through the published active count", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 4, trackChannelCount: 1 });
+  const result = await runCapture(page, { requestedChannels: 4, trackChannelCount: 1 }, ["select"]);
 
   expect(result.registrations).toEqual([
     { physicalChannels: 1, statusCode: INPUT_STATUS.online, sourceIx: 0, nativeHandle: 91 },
@@ -315,7 +361,7 @@ test("reports a channel shortfall through the published active count", async ({ 
 });
 
 test("falls back to the source node count and a distinct status when the track omits its channel count", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 4, trackChannelCount: null, sourceChannelCount: 2 });
+  const result = await runCapture(page, { requestedChannels: 4, trackChannelCount: null, sourceChannelCount: 2 }, ["select"]);
 
   expect(result.registrations).toEqual([{
     physicalChannels: 2,
@@ -333,7 +379,7 @@ test("falls back to the source node count and a distinct status when the track o
 });
 
 test("falls back to one channel when neither the track nor the source node reports a count", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 4, omitTrackSettings: true, sourceChannelCount: 0 });
+  const result = await runCapture(page, { requestedChannels: 4, omitTrackSettings: true, sourceChannelCount: 0 }, ["select"]);
 
   expect(result.registrations).toEqual([{
     physicalChannels: 1,
@@ -345,13 +391,13 @@ test("falls back to one channel when neither the track nor the source node repor
 });
 
 test("keeps output live and distinguishes each offline capture state", async ({ page }) => {
-  const denied = await runCapture(page, { requestedChannels: 4, capture: "denied" });
-  const blocked = await runCapture(page, { requestedChannels: 4, capture: "blocked" });
-  const missingApi = await runCapture(page, { requestedChannels: 4, capture: "missing-api" });
-  const insecure = await runCapture(page, { requestedChannels: 4, secureContext: false });
-  const noContext = await runCapture(page, { requestedChannels: 4, omitAudioContext: true });
-  const unavailable = await runCapture(page, { requestedChannels: 4, capture: "unavailable-device" });
-  const noTrack = await runCapture(page, { requestedChannels: 4, capture: "no-track" });
+  const denied = await runCapture(page, { requestedChannels: 4, capture: "denied" }, ["select"]);
+  const blocked = await runCapture(page, { requestedChannels: 4, capture: "blocked" }, ["select"]);
+  const missingApi = await runCapture(page, { requestedChannels: 4, capture: "missing-api" }, ["select"]);
+  const insecure = await runCapture(page, { requestedChannels: 4, secureContext: false }, ["select"]);
+  const noContext = await runCapture(page, { requestedChannels: 4, omitAudioContext: true }, ["select"]);
+  const unavailable = await runCapture(page, { requestedChannels: 4, capture: "unavailable-device" }, ["select"]);
+  const noTrack = await runCapture(page, { requestedChannels: 4, capture: "no-track" }, ["select"]);
 
   for (const result of [denied, blocked, missingApi, insecure, noContext, unavailable, noTrack]) {
     expect(result.started).toEqual({ started: true });
@@ -375,7 +421,7 @@ test("keeps output live and distinguishes each offline capture state", async ({ 
 });
 
 test("releases an ended stream once, clears the native count first, and leaves output running", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["end-track"]);
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["select", "end-track"]);
 
   expect(result.calls.slice(result.calls.indexOf(`clearAudioInputSource:${INPUT_STATUS.streamEnded}`))).toEqual([
     `clearAudioInputSource:${INPUT_STATUS.streamEnded}`,
@@ -395,7 +441,7 @@ test("releases an ended stream once, clears the native count first, and leaves o
 });
 
 test("retries capture into the existing context and runtime without restarting the worklet", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["end-track", "retry"]);
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["select", "end-track", "retry"]);
 
   expect(result.nativeStarts).toBe(1);
   expect(result.sourceCount).toBe(2);
@@ -415,7 +461,7 @@ test("retries capture into the existing context and runtime without restarting t
 });
 
 test("retry replaces a live capture without leaking the previous stream", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 1, trackChannelCount: 1 }, ["retry", "stop"]);
+  const result = await runCapture(page, { requestedChannels: 1, trackChannelCount: 1 }, ["select", "retry", "stop"]);
 
   expect(result.sourceCount).toBe(2);
   expect(result.sourceDisconnects).toEqual([1, 1]);
@@ -431,7 +477,7 @@ test("retry stays inert for a zero-input application", async ({ page }) => {
 });
 
 test("stops every track exactly once across repeated stops", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["stop", "stop-again"]);
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["select", "stop", "stop-again"]);
 
   expect(result.trackStops).toEqual([1]);
   expect(result.sourceDisconnects).toEqual([1]);
@@ -442,7 +488,7 @@ test("stops every track exactly once across repeated stops", async ({ page }) =>
 });
 
 test("releases the replaced application's capture exactly once and gives its successor a fresh source", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["replace"]);
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["select", "replace"]);
 
   expect(result.sourceCount).toBe(2);
   expect(result.trackStops).toEqual([1, 0]);
@@ -462,8 +508,8 @@ test("releases the replaced application's capture exactly once and gives its suc
 });
 
 test("reuses one native handle for a re-registered node and clears the retained identity on release", async ({ page }) => {
-  const reregistered = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["retry"]);
-  const released = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["stop"]);
+  const reregistered = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["select", "retry"]);
+  const released = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["select", "stop"]);
 
   // Each acquisition builds a new source node, so each gets its own handle: the
   // bridge retains the handle its current registration returned, never a stale one.
@@ -473,7 +519,7 @@ test("reuses one native handle for a re-registered node and clears the retained 
 });
 
 test("releases capture synchronously when the page unloads, before any promise continuation runs", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["release-now", "stop"]);
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["select", "release-now", "stop"]);
 
   expect(result.synchronousRelease).toEqual({
     calls: [
@@ -531,12 +577,23 @@ test("concurrent stop prevents late startup and capture rejection from overwriti
     });
 
     const start = bridge.startFromUserActivation();
+    // Native startup is deliberately held open (via `resolveStart`) so an
+    // operator's device selection can be raced against it: capture is only
+    // ever armed by that selection now, never by activation alone, so this
+    // drives one -- through `retryInput`, the same entry point a real Retry
+    // Input click uses -- while `startAudioWorklet` is still pending, the
+    // same interleaving audio.ts's `startFromUserActivation` comment says
+    // the no-activation-lease path can still hit.
+    for (let turn = 0; turn < 4 && !calls.includes("startAudioWorklet"); turn++)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    const retry = bridge.retryInput();
     for (let turn = 0; turn < 4 && !rejectCapture; turn++)
       await new Promise((resolve) => setTimeout(resolve, 0));
     bridge.releaseNow();
     resolveStart({ started: true });
     rejectCapture(Object.assign(new Error("late denial"), { name: "NotAllowedError" }));
     const started = await start;
+    await retry;
     await bridge.whenInputSettled();
     return { started, calls, inputState: bridge.inputState() };
   });
@@ -559,7 +616,7 @@ test("concurrent stop prevents late startup and capture rejection from overwriti
 });
 
 test("releases the stream when the source node cannot be constructed", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2, sourceConstructionThrows: true });
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2, sourceConstructionThrows: true }, ["select"]);
 
   expect(result.started).toEqual({ started: true });
   expect(result.trackStops).toEqual([1]);
@@ -573,7 +630,7 @@ test("releases the stream when the source node cannot be constructed", async ({ 
 });
 
 test("releases the source and stream when native registration throws", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2, registrationThrows: true });
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2, registrationThrows: true }, ["select"]);
 
   expect(result.started).toEqual({ started: true });
   expect(result.sourceDisconnects).toEqual([1]);
@@ -593,7 +650,7 @@ test("does not stay online when the track ends while registration is awaited", a
     requestedChannels: 2,
     trackChannelCount: 2,
     endTrackDuringRegistration: true,
-  });
+  }, ["select"]);
 
   expect(result.started).toEqual({ started: true });
   expect(result.sourceDisconnects).toEqual([1]);
@@ -615,7 +672,7 @@ test("does not stay online when the track ends while registration is awaited", a
 });
 
 test("releases capture when the runtime rejects the teardown clear", async ({ page }) => {
-  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["clear-fails", "stop"]);
+  const result = await runCapture(page, { requestedChannels: 2, trackChannelCount: 2 }, ["select", "clear-fails", "stop"]);
 
   expect(result.trackStops).toEqual([1]);
   expect(result.sourceDisconnects).toEqual([1]);
@@ -820,7 +877,7 @@ test("real miniapp WASM runs DSP from the runtime-owned AudioWorklet callback", 
           const started = await runtime.startAudioWorklet();
           if (started.type !== "ok") throw new Error(started.error ?? `unexpected audio response ${started.type}`);
           const deadline = performance.now() + 5_000;
-          let latest = { blocks: 0, peakMicrounits: 0, deadlineMicrounits: 0, deadlineText: "0.0%" };
+          let latest = { blocks: 0, peakMicrounits: 0, deadlineMicrounits: 0, deadlineText: "CPU 0%" };
           while (performance.now() < deadline) {
             latest = await request({ type: "audio-worklet-stats" }, "audio-worklet-stats");
             await request({ type: "message-tick", timestampMicros: Math.round(performance.now() * 1000) }, "ok");
@@ -828,7 +885,7 @@ test("real miniapp WASM runs DSP from the runtime-owned AudioWorklet callback", 
             const frame = decodeCommandBuffer(Uint8Array.from(frameResponse.frame).buffer);
             const deadlineNode = frame.nodes.find((node: any) => node.id === "runtime.sidebar.deadline");
             latest.deadlineText = deadlineNode?.text ?? "";
-            if (latest.blocks >= 4 && latest.peakMicrounits > 0 && latest.deadlineMicrounits > 0 && latest.deadlineText !== "0.0%") break;
+            if (latest.blocks >= 4 && latest.peakMicrounits > 0 && latest.deadlineMicrounits > 0 && latest.deadlineText !== "CPU 0%") break;
             await new Promise((pollResolve) => setTimeout(pollResolve, 25));
           }
           await request({ type: "destroy" }, "destroyed");
@@ -847,7 +904,7 @@ test("real miniapp WASM runs DSP from the runtime-owned AudioWorklet callback", 
   expect(stats.blocks).toBeGreaterThanOrEqual(4);
   expect(stats.peakMicrounits).toBeGreaterThan(0);
   expect(stats.deadlineMicrounits).toBeGreaterThan(0);
-  expect(stats.deadlineText).not.toBe("0.0%");
+  expect(stats.deadlineText).not.toBe("CPU 0%");
 });
 
 test("runtime-owned AudioWorklet applies browser-time encoder actions promptly", async ({ page }) => {
@@ -929,4 +986,228 @@ test("runtime-owned AudioWorklet applies browser-time encoder actions promptly",
 
   expect(result.blocks).toBeGreaterThanOrEqual(8);
   expect(result.after).not.toBe(result.before);
+});
+
+// One harness for the output-routing tests below: a bridge whose input side
+// never activates (zero requested channels, so no getUserMedia/track
+// machinery is needed), with the exact devices this bridge submits to the
+// runtime captured -- `AudioBridge` fires that submission without awaiting
+// it internally, so a test must not read `acquireOutputDeviceAtIndex`
+// behavior before it lands, which is why this awaits it explicitly rather
+// than guessing at a timer.
+async function runOutputRouting(
+  page: Page,
+  options: { devices?: Array<{ deviceId: string; label: string }>; setSinkId?: "present" | "absent" | "rejects" },
+): Promise<{
+  setSinkIdCalls: string[];
+  submittedKinds: string[];
+  threw: string | undefined;
+  // What the bridge reported back to the runtime through the worker's
+  // report hooks -- the JS half of making the native-owned selection state
+  // match what is actually routed (see the two tests below that read these).
+  reportedRouteFailures: string[];
+  reportedRoutingUnsupported: boolean;
+}> {
+  await page.goto("http://127.0.0.1:4174/public/index.html");
+  return page.evaluate(async ({ devices, setSinkId }) => {
+    const { AudioBridge } = await (new Function("return import('/dist/src/audio.js')")() as Promise<any>);
+    const setSinkIdCalls: string[] = [];
+    const context: Record<string, unknown> = { sampleRate: 48_000 };
+    if (setSinkId === "present") {
+      context.setSinkId = async (sinkId: string) => { setSinkIdCalls.push(sinkId); };
+    } else if (setSinkId === "rejects") {
+      context.setSinkId = async (sinkId: string) => {
+        setSinkIdCalls.push(sinkId);
+        throw new Error("device unavailable");
+      };
+    }
+    // Absent means `setSinkId` is not a function at all -- the case this
+    // bridge must feature-detect rather than assume.
+
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        enumerateDevices: async () => devices.map((device) => ({ ...device, kind: "audiooutput" })),
+      },
+    });
+
+    let resolveSubmitted!: (submitted: unknown[]) => void;
+    const submitted = new Promise<unknown[]>((resolve) => { resolveSubmitted = resolve; });
+    const reportedRouteFailures: string[] = [];
+    let reportedRoutingUnsupported = false;
+    const bridge = new AudioBridge({
+      async audioInputChannels() { return 0; },
+      async startAudioWorklet() { return { started: true }; },
+      async submitAudioDevices(submittedDevices: unknown[]) { resolveSubmitted(submittedDevices); },
+      async reportOutputRouteFailed(label: string) { reportedRouteFailures.push(label); },
+      async reportOutputRoutingUnsupported() { reportedRoutingUnsupported = true; },
+    }, { audioContext: context });
+
+    await bridge.startFromUserActivation();
+    const submittedDevices = await submitted;
+    const submittedKinds = submittedDevices.map((device) => (device as { kind: string }).kind);
+
+    let threw: string | undefined;
+    try {
+      await bridge.acquireOutputDeviceAtIndex(devices.length - 1);
+    } catch (error) {
+      threw = error instanceof Error ? error.message : String(error);
+    }
+    return { setSinkIdCalls, submittedKinds, threw, reportedRouteFailures, reportedRoutingUnsupported };
+  }, { devices: options.devices ?? [], setSinkId: options.setSinkId ?? "present" });
+}
+
+test("routes output to the selected device's id via setSinkId", async ({ page }) => {
+  const result = await runOutputRouting(page, {
+    devices: [
+      { deviceId: "out-1", label: "USB Speakers" },
+      { deviceId: "out-2", label: "Built-in Speakers" },
+    ],
+  });
+
+  expect(result.submittedKinds).toEqual(["output", "output"]);
+  expect(result.setSinkIdCalls).toEqual(["out-2"]);
+  expect(result.threw).toBeUndefined();
+});
+
+// Absence is reported two ways: an unroutable output device is dropped before
+// submission (never offered as selectable), so it can never be selected and
+// `setSinkId` is never reached to prove the point twice over; and, since a
+// combo that only ever offers System Default cannot explain itself, the
+// condition is also reported to the operator (see the "reports routing as
+// unsupported" test below).
+test("omits output devices from submission and does not call setSinkId when routing is unsupported", async ({ page }) => {
+  const result = await runOutputRouting(page, {
+    devices: [{ deviceId: "out-1", label: "USB Speakers" }],
+    setSinkId: "absent",
+  });
+
+  expect(result.submittedKinds).toEqual([]);
+  expect(result.setSinkIdCalls).toEqual([]);
+  expect(result.threw).toBeUndefined();
+});
+
+test("does not claim a route when setSinkId rejects", async ({ page }) => {
+  const result = await runOutputRouting(page, {
+    devices: [{ deviceId: "out-1", label: "USB Speakers" }],
+    setSinkId: "rejects",
+  });
+
+  // The call was attempted -- this is not the absence case -- and this
+  // bridge itself keeps no "currently routed" state for the rejection to
+  // falsify, so it has nothing of its own to roll back. The native-owned
+  // selection is a separate, falsifiable claim, though: it reverts through
+  // the report the next test asserts on, not through anything here.
+  expect(result.submittedKinds).toEqual(["output"]);
+  expect(result.setSinkIdCalls).toEqual(["out-1"]);
+  expect(result.threw).toBeUndefined();
+});
+
+// The rejection above is not left unreported -- it reaches the runtime by
+// the device's label, matching how BrowserOutputDeviceName persists a
+// selection, so BrowserRuntimeMainServices::DispatchAudio can recognize it
+// as the same selection and revert it.
+test("reports a rejected setSinkId back to the runtime by the device's label", async ({ page }) => {
+  const result = await runOutputRouting(page, {
+    devices: [{ deviceId: "out-1", label: "USB Speakers" }],
+    setSinkId: "rejects",
+  });
+
+  expect(result.reportedRouteFailures).toEqual(["USB Speakers"]);
+});
+
+// The operator-visible report fires exactly when the browser gives this
+// bridge no way to honour an output selection, and not otherwise.
+test("reports routing as unsupported only when setSinkId is absent", async ({ page }) => {
+  const unsupported = await runOutputRouting(page, {
+    devices: [{ deviceId: "out-1", label: "USB Speakers" }],
+    setSinkId: "absent",
+  });
+  const supported = await runOutputRouting(page, {
+    devices: [{ deviceId: "out-1", label: "USB Speakers" }],
+    setSinkId: "present",
+  });
+
+  expect(unsupported.reportedRoutingUnsupported).toBe(true);
+  expect(supported.reportedRoutingUnsupported).toBe(false);
+});
+
+test("reverts output to the platform default via an empty sinkId on release", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4174/public/index.html");
+  const result = await page.evaluate(async () => {
+    const { AudioBridge } = await (new Function("return import('/dist/src/audio.js')")() as Promise<any>);
+    const setSinkIdCalls: string[] = [];
+    const context = { sampleRate: 48_000, async setSinkId(sinkId: string) { setSinkIdCalls.push(sinkId); } };
+    const bridge = new AudioBridge({
+      async audioInputChannels() { return 0; },
+      async startAudioWorklet() { return { started: true }; },
+    }, { audioContext: context });
+    await bridge.startFromUserActivation();
+    await bridge.releaseSelectedOutput();
+    return { setSinkIdCalls };
+  });
+
+  expect(result.setSinkIdCalls).toEqual([""]);
+});
+
+// Mirrors the output-routing tests above -- device selection reaching the
+// browser's own API -- for the input side: the operator's chosen device,
+// not merely a device, has to be the one named in the capture request.
+test("passes the selected input device's id to getUserMedia", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4174/public/index.html");
+  const result = await page.evaluate(async () => {
+    const { AudioBridge } = await (new Function("return import('/dist/src/audio.js')")() as Promise<any>);
+    const constraints: unknown[] = [];
+    const mediaDevices = {
+      enumerateDevices: async () => [
+        { deviceId: "in-1", label: "Built-in Microphone", kind: "audioinput" },
+        { deviceId: "in-2", label: "USB Microphone", kind: "audioinput" },
+      ],
+      async getUserMedia(requested: unknown) {
+        constraints.push(requested);
+        const track = {
+          onended: null as (() => void) | null,
+          readyState: "live",
+          stop() {},
+          getSettings: () => ({ channelCount: 1 }),
+        };
+        return { getAudioTracks: () => [track], getTracks: () => [track] };
+      },
+    };
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: mediaDevices });
+
+    let resolveSubmitted!: (submitted: unknown[]) => void;
+    const submitted = new Promise<unknown[]>((resolve) => { resolveSubmitted = resolve; });
+    const bridge = new AudioBridge({
+      async audioInputChannels() { return 1; },
+      async startAudioWorklet() { return { started: true }; },
+      async setAudioInputSource() { return 91; },
+      async clearAudioInputSource() {},
+      async submitAudioDevices(devices: unknown[]) { resolveSubmitted(devices); },
+    }, {
+      audioContext: {
+        sampleRate: 48_000,
+        createMediaStreamSource() { return { channelCount: 1, connect() {}, disconnect() {} }; },
+      },
+    });
+
+    await bridge.startFromUserActivation();
+    await submitted;
+    // Index 1 is "USB Microphone" -- the second, non-default device -- so
+    // this proves the operator's actual choice reaches getUserMedia rather
+    // than just whichever device happens to be first.
+    await bridge.acquireInputDeviceAtIndex(1);
+    await bridge.whenInputSettled();
+    return { constraints };
+  });
+
+  expect(result.constraints).toEqual([{
+    audio: {
+      channelCount: { ideal: 1 },
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      deviceId: { exact: "in-2" },
+    },
+  }]);
 });
