@@ -1,0 +1,1111 @@
+diff --git a/server/modules/providers/list/codex/codex-runtime.provider.js b/server/modules/providers/list/codex/codex-runtime.provider.js
+index fe920b8c7a0b83ecb14ee5de80a6aee2b2d66513..109a4c3c871f6e59268bc9837e16a8ef090b72df 100644
+--- a/server/modules/providers/list/codex/codex-runtime.provider.js
++++ b/server/modules/providers/list/codex/codex-runtime.provider.js
+@@ -1,29 +1,41 @@
+ /**
+- * OpenAI Codex SDK Integration
+- * =============================
++ * OpenAI Codex app-server integration
++ * ===================================
+  *
+- * This module provides integration with the OpenAI Codex SDK for non-interactive
+- * chat sessions. It mirrors the Claude runtime adapter for consistency.
++ * This module uses Codex app-server so an in-flight turn can accept steering.
+  *
+  * ## Usage
+  *
+  * - codexRuntime.run(command, options, writer, context) - Execute a streamed prompt
++ * - codexRuntime.steer(sessionId, command, options) - Steer an active prompt
+  * - abortCodexSession(sessionId) - Cancel an active session
+  * - isCodexSessionActive(sessionId) - Check if a session is running
+  * - getActiveCodexSessions() - List all active sessions
+  */
+ 
+-import { Codex } from '@openai/codex-sdk';
+-
+ import {
+   appendFilesInputTag,
+-  buildCodexInputItems,
+-  normalizeImageDescriptors
++  buildCodexInputItems
+ } from '@/shared/image-attachments.js';
+ import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
+ import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
+ 
++import { CodexAppServerClient } from './codex-app-server-client.js';
++
+ const activeCodexSessions = new Map();
++let appServerClient = null;
++
++function getAppServerClient() {
++  if (!appServerClient) {
++    appServerClient = new CodexAppServerClient();
++  }
++  return appServerClient;
++}
++
++export function setCodexAppServerClientForTests(client) {
++  appServerClient = client;
++  activeCodexSessions.clear();
++}
+ 
+ function readUsageNumber(value) {
+   const parsed = Number(value);
+@@ -53,6 +65,50 @@ function extractCodexTokenBudget(event) {
+   };
+ }
+ 
++function buildAppServerInput(command, images, workingDirectory, files) {
++  const prompt = appendFilesInputTag(command, files);
++  return buildCodexInputItems(prompt, images, workingDirectory).map((item) =>
++    item.type === 'text'
++      ? { type: 'text', text: item.text, text_elements: [] }
++      : { type: 'localImage', path: item.path },
++  );
++}
++
++function transformAppServerItem(item) {
++  switch (item?.type) {
++    case 'agentMessage':
++      return { type: 'agent_message', text: item.text };
++    case 'reasoning':
++      return { type: 'reasoning', text: [...(item.summary || []), ...(item.content || [])].join('\n') };
++    case 'commandExecution':
++      return {
++        type: 'command_execution',
++        command: item.command,
++        aggregated_output: item.aggregatedOutput || '',
++        exit_code: item.exitCode,
++        status: item.status,
++      };
++    case 'fileChange':
++      return { type: 'file_change', changes: item.changes, status: item.status };
++    case 'mcpToolCall':
++      return {
++        type: 'mcp_tool_call',
++        server: item.server,
++        tool: item.tool,
++        arguments: item.arguments,
++        result: item.result,
++        error: item.error,
++        status: item.status,
++      };
++    case 'webSearch':
++      return { type: 'web_search', query: item.query || '' };
++    case 'plan':
++      return { type: 'reasoning', text: item.text };
++    default:
++      return null;
++  }
++}
++
+ /**
+  * Transform Codex SDK event to WebSocket message format
+  * @param {object} event - SDK event
+@@ -237,7 +293,7 @@ export async function queryCodex(command, options = {}, ws, context) {
+     permissionMode = 'default'
+   } = options;
+ 
+-  // Callers pass the stable app session id; the SDK resumes threads with the
++  // Callers pass the stable app session id; app-server resumes threads with the
+   // provider-native id recorded on the session row.
+   const providerSessionId = context.resolveProviderSessionId(sessionId);
+ 
+@@ -252,137 +308,122 @@ export async function queryCodex(command, options = {}, ws, context) {
+     ? effort
+     : undefined;
+ 
+-  let codex;
+-  let thread;
+-  // Provider-native thread id (starts as the resume id, or is captured from
+-  // the stream for brand-new sessions).
++  const client = getAppServerClient();
+   let capturedSessionId = providerSessionId;
+-  let sessionCreatedSent = false;
+   let terminalFailure = null;
+-  const abortController = new AbortController();
+-  // Session-map key: the app session id when the caller supplied one, else
+-  // the provider-native thread id once captured (legacy/direct API callers).
++  let unsubscribe = null;
++  let turnId = null;
+   const sessionKey = () => sessionId || capturedSessionId || null;
+ 
+   try {
+-    codex = new Codex({
+-      config: approvalsReviewer ? { approvals_reviewer: approvalsReviewer } : {}
+-    });
+-
+     const threadOptions = {
+-      workingDirectory,
+-      skipGitRepoCheck: true,
+-      sandboxMode,
++      cwd: workingDirectory,
++      sandbox: sandboxMode,
+       approvalPolicy,
+       model: resolvedModel,
+-      modelReasoningEffort: resolvedEffort,
++      ...(approvalsReviewer ? { approvalsReviewer } : {}),
+     };
+-
+-    if (providerSessionId) {
+-      thread = codex.resumeThread(providerSessionId, threadOptions);
+-    } else {
+-      thread = codex.startThread(threadOptions);
++    const threadResult = await client.request(
++      providerSessionId ? 'thread/resume' : 'thread/start',
++      providerSessionId ? { threadId: providerSessionId, ...threadOptions } : threadOptions,
++    );
++    capturedSessionId = threadResult?.thread?.id || providerSessionId;
++    if (!capturedSessionId) {
++      throw new Error('Codex app-server did not return a thread id');
+     }
+ 
+-    const registerSession = (id) => {
+-      if (!id) {
+-        return;
+-      }
+-      activeCodexSessions.set(id, {
+-        thread,
+-        codex,
+-        status: 'running',
+-        abortController,
+-        startedAt: new Date().toISOString()
+-      });
+-    };
+-
+-    if (sessionKey()) {
+-      registerSession(sessionKey());
++    ws.setSessionId?.(capturedSessionId);
++    if (!providerSessionId) {
++      sendMessage(ws, createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'codex' }));
+     }
+ 
+-    // Execute with streaming. Turns with image attachments send structured
+-    // input items so Codex reads the images from their local asset paths.
+-    const promptWithFiles = appendFilesInputTag(command, files);
+-    const turnInput = normalizeImageDescriptors(images).length > 0
+-      ? buildCodexInputItems(promptWithFiles, images, workingDirectory)
+-      : promptWithFiles;
+-    const streamedTurn = await thread.runStreamed(turnInput, {
+-      signal: abortController.signal
++    let resolveTurn;
++    let rejectTurn;
++    const turnCompleted = new Promise((resolve, reject) => {
++      resolveTurn = resolve;
++      rejectTurn = reject;
+     });
+ 
+-    for await (const event of streamedTurn.events) {
+-      // Capture thread/session id lazily from the stream (Codex emits this asynchronously).
+-      if (event.type === 'thread.started') {
+-        const discoveredSessionId = event.thread_id || event.id || null;
+-        if (discoveredSessionId && !capturedSessionId) {
+-          capturedSessionId = discoveredSessionId;
+-          registerSession(sessionKey());
+-
+-          if (ws.setSessionId && typeof ws.setSessionId === 'function') {
+-            ws.setSessionId(capturedSessionId);
+-          }
+-
+-          if (!providerSessionId && !sessionCreatedSent) {
+-            sessionCreatedSent = true;
+-            sendMessage(ws, createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'codex' }));
+-          }
+-        }
+-      }
++    const activeSession = {
++      client,
++      threadId: capturedSessionId,
++      turnId: null,
++      workingDirectory,
++      status: 'running',
++      startedAt: new Date().toISOString(),
++    };
++    activeCodexSessions.set(sessionKey(), activeSession);
+ 
+-      // Check if session was aborted
+-      if (abortController.signal.aborted) {
+-        break;
+-      }
+-      if (sessionKey()) {
+-        const session = activeCodexSessions.get(sessionKey());
+-        if (session?.status === 'aborted') {
+-          break;
+-        }
++    unsubscribe = client.subscribe((notification) => {
++      if (notification.method === 'cloudcli/app-server-error') {
++        rejectTurn(notification.params.error);
++        return;
+       }
+ 
+-      if (event.type === 'item.started' || event.type === 'item.updated') {
+-        continue;
++      const params = notification.params || {};
++      if (params.threadId !== capturedSessionId) {
++        return;
+       }
+ 
+-      const transformed = transformCodexEvent(event);
++      if (notification.method === 'turn/started') {
++        turnId = params.turn?.id || turnId;
++        activeSession.turnId = turnId;
++        return;
++      }
+ 
+-      // Normalize the transformed event into NormalizedMessage(s) via adapter
+-      const normalizedMsgs = context.normalizeMessage(transformed, capturedSessionId || sessionId || null);
+-      for (const msg of normalizedMsgs) {
+-        sendMessage(ws, msg);
++      if (notification.method === 'item/completed') {
++        const sdkItem = transformAppServerItem(params.item);
++        if (!sdkItem) {
++          return;
++        }
++        const transformed = transformCodexEvent({ type: 'item.completed', item: sdkItem });
++        for (const message of context.normalizeMessage(transformed, capturedSessionId)) {
++          sendMessage(ws, message);
++        }
++        return;
+       }
+ 
+-      if (event.type === 'turn.failed' && !terminalFailure) {
+-        terminalFailure = event.error || new Error('Turn failed');
+-        // Notifications are app-facing, so they carry the app session id.
+-        notifyRunFailed({
+-          userId: ws?.userId || null,
+-          provider: 'codex',
+-          sessionId: sessionId || capturedSessionId || null,
+-          sessionName: sessionSummary,
+-          error: terminalFailure
++      if (notification.method === 'thread/tokenUsage/updated') {
++        const tokenBudget = extractCodexTokenBudget({
++          usage: {
++            input_tokens: params.tokenUsage?.total?.inputTokens,
++            output_tokens: params.tokenUsage?.total?.outputTokens,
++            total_tokens: params.tokenUsage?.total?.totalTokens,
++            model_context_window: params.tokenUsage?.modelContextWindow,
++          },
+         });
++        if (tokenBudget) {
++          sendMessage(ws, createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget, sessionId: capturedSessionId, provider: 'codex' }));
++        }
++        return;
+       }
+ 
+-      // Extract and send token usage if available (normalized to match Claude format)
+-      if (event.type === 'turn.completed') {
+-        const tokenBudget = extractCodexTokenBudget(event);
+-        if (tokenBudget) {
+-          sendMessage(ws, createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget, sessionId: capturedSessionId || sessionId || null, provider: 'codex' }));
++      if (notification.method === 'turn/completed' && (!turnId || params.turn?.id === turnId)) {
++        if (params.turn?.status === 'failed') {
++          terminalFailure = params.turn.error || new Error('Turn failed');
+         }
++        resolveTurn(params.turn);
+       }
+-    }
++    });
++
++    const turnResult = await client.request('turn/start', {
++      threadId: capturedSessionId,
++      input: buildAppServerInput(command, images, workingDirectory, files),
++      ...(resolvedEffort ? { effort: resolvedEffort } : {}),
++    });
++    turnId = turnResult?.turn?.id || turnId;
++    activeSession.turnId = turnId;
++    await turnCompleted;
+ 
+     // Send the terminal completion event — skipped for aborted runs, whose
+     // terminal `complete` (aborted: true) was already sent by abort-session.
+     const runSession = sessionKey() ? activeCodexSessions.get(sessionKey()) : null;
+-    const runAborted = runSession?.status === 'aborted' || abortController.signal.aborted;
++    const runAborted = runSession?.status === 'aborted';
+     if (!runAborted) {
+       sendMessage(ws, createCompleteMessage({
+         provider: 'codex',
+         sessionId: capturedSessionId || sessionId || null,
+-        actualSessionId: capturedSessionId || thread.id || sessionId || null,
++        actualSessionId: capturedSessionId || sessionId || null,
+         exitCode: terminalFailure ? 1 : 0,
+       }));
+       if (!terminalFailure) {
+@@ -393,6 +434,14 @@ export async function queryCodex(command, options = {}, ws, context) {
+           sessionName: sessionSummary,
+           stopReason: 'completed'
+         });
++      } else {
++        notifyRunFailed({
++          userId: ws?.userId || null,
++          provider: 'codex',
++          sessionId: sessionId || capturedSessionId || null,
++          sessionName: sessionSummary,
++          error: terminalFailure
++        });
+       }
+     }
+ 
+@@ -430,6 +479,7 @@ export async function queryCodex(command, options = {}, ws, context) {
+     }
+ 
+   } finally {
++    unsubscribe?.();
+     // Update session status
+     if (sessionKey()) {
+       const session = activeCodexSessions.get(sessionKey());
+@@ -445,21 +495,49 @@ export async function queryCodex(command, options = {}, ws, context) {
+  * @param {string} sessionId - Session ID to abort
+  * @returns {boolean} - Whether abort was successful
+  */
+-export function abortCodexSession(sessionId) {
++export async function abortCodexSession(sessionId) {
+   const session = activeCodexSessions.get(sessionId);
+ 
+   if (!session) {
+     return false;
+   }
+ 
+-  session.status = 'aborted';
+   try {
+-    session.abortController?.abort();
++    if (!session.turnId) {
++      return false;
++    }
++    await session.client.request('turn/interrupt', {
++      threadId: session.threadId,
++      turnId: session.turnId,
++    });
++    session.status = 'aborted';
++    return true;
+   } catch (error) {
+     console.warn(`[Codex] Failed to abort session ${sessionId}:`, error);
++    return false;
++  }
++}
++
++export async function steerCodexSession(sessionId, command, options = {}) {
++  const session = activeCodexSessions.get(sessionId);
++  if (!session || session.status !== 'running' || !session.turnId) {
++    return false;
+   }
+ 
+-  return true;
++  try {
++    const attachments = Array.isArray(options.attachments) ? options.attachments : [];
++    const images = attachments.filter((attachment) => attachment?.mimeType?.startsWith('image/'));
++    const files = attachments.filter((attachment) => !attachment?.mimeType?.startsWith('image/'));
++    await session.client.request('turn/steer', {
++      threadId: session.threadId,
++      expectedTurnId: session.turnId,
++      input: buildAppServerInput(command, images, session.workingDirectory, files),
++    });
++    return true;
++  } catch (error) {
++    console.warn(`[Codex] Failed to steer session ${sessionId}:`, error);
++    return false;
++  }
+ }
+ 
+ /**
+@@ -495,6 +573,7 @@ export function getActiveCodexSessions() {
+ export const codexRuntime = {
+   run: queryCodex,
+   abort: abortCodexSession,
++  steer: steerCodexSession,
+ };
+ 
+ /**
+diff --git a/server/modules/providers/services/provider-runtime.service.ts b/server/modules/providers/services/provider-runtime.service.ts
+index 3e8a854a6631e87786ec73a8bbfd1b67642e0c0f..f7535898bfbe761a942a4f165986208b7c5f0af9 100644
+--- a/server/modules/providers/services/provider-runtime.service.ts
++++ b/server/modules/providers/services/provider-runtime.service.ts
+@@ -91,6 +91,16 @@ export function createProviderRuntimeService(
+       return Boolean(await dependencies.resolveProvider(providerName).runtime.abort(sessionId));
+     },
+ 
++    async steer(
++      providerName: LLMProvider,
++      sessionId: string,
++      command: string,
++      options: AnyRecord = {},
++    ): Promise<boolean> {
++      const steer = dependencies.resolveProvider(providerName).runtime.steer;
++      return steer ? Boolean(await steer(sessionId, command, options)) : false;
++    },
++
+     resolveToolApproval(requestId: string, decision: ProviderPermissionDecision): void {
+       for (const provider of dependencies.listProviders()) {
+         provider.runtime.permissions?.resolve(requestId, decision);
+diff --git a/server/modules/providers/tests/provider-runtime.service.test.ts b/server/modules/providers/tests/provider-runtime.service.test.ts
+index 78d3dd18e87c453fd66e35d5f46bbee9921b5846..8c7b6f203401c52cb96a21afae4bbcff36b05140 100644
+--- a/server/modules/providers/tests/provider-runtime.service.test.ts
++++ b/server/modules/providers/tests/provider-runtime.service.test.ts
+@@ -81,7 +81,7 @@ test('providerRegistry owns one runtime for every registered provider', () => {
+   assert.equal(providers.every((provider) => typeof provider.runtime.abort === 'function'), true);
+ });
+ 
+-test('dispatches runs and aborts through the runtime owned by providerRegistry', async () => {
++test('dispatches runs, aborts, and steering through the runtime owned by providerRegistry', async () => {
+   const calls: unknown[][] = [];
+   const runtime = createRuntime({
+     async run(command, options, writer, context) {
+@@ -97,6 +97,10 @@ test('dispatches runs and aborts through the runtime owned by providerRegistry',
+       calls.push(['abort', sessionId]);
+       return true;
+     },
++    async steer(sessionId, command, options) {
++      calls.push(['steer', sessionId, command, options]);
++      return true;
++    },
+   });
+   const service = createService([createProvider('claude', runtime)]);
+   const writer = { send() {} };
+@@ -105,12 +109,19 @@ test('dispatches runs and aborts through the runtime owned by providerRegistry',
+   assert.equal(service.hasRuntime('unknown'), false);
+   assert.equal(await service.getRunner('claude')('hello', { model: 'sonnet' }, writer), 'complete');
+   assert.equal(await service.abort('claude', 'session-1'), true);
++  assert.equal(await service.steer('claude', 'session-1', 'change direction', { attachments: [] }), true);
+   assert.deepEqual(calls, [
+     ['run', 'hello', { model: 'sonnet' }, writer],
+     ['abort', 'session-1'],
++    ['steer', 'session-1', 'change direction', { attachments: [] }],
+   ]);
+ });
+ 
++test('reports unsupported steering without invoking another provider method', async () => {
++  const service = createService([createProvider('claude', createRuntime())]);
++  assert.equal(await service.steer('claude', 'session-1', 'change direction'), false);
++});
++
+ test('routes permission decisions through provider-owned runtime capabilities', () => {
+   const decisions: unknown[][] = [];
+   const claudeRuntime = createRuntime({
+diff --git a/server/modules/websocket/services/chat-websocket.service.ts b/server/modules/websocket/services/chat-websocket.service.ts
+index fa6c43a025c5f71917388a516766a0f0945fe1e5..5a93a53be75d39ecb28f48420946e58d186231e5 100644
+--- a/server/modules/websocket/services/chat-websocket.service.ts
++++ b/server/modules/websocket/services/chat-websocket.service.ts
+@@ -73,6 +73,12 @@ type ProviderRuntimeGateway = {
+     writer: ProviderRuntimeWriter,
+   ): Promise<unknown>;
+   abort(provider: LLMProvider, sessionId: string): Promise<boolean>;
++  steer(
++    provider: LLMProvider,
++    sessionId: string,
++    command: string,
++    options?: AnyRecord,
++  ): Promise<boolean>;
+   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
+   getPendingApprovalsForSession(sessionId: string): unknown[];
+ };
+@@ -276,6 +282,44 @@ async function handleChatAbort(
+   });
+ }
+ 
++/** Appends user input to the active Codex turn without starting another run. */
++async function handleChatSteer(
++  ws: WebSocket,
++  data: AnyRecord,
++  dependencies: ChatWebSocketDependencies
++): Promise<void> {
++  const sessionId = readRequiredSessionId(data);
++  if (!sessionId) {
++    sendProtocolError(ws, 'SESSION_ID_REQUIRED', 'chat.steer requires a sessionId.');
++    return;
++  }
++
++  const session = sessionsDb.getSessionById(sessionId);
++  if (!session) {
++    sendProtocolError(ws, 'SESSION_NOT_FOUND', `Session "${sessionId}" was not found.`, sessionId);
++    return;
++  }
++
++  if (session.provider !== 'codex') {
++    sendProtocolError(ws, 'STEER_UNSUPPORTED', 'Only Codex sessions support steering.', sessionId);
++    return;
++  }
++
++  const run = chatRunRegistry.getRun(sessionId);
++  if (!run || run.status !== 'running') {
++    sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
++    return;
++  }
++
++  const content = typeof data.content === 'string' ? data.content : '';
++  const clientOptions = (data.options ?? {}) as AnyRecord;
++  const attachments = filterAttachmentsToUploadStore(clientOptions.attachments);
++  const success = await dependencies.runtime.steer('codex', sessionId, content, { attachments });
++  if (!success) {
++    sendProtocolError(ws, 'STEER_FAILED', `Could not steer session "${sessionId}".`, sessionId);
++  }
++}
++
+ /**
+  * Handles `chat.subscribe`: for each requested session, reports whether a run
+  * is processing, re-attaches the live stream to this socket, replays missed
+@@ -365,6 +409,7 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
+  *
+  * Inbound protocol (client to server):
+  * - `chat.send`                { sessionId, content, options? }
++ * - `chat.steer`               { sessionId, content, options? }
+  * - `chat.abort`               { sessionId }
+  * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq? }] }
+  * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
+@@ -401,6 +446,9 @@ export function handleChatConnection(
+         case 'chat.abort':
+           await handleChatAbort(ws, data, dependencies);
+           return;
++        case 'chat.steer':
++          await handleChatSteer(ws, data, dependencies);
++          return;
+         case 'chat.subscribe':
+           handleChatSubscribe(ws, data, dependencies);
+           return;
+diff --git a/server/shared/interfaces.ts b/server/shared/interfaces.ts
+index 04ec23fac7bd977d6eeaf816e09d797c2525ea5c..79e0f13a32485fc1efdf17f5b905cc32de99ae08 100644
+--- a/server/shared/interfaces.ts
++++ b/server/shared/interfaces.ts
+@@ -35,6 +35,11 @@ export interface IProviderRuntime {
+     context: ProviderRuntimeContext,
+   ): Promise<unknown>;
+   abort(sessionId: string): boolean | Promise<boolean>;
++  steer?(
++    sessionId: string,
++    command: string,
++    options?: AnyRecord,
++  ): boolean | Promise<boolean>;
+   permissions?: ProviderRuntimePermissionGateway;
+ }
+ 
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index 1d89c4dc270b445d83219ae00b63d354f56ede31..5fff37e2b1d0334cc044add1f6c7da154ffe8b50 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -21,6 +21,7 @@ import {
+   writeQueuedMessage,
+   type QueuedSendOptions,
+ } from '../utils/chatStorage';
++import { resolveSubmissionMode } from '../utils/submissionMode';
+ import type {
+   ChatAttachment,
+   ChatMessage,
+@@ -674,6 +675,7 @@ export function useChatComposerState({
+       const currentInput = queuedSubmission?.content ?? inputValueRef.current;
+       const currentAttachments = queuedSubmission?.attachments ?? attachedFiles;
+       const previouslyUploadedAttachments = queuedSubmission?.uploadedAttachments ?? [];
++      const submissionMode = resolveSubmissionMode(provider, isLoading);
+       if (
+         (
+           !currentInput.trim()
+@@ -688,7 +690,7 @@ export function useChatComposerState({
+       // A turn is already in flight: stash this message instead of sending it.
+       // Upload attached files now so the queued record contains durable image
+       // descriptors that can be sent even if another session is open later.
+-      if (isLoading) {
++      if (submissionMode === 'queue') {
+         // A run can restart in the tiny gap between scheduling and flushing a
+         // queued submission. Put the same durable draft back without uploading
+         // its files again.
+@@ -774,7 +776,7 @@ export function useChatComposerState({
+       // Also accept exact "help" as a convenience alias for users who expect CLI-style help.
+       const commandInput = currentInput.trimEnd();
+       const isHelpAlias = commandInput.trim().toLowerCase() === 'help';
+-      if (commandInput.startsWith('/') || isHelpAlias) {
++      if (submissionMode === 'send' && (commandInput.startsWith('/') || isHelpAlias)) {
+         const firstSpace = commandInput.indexOf(' ');
+         const commandName = isHelpAlias
+           ? '/help'
+@@ -907,7 +909,7 @@ export function useChatComposerState({
+       // provider, project path, and provider-native resume id from the
+       // session row; `options` only carries composer-level preferences.
+       sendMessage({
+-        type: 'chat.send',
++        type: submissionMode === 'steer' ? 'chat.steer' : 'chat.send',
+         sessionId: targetSessionId,
+         content: messageContent,
+         options: {
+diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
+index 2ee2bcfab8101d323adb5a7a451cf7436aafc685..c0c89c196a41a9dcadaf3628e3b1e586771c3b50 100644
+--- a/src/components/chat/view/ChatInterface.tsx
++++ b/src/components/chat/view/ChatInterface.tsx
+@@ -411,6 +411,7 @@ function ChatInterface({
+           activity={sessionActivity}
+           isLoading={isProcessing}
+           onAbortSession={handleAbortSession}
++          provider={provider}
+           permissionMode={permissionMode}
+           availablePermissionModes={availablePermissionModes}
+           onSelectPermissionMode={(mode) => selectPermissionMode(mode as PermissionMode)}
+diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
+index 2db40746083686a7067c415f900d1184124c7c44..27097ded6aeac5abc1d3ac51a980ee2599becb0b 100644
+--- a/src/components/chat/view/subcomponents/ChatComposer.tsx
++++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
+@@ -16,8 +16,9 @@ import { useVoiceInput } from '../../hooks/useVoiceInput';
+ import { useVoiceAvailable } from '../../hooks/useVoiceAvailable';
+ import type { QueuedDraft } from '../../hooks/useChatComposerState';
+ import type { SessionActivity } from '../../../../hooks/useSessionProtection';
+-import type { PendingPermissionRequest, PermissionMode } from '../../types/types';
++import type { PendingPermissionRequest, PermissionMode, Provider } from '../../types/types';
+ import type { ProviderModelOption } from '../../../../types/app';
++import { resolveSubmissionMode } from '../../utils/submissionMode';
+ import {
+   PromptInput,
+   PromptInputHeader,
+@@ -64,6 +65,7 @@ interface ChatComposerProps {
+   activity: SessionActivity | null;
+   isLoading: boolean;
+   onAbortSession: () => void;
++  provider: Provider;
+   permissionMode: PermissionMode | string;
+   availablePermissionModes: (PermissionMode | string)[];
+   onSelectPermissionMode: (mode: PermissionMode | string) => void;
+@@ -128,6 +130,7 @@ export default function ChatComposer({
+   activity,
+   isLoading,
+   onAbortSession,
++  provider,
+   permissionMode,
+   availablePermissionModes,
+   onSelectPermissionMode,
+@@ -249,15 +252,22 @@ export default function ChatComposer({
+   const hasActivityIndicator = Boolean(activity && !hasPendingPermissions);
+ 
+   const hasQueuedDraft = Boolean(queuedDraft);
+-  const canQueueDraft = isLoading && Boolean(input.trim() || attachedFiles.length > 0);
+-  const submitHint = canQueueDraft
++  const hasPendingInput = Boolean(input.trim() || attachedFiles.length > 0);
++  const submissionMode = resolveSubmissionMode(provider, isLoading);
++  const canSteer = submissionMode === 'steer' && hasPendingInput;
++  const canQueueDraft = submissionMode === 'queue' && hasPendingInput;
++  const submitHint = canSteer
++    ? t('input.hintText.steer', { defaultValue: 'Enter to steer the current run' })
++    : canQueueDraft
+     ? hasQueuedDraft
+       ? t('input.hintText.updateQueued', { defaultValue: 'Enter to update queued message' })
+       : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
+     : sendByCtrlEnter
+       ? t('input.hintText.ctrlEnter')
+       : t('input.hintText.enter');
+-  const submitAriaLabel = canQueueDraft
++  const submitAriaLabel = canSteer
++    ? t('input.steer', { defaultValue: 'Steer current run' })
++    : canQueueDraft
+     ? hasQueuedDraft
+       ? t('input.queue.update', { defaultValue: 'Update queued message' })
+       : t('input.queue.sendNext', { defaultValue: 'Queue next message' })
+diff --git a/server/modules/providers/list/codex/codex-app-server-client.js b/server/modules/providers/list/codex/codex-app-server-client.js
+new file mode 100644
+index 0000000..6496ad9
+--- /dev/null
++++ b/server/modules/providers/list/codex/codex-app-server-client.js
+@@ -0,0 +1,161 @@
++import { spawn } from 'node:child_process';
++import { createRequire } from 'node:module';
++import path from 'node:path';
++import readline from 'node:readline';
++
++const require = createRequire(import.meta.url);
++
++export function resolveCodexCliEntrypoint() {
++  const packagePath = require.resolve('@openai/codex/package.json');
++  return path.join(path.dirname(packagePath), 'bin', 'codex.js');
++}
++
++export class CodexAppServerClient {
++  constructor({ spawnProcess = spawn, cliEntrypoint = resolveCodexCliEntrypoint() } = {}) {
++    this.spawnProcess = spawnProcess;
++    this.cliEntrypoint = cliEntrypoint;
++    this.child = null;
++    this.nextRequestId = 1;
++    this.pendingRequests = new Map();
++    this.notificationListeners = new Set();
++    this.startPromise = null;
++    this.stderr = '';
++  }
++
++  start() {
++    if (!this.startPromise) {
++      this.startPromise = this.startInternal();
++    }
++    return this.startPromise;
++  }
++
++  async startInternal() {
++    const child = this.spawnProcess(process.execPath, [this.cliEntrypoint, 'app-server', '--stdio'], {
++      env: process.env,
++      stdio: ['pipe', 'pipe', 'pipe'],
++    });
++    this.child = child;
++
++    child.stderr?.on('data', (chunk) => {
++      this.stderr = `${this.stderr}${String(chunk)}`.slice(-16_384);
++    });
++    child.once('error', (error) => this.handleExit(error));
++    child.once('exit', (code, signal) => {
++      const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
++      const stderr = this.stderr.trim();
++      this.handleExit(new Error(`Codex app-server exited with ${detail}${stderr ? `: ${stderr}` : ''}`));
++    });
++
++    if (!child.stdout || !child.stdin) {
++      throw new Error('Codex app-server process is missing stdio');
++    }
++
++    const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
++    lines.on('line', (line) => this.handleLine(line));
++
++    await this.sendRequest('initialize', {
++      clientInfo: {
++        name: 'cloudcli',
++        title: 'CloudCLI',
++        version: '1.37.2',
++      },
++    });
++    this.sendNotification('initialized', {});
++  }
++
++  handleLine(line) {
++    let message;
++    try {
++      message = JSON.parse(line);
++    } catch (error) {
++      console.warn('[Codex] Ignoring malformed app-server message:', error);
++      return;
++    }
++
++    if (message.id !== undefined && this.pendingRequests.has(message.id)) {
++      const pending = this.pendingRequests.get(message.id);
++      this.pendingRequests.delete(message.id);
++      if (message.error) {
++        pending.reject(new Error(message.error.message || `Codex app-server request failed: ${pending.method}`));
++      } else {
++        pending.resolve(message.result);
++      }
++      return;
++    }
++
++    if (message.id !== undefined && message.method) {
++      this.write({
++        id: message.id,
++        error: {
++          code: -32601,
++          message: `CloudCLI cannot handle Codex app-server request "${message.method}"`,
++        },
++      });
++      return;
++    }
++
++    if (message.method) {
++      for (const listener of this.notificationListeners) {
++        listener(message);
++      }
++    }
++  }
++
++  handleExit(error) {
++    if (!this.child) {
++      return;
++    }
++    this.child = null;
++    this.startPromise = null;
++    for (const pending of this.pendingRequests.values()) {
++      pending.reject(error);
++    }
++    this.pendingRequests.clear();
++    for (const listener of this.notificationListeners) {
++      listener({ method: 'cloudcli/app-server-error', params: { error } });
++    }
++  }
++
++  write(message) {
++    if (!this.child?.stdin?.writable) {
++      throw new Error('Codex app-server is not running');
++    }
++    this.child.stdin.write(`${JSON.stringify(message)}\n`);
++  }
++
++  sendRequest(method, params) {
++    const id = this.nextRequestId++;
++    return new Promise((resolve, reject) => {
++      this.pendingRequests.set(id, { method, resolve, reject });
++      try {
++        this.write({ method, id, params });
++      } catch (error) {
++        this.pendingRequests.delete(id);
++        reject(error);
++      }
++    });
++  }
++
++  sendNotification(method, params) {
++    this.write({ method, params });
++  }
++
++  async request(method, params) {
++    await this.start();
++    return this.sendRequest(method, params);
++  }
++
++  subscribe(listener) {
++    this.notificationListeners.add(listener);
++    return () => this.notificationListeners.delete(listener);
++  }
++
++  close() {
++    const child = this.child;
++    if (!child) {
++      return;
++    }
++    child.kill();
++    this.handleExit(new Error('Codex app-server client closed'));
++  }
++}
+diff --git a/server/modules/providers/list/codex/codex-app-server-client.test.js b/server/modules/providers/list/codex/codex-app-server-client.test.js
+new file mode 100644
+index 0000000..6ce8d4b
+--- /dev/null
++++ b/server/modules/providers/list/codex/codex-app-server-client.test.js
+@@ -0,0 +1,84 @@
++import assert from 'node:assert/strict';
++import { EventEmitter } from 'node:events';
++import { PassThrough } from 'node:stream';
++import test from 'node:test';
++
++import { CodexAppServerClient } from './codex-app-server-client.js';
++
++function createFakeProcess(onMessage) {
++  const child = new EventEmitter();
++  child.stdin = new PassThrough();
++  child.stdout = new PassThrough();
++  child.stderr = new PassThrough();
++  child.kill = () => {
++    queueMicrotask(() => child.emit('exit', 0, null));
++    return true;
++  };
++
++  let input = '';
++  child.stdin.on('data', (chunk) => {
++    input += String(chunk);
++    let newline = input.indexOf('\n');
++    while (newline !== -1) {
++      const line = input.slice(0, newline);
++      input = input.slice(newline + 1);
++      onMessage(JSON.parse(line), child);
++      newline = input.indexOf('\n');
++    }
++  });
++  return child;
++}
++
++test('CodexAppServerClient initializes, routes requests, and publishes notifications', async () => {
++  const received = [];
++  let child;
++  const client = new CodexAppServerClient({
++    cliEntrypoint: '/fake/codex.js',
++    spawnProcess(command, args) {
++      assert.equal(command, process.execPath);
++      assert.deepEqual(args, ['/fake/codex.js', 'app-server', '--stdio']);
++      child = createFakeProcess((message, processHandle) => {
++        received.push(message);
++        if (message.id !== undefined) {
++          processHandle.stdout.write(`${JSON.stringify({ id: message.id, result: { ok: message.method } })}\n`);
++        }
++      });
++      return child;
++    },
++  });
++
++  const notifications = [];
++  client.subscribe((notification) => notifications.push(notification));
++  const result = await client.request('thread/start', { model: 'gpt-test' });
++
++  assert.deepEqual(result, { ok: 'thread/start' });
++  assert.equal(received[0].method, 'initialize');
++  assert.equal(received[1].method, 'initialized');
++  assert.equal(received[2].method, 'thread/start');
++
++  child.stdout.write(`${JSON.stringify({ method: 'turn/started', params: { threadId: 'thread-1' } })}\n`);
++  assert.equal(notifications[0].method, 'turn/started');
++  client.close();
++});
++
++test('CodexAppServerClient rejects pending requests when app-server exits', async () => {
++  let child;
++  const client = new CodexAppServerClient({
++    cliEntrypoint: '/fake/codex.js',
++    spawnProcess() {
++      child = createFakeProcess((message, processHandle) => {
++        if (message.method === 'initialize') {
++          processHandle.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
++        }
++      });
++      return child;
++    },
++  });
++
++  await client.start();
++  const pending = client.sendRequest('turn/steer', {});
++  child.stderr.write('boom');
++  child.emit('exit', 1, null);
++
++  await assert.rejects(pending, /code 1: boom/);
++});
+diff --git a/server/modules/providers/list/codex/codex-runtime.provider.test.js b/server/modules/providers/list/codex/codex-runtime.provider.test.js
+new file mode 100644
+index 0000000..b459d0b
+--- /dev/null
++++ b/server/modules/providers/list/codex/codex-runtime.provider.test.js
+@@ -0,0 +1,117 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++
++import {
++  queryCodex,
++  setCodexAppServerClientForTests,
++  steerCodexSession,
++} from './codex-runtime.provider.js';
++import { CodexSessionsProvider } from './codex-sessions.provider.js';
++
++class FakeAppServerClient {
++  constructor() {
++    this.listeners = new Set();
++    this.requests = [];
++  }
++
++  async request(method, params) {
++    this.requests.push({ method, params });
++    if (method === 'thread/start') {
++      return { thread: { id: 'provider-thread-1' } };
++    }
++    if (method === 'turn/start') {
++      return { turn: { id: 'turn-1' } };
++    }
++    if (method === 'turn/steer') {
++      return { turnId: 'turn-1' };
++    }
++    return {};
++  }
++
++  subscribe(listener) {
++    this.listeners.add(listener);
++    return () => this.listeners.delete(listener);
++  }
++
++  emit(method, params) {
++    for (const listener of this.listeners) {
++      listener({ method, params });
++    }
++  }
++}
++
++const sessionsProvider = new CodexSessionsProvider();
++const runtimeContext = {
++  resolveProviderSessionId: () => null,
++  resolveResumeModel: async (_sessionId, requestedModel) => requestedModel,
++  getProviderModels: async () => ({
++    DEFAULT: 'gpt-test',
++    OPTIONS: [{ value: 'gpt-test', effort: { values: [{ value: 'high' }] } }],
++  }),
++  normalizeMessage: (raw, sessionId) => sessionsProvider.normalizeMessage(raw, sessionId),
++  isProviderInstalled: async () => true,
++};
++
++async function waitForRequest(client, method) {
++  for (let attempt = 0; attempt < 20; attempt += 1) {
++    const request = client.requests.find((candidate) => candidate.method === method);
++    if (request) {
++      return request;
++    }
++    await new Promise((resolve) => setImmediate(resolve));
++  }
++  throw new Error(`Timed out waiting for ${method}`);
++}
++
++test('Codex runtime starts through app-server and steers the active turn', async () => {
++  const client = new FakeAppServerClient();
++  setCodexAppServerClientForTests(client);
++  const messages = [];
++  const writer = {
++    isWebSocketWriter: true,
++    userId: null,
++    setSessionId(id) {
++      this.providerSessionId = id;
++    },
++    send(message) {
++      messages.push(message);
++    },
++  };
++
++  const running = queryCodex('Start', {
++    sessionId: 'app-session-1',
++    cwd: '/tmp/project',
++    model: 'gpt-test',
++    effort: 'high',
++    permissionMode: 'acceptEdits',
++  }, writer, runtimeContext);
++
++  const turnStart = await waitForRequest(client, 'turn/start');
++  assert.equal(turnStart.params.threadId, 'provider-thread-1');
++  assert.equal(turnStart.params.input[0].text, 'Start');
++  assert.equal(turnStart.params.effort, 'high');
++
++  const steered = await steerCodexSession('app-session-1', 'Focus on tests');
++  assert.equal(steered, true);
++  const steer = client.requests.find((request) => request.method === 'turn/steer');
++  assert.equal(steer.params.threadId, 'provider-thread-1');
++  assert.equal(steer.params.expectedTurnId, 'turn-1');
++  assert.equal(steer.params.input[0].text, 'Focus on tests');
++
++  client.emit('item/completed', {
++    threadId: 'provider-thread-1',
++    turnId: 'turn-1',
++    item: { type: 'agentMessage', id: 'message-1', text: 'Done' },
++  });
++  client.emit('turn/completed', {
++    threadId: 'provider-thread-1',
++    turn: { id: 'turn-1', status: 'completed', error: null },
++  });
++  await running;
++
++  assert.equal(writer.providerSessionId, 'provider-thread-1');
++  assert.ok(messages.some((message) => message.kind === 'session_created'));
++  assert.ok(messages.some((message) => message.kind === 'text' && message.content === 'Done'));
++  assert.ok(messages.some((message) => message.kind === 'complete'));
++  setCodexAppServerClientForTests(null);
++});
+diff --git a/src/components/chat/utils/submissionMode.ts b/src/components/chat/utils/submissionMode.ts
+new file mode 100644
+index 0000000..8f02f49
+--- /dev/null
++++ b/src/components/chat/utils/submissionMode.ts
+@@ -0,0 +1,10 @@
++import type { Provider } from '../types/types';
++
++export type SubmissionMode = 'send' | 'steer' | 'queue';
++
++export function resolveSubmissionMode(provider: Provider, isLoading: boolean): SubmissionMode {
++  if (!isLoading) {
++    return 'send';
++  }
++  return provider === 'codex' ? 'steer' : 'queue';
++}
+diff --git a/src/components/chat/utils/submissionMode.test.ts b/src/components/chat/utils/submissionMode.test.ts
+new file mode 100644
+index 0000000..5911f32
+--- /dev/null
++++ b/src/components/chat/utils/submissionMode.test.ts
+@@ -0,0 +1,15 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++
++import { resolveSubmissionMode } from './submissionMode';
++
++test('Codex submissions steer while a turn is running', () => {
++  assert.equal(resolveSubmissionMode('codex', true), 'steer');
++  assert.equal(resolveSubmissionMode('codex', false), 'send');
++});
++
++test('other providers preserve queued follow-ups while a turn is running', () => {
++  assert.equal(resolveSubmissionMode('claude', true), 'queue');
++  assert.equal(resolveSubmissionMode('cursor', true), 'queue');
++  assert.equal(resolveSubmissionMode('opencode', true), 'queue');
++});
