@@ -184,9 +184,9 @@ struct RenamedAudioPageApp
     FakeAppSurface surface;
 };
 
-// sprs-17: an app that registers one additional sidebar page. The builder
+// An app that registers one additional sidebar page. The builder
 // declares a Row with non-default padding and a non-even weight split, the
-// same nested-layout shape Task 9's
+// same nested-layout shape
 // TestAudioPageAppSectionNestedLayoutSurvivesTheSplice (portable_ui_tests.cpp)
 // uses to prove Splice(Subtree) -- not Splice(NodeTree) -- carries a nested
 // container's declared LayoutOptions through the splice instead of letting
@@ -232,7 +232,7 @@ struct RegisteredPageApp
     FakeAppSurface surface;
 };
 
-// Task 8.3 (sprs-13): a surface that additionally implements
+// A surface that additionally implements
 // ui::ExtentAwareSurface and resolves its BuildTree() root against whatever
 // extent it was last offered, instead of a compiled-in size.
 class ExtentAwareAppSurface final : public synth::ui::Surface, public synth::ui::ExtentAwareSurface
@@ -425,10 +425,9 @@ struct Fixture
 };
 
 // An application declaring a surface shorter than the runtime sidebar. 160 is
-// below the sidebar's five fixed 40px rows, which is the exact residual task
-// 7.1 recorded: the shell PLACES already-resolved subtree roots rather than
-// resolving them, so sru-54's overflow gate never sees this composition and
-// nothing used to catch an app that overran the window.
+// below the sidebar's five fixed 40px rows: the shell places already-resolved
+// subtree roots rather than resolving them, and nothing used to catch an app
+// that overran the window.
 struct ShortSurfaceApp
 {
     static synth::RuntimeConfig Config()
@@ -513,10 +512,9 @@ void TestCompositeBoundsPreserveAppAndAddSidebar()
                   "intrinsic bounds");
 }
 
-// Task 8.3 (sprs-13): an extent-aware app surface resolves against whatever
+// An extent-aware app surface resolves against whatever
 // live extent the shell offers, and the sidebar tracks the resolved app
-// root width rather than a compiled-in one (RuntimeMainComponent.hpp:122
-// pinned it to App::Config().uiWidth before this task).
+// root width rather than a compiled-in one.
 void TestExtentAwareAppTracksResizedContentExtent()
 {
     ExtentAwareApp app;
@@ -548,12 +546,12 @@ void TestExtentAwareAppTracksResizedContentExtent()
     RequireBounds(FindNode(resized, "runtime.main.root").bounds,
                   0.0f, 0.0f, 1296.0f, 560.0f, "composite root grows with the resolved app width");
 
-    // Fix round 1, finding 2: a vertical resize too -- the composite root's
+    // A vertical resize too -- the composite root's
     // height must track the resolved app height (900x560 -> 1200x700), not
-    // stay pinned to the compiled-in config.uiHeight (560). Before the fix,
-    // root.bounds.height was hardcoded to config.uiHeight even on this
-    // extent-aware branch, so this resize would validate (the validator
-    // checks the app root, not the composite root) and then throw inside
+    // stay pinned to the compiled-in config.uiHeight (560). root.bounds.height
+    // used to stay hardcoded to config.uiHeight even on this extent-aware
+    // branch, so this resize would validate (the validator checks the app
+    // root, not the composite root) and then throw inside
     // RequireCompositionHolds because the 700-tall app root no longer fit a
     // 560-tall composite root.
     component.SetContentExtent({0.0f, 0.0f, 1200.0f, 700.0f});
@@ -655,20 +653,14 @@ void TestControllerDraftActionsReachControllerSurface()
     Fixture fixture;
 
     fixture.component.ShowPage(synth::runtime_ui::RuntimeMainPage::Controllers);
-    fixture.component.DispatchAction(
-        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddNameDraft, "webctl"));
-    fixture.component.DispatchAction(
-        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddKindDraft, "generic"));
+    fixture.component.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kAddPresetDraft, "custom.generic"));
 
     const synth::ui::NodeTree tree = fixture.component.BuildTree();
-    const synth::ui::Node* addName =
-        FindNodeById(tree, synth::runtime_ui::NodeIds::kAddName);
-    const synth::ui::Node* addKind =
-        FindNodeById(tree, synth::runtime_ui::NodeIds::kAddKind);
-    Require(addName != nullptr && addName->text == "webctl",
-            "controller add-name draft routes through runtime component");
-    Require(addKind != nullptr && addKind->selectedOption == "generic",
-            "controller add-kind draft routes through runtime component");
+    const synth::ui::Node* addPreset =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::kAddPreset);
+    Require(addPreset != nullptr && addPreset->selectedOption == "custom.generic",
+            "controller add-preset draft routes through runtime component");
 
     fixture.services.controllerDevices.inputs.push_back(
         {.identifier = "twister-in", .name = "Midi Fighter Twister"});
@@ -866,8 +858,8 @@ void TestSidebarWarningReflectsControllersDiscoverySnapshot()
             "unclaimed recognized cached pair warns while application is open");
 }
 
-// sprs-17: an app that never defines RegisteredPage() (FakeApp) must produce
-// exactly the sidebar and routing that existed before this task -- "optional
+// An app that never defines RegisteredPage() (FakeApp) must produce
+// exactly the sidebar and routing that existed before app-registered pages -- "optional
 // means optional, assert don't assume" (design constraint), checked both as
 // a tree shape and as a dispatched-action no-op.
 void TestSidebarWithNoRegistrationHasNoAppButtonAndIgnoresItsAction()
@@ -929,9 +921,9 @@ void TestAudioPageButtonTakesTheAppsOwnNameWhenSet()
             "the renamed button still opens the Audio page");
 }
 
-// sprs-17: an app that does define RegisteredPage() gets a button after
+// An app that does define RegisteredPage() gets a button after
 // File, and selecting it shows the app-built tree spliced with its declared
-// nested layout preserved (Task 9's nested-layout assertion pattern, reused
+// nested layout preserved (the nested-layout assertion pattern, reused
 // against the whole registered page rather than an audio-page section).
 void TestRegisteredPageButtonRendersAfterFileAndRoutesToSplicedAppTree()
 {

@@ -43,8 +43,7 @@ inline constexpr const char* kBack = "runtime.controllers.back";
 inline constexpr const char* kStatus = "runtime.controllers.status";
 inline constexpr const char* kScroll = "runtime.controllers.scroll";
 inline constexpr const char* kAddRow = "runtime.controllers.add_row";
-inline constexpr const char* kAddName = "runtime.controllers.add_name";
-inline constexpr const char* kAddKind = "runtime.controllers.add_kind";
+inline constexpr const char* kAddPreset = "runtime.controllers.add_preset";
 inline constexpr const char* kAddButton = "runtime.controllers.add_button";
 inline constexpr const char* kAvailable = "runtime.controllers.available";
 inline constexpr const char* kAvailableHeading = "runtime.controllers.available.heading";
@@ -350,9 +349,14 @@ inline std::string ControllerOutput(std::size_t controllerIx)
     return ControllerRow(controllerIx) + ".output";
 }
 
-inline std::string ControllerStatusDots(std::size_t controllerIx)
+inline std::string ControllerInputStatus(std::size_t controllerIx)
 {
-    return ControllerRow(controllerIx) + ".status_dots";
+    return ControllerRow(controllerIx) + ".input_status";
+}
+
+inline std::string ControllerOutputStatus(std::size_t controllerIx)
+{
+    return ControllerRow(controllerIx) + ".output_status";
 }
 
 inline std::string SectionToggle(std::size_t controllerIx, MidiConfigSection section)
@@ -418,8 +422,7 @@ inline constexpr const char* kMappingFieldCommit = "runtime.controllers.mapping_
 inline constexpr const char* kDeleteRow = "runtime.controllers.delete_row";
 inline constexpr const char* kAddSingle = "runtime.controllers.add_single";
 inline constexpr const char* kAddBlock = "runtime.controllers.add_block";
-inline constexpr const char* kAddNameDraft = "runtime.controllers.add_name_draft";
-inline constexpr const char* kAddKindDraft = "runtime.controllers.add_kind_draft";
+inline constexpr const char* kAddPresetDraft = "runtime.controllers.add_preset_draft";
 inline constexpr const char* kAddController = "runtime.controllers.add_controller";
 inline constexpr const char* kAvailableConfigure = "runtime.controllers.available.configure";
 inline constexpr const char* kAvailableIgnore = "runtime.controllers.available.ignore";
@@ -451,8 +454,7 @@ inline constexpr std::string_view kControllersActions[] = {
     kDeleteRow,
     kAddSingle,
     kAddBlock,
-    kAddNameDraft,
-    kAddKindDraft,
+    kAddPresetDraft,
     kAddController,
     kAvailableConfigure,
     kAvailableIgnore,
@@ -484,12 +486,13 @@ inline constexpr float kBaseEditorWidth = 90.0f;
 inline constexpr float kDeleteButtonWidth = 22.0f;
 inline constexpr float kAddButtonWidth = 62.0f;
 inline constexpr float kVariantFieldWidth = 200.0f;
-inline constexpr float kStatusDotsWidth = 32.0f;
 // The section heading's legend: three in-flow dot/word pairs (online, offline,
 // not set). Each dot sits in its own cell, sized for the 8px dot it centres;
 // the word beside it takes the word's own intrinsic width, so the two never
 // drift apart the way character-advance arithmetic over a shared string did.
-inline constexpr float kStatusLegendDotWidth = 16.0f;
+// The same cell width also sizes the two per-port status dots on a
+// controller row's line two, immediately before each port's combo.
+inline constexpr float kStatusDotWidth = 16.0f;
 inline constexpr float kStatusLegendPairGap = 16.0f;
 inline constexpr float kEndpointFieldWidth = 220.0f;
 inline constexpr float kEndpointBoxGap = 8.0f;
@@ -503,9 +506,8 @@ inline constexpr float kAvailableControlGap = 8.0f;
 inline constexpr float kControllerNameWidth = 200.0f;
 inline constexpr float kControllerKindWidth = 100.0f;
 inline constexpr float kControllerDisclosureWidth = 24.0f;
-// 120px cannot hold the "Rename to" caption plus a usable field (the caption
-// alone measures ~94px at the default text size), so the draft column is wide
-// enough for the caption and a short name.
+// The draft column is wide enough to hold the "Name" caption plus a usable
+// field for a short name.
 inline constexpr float kLifecycleDraftWidth = 160.0f;
 inline constexpr float kLifecycleRenameWidth = 72.0f;
 inline constexpr float kLifecycleDeleteWidth = 66.0f;
@@ -514,30 +516,31 @@ inline constexpr float kLifecycleBlacklistWidth = 78.0f;
 inline constexpr float kLifecycleConfigureWidth = 86.0f;
 inline constexpr float kLifecycleRemoveWidth = 72.0f;
 inline constexpr float kLifecycleControlGap = 4.0f;
-// The Layout combo now sits on line one beside the identity controls; line
-// two's lifecycle block is the rename draft, Rename, Delete and Blacklist.
+// The Preset combo sits on line one beside the identity controls; the name
+// draft and Rename button moved into the expanded editor, so line two's
+// lifecycle block is just Delete and Blacklist.
 inline constexpr float kActiveLifecycleWidth =
-    kLifecycleDraftWidth + kLifecycleControlGap + kLifecycleRenameWidth +
-    kLifecycleControlGap + kLifecycleDeleteWidth + kLifecycleControlGap +
-    kLifecycleBlacklistWidth;
+    kLifecycleDeleteWidth + kLifecycleControlGap + kLifecycleBlacklistWidth;
 inline constexpr float kBlacklistedEndpointLabelWidth = 240.0f;
 inline constexpr float kBlacklistedBadgeWidth = 84.0f;
+// A blacklisted record has no expanded editor to hold a moved rename field,
+// and no story for renaming a row the operator is ignoring, so the name
+// draft and Rename button are simply gone here, not moved.
 inline constexpr float kBlacklistedLifecycleWidth =
-    kLifecycleDraftWidth + kLifecycleControlGap + kLifecycleRenameWidth +
-    kLifecycleControlGap + kLifecycleConfigureWidth + kLifecycleControlGap +
-    kLifecycleRemoveWidth;
-// Line one: disclosure, name, kind, status dots, Layout, and (worst case, a
-// Launchpad) Variant.
+    kLifecycleConfigureWidth + kLifecycleControlGap + kLifecycleRemoveWidth;
+// Line one: disclosure, name, kind, Preset, and (worst case, a Launchpad)
+// Variant. The status dots are on line two now, beside the ports they
+// describe.
 inline constexpr float kActiveHeaderLine1Width =
     kControllerDisclosureWidth + kLifecycleControlGap + kControllerNameWidth +
     kLifecycleControlGap + kControllerKindWidth + kLifecycleControlGap +
-    kStatusDotsWidth + kLifecycleControlGap + kLifecycleLayoutWidth +
-    kLifecycleControlGap + kVariantFieldWidth;
-// Line two: the endpoints cluster (Input, Output) followed by the lifecycle
-// controls.
+    kLifecycleLayoutWidth + kLifecycleControlGap + kVariantFieldWidth;
+// Line two: a status dot immediately before each port's combo, then the
+// lifecycle controls.
 inline constexpr float kActiveHeaderLine2Width =
-    kEndpointFieldWidth + kEndpointBoxGap + kEndpointFieldWidth + kActiveLifecycleWidth +
-    kLifecycleControlGap;
+    kStatusDotWidth + kLifecycleControlGap + kEndpointFieldWidth + kEndpointBoxGap +
+    kStatusDotWidth + kLifecycleControlGap + kEndpointFieldWidth + kLifecycleControlGap +
+    kActiveLifecycleWidth + kLifecycleControlGap;
 inline constexpr float kActiveControllerHeaderWidth =
     std::max(kActiveHeaderLine1Width, kActiveHeaderLine2Width);
 // Line one: name, kind, Blacklisted badge.
@@ -791,6 +794,22 @@ inline Color EndpointStatusColor(MidiEndpointStatus status)
     return Color::Rgb(128, 128, 128);
 }
 
+// Draws one status dot: a controller row's per-port indicator and the status
+// legend's swatch are the same mark, so both callers share this to keep the
+// dot's size and colour from drifting apart between the two places it appears.
+inline void EmitStatusDot(ui::Builder& parent, const std::string& id, MidiEndpointStatus status)
+{
+    ui::LayoutOptions dotLayout;
+    dotLayout.main = ui::Extent::Px(kStatusDotWidth);
+    parent.Draw(id, dotLayout, [status](ui::Bounds nodeExtent) {
+        constexpr float kDotSize = 8.0f;
+        return std::vector<ui::DrawCommand>{ui::DrawCommand::FillEllipse(
+            {(nodeExtent.width - kDotSize) / 2.0f,
+             (nodeExtent.height - kDotSize) / 2.0f, kDotSize, kDotSize},
+            EndpointStatusColor(status))};
+    });
+}
+
 // Stored endpoint identity, independent of connection status, so a
 // deliberately inert Blacklisted record still shows which endpoints it holds.
 inline std::string StoredEndpointLabel(const MidiEndpointRef& ref)
@@ -898,29 +917,89 @@ inline std::vector<ui::ControlOption> BuildLayoutOptions(
     return options;
 }
 
-inline std::vector<ui::ControlOption> BuildAddControllerKindOptions()
+// Installs a descriptor's default profile onto `slot`: opens the descriptor's
+// wizard, opens a blank form (ConfigForm(nullopt)), generates a profile from
+// it, then copies the generated kind, config and wizardId onto `slot`. On
+// failure `reason` (when non-null) gets the same wording HandleControllerLayout
+// used to produce inline; the caller formats its own "Refused: " + *reason.
+// HandleControllerLayout (choosing a preset for an existing row) and the add
+// row (adding a new row from a preset) are the only two sites that install a
+// descriptor from a blank form, and both call this one definition.
+inline bool InstallDescriptorProfile(const std::vector<ControllerWizardDescriptor>& layouts,
+                                     const ControllerWizardDescriptor& descriptor,
+                                     MidiControllerSlot& slot,
+                                     std::string* reason)
 {
-    return {{"wrldbldr", MidiProfileKindDisplayName(MidiProfileKind::WrldBldr)},
-            {"mftwister", MidiProfileKindDisplayName(MidiProfileKind::MfTwister)},
-            {"launchpad", MidiProfileKindDisplayName(MidiProfileKind::Launchpad)},
-            {"generic", MidiProfileKindDisplayName(MidiProfileKind::Generic)}};
+    std::unique_ptr<ControllerWizard> wizard = MakeControllerWizard(layouts, descriptor.id);
+    if (!wizard)
+    {
+        if (reason)
+        {
+            *reason = "controller wizard is unavailable";
+        }
+        return false;
+    }
+    std::unique_ptr<ControllerConfigForm> form = wizard->ConfigForm(std::nullopt);
+    if (!form)
+    {
+        if (reason)
+        {
+            *reason = "controller wizard could not open a form";
+        }
+        return false;
+    }
+    WizardGenerationResult generated = wizard->GenerateProfile(
+        *form, {.name = slot.name, .input = slot.input, .output = slot.output});
+    if (!generated)
+    {
+        if (reason)
+        {
+            *reason = generated.error.empty() ? "controller profile generation failed" : generated.error;
+        }
+        return false;
+    }
+    slot.kind = generated.controller->kind;
+    slot.config = std::move(generated.controller->config);
+    slot.wizardId = generated.controller->wizardId;
+    return true;
 }
 
-inline MidiProfileKind KindFromAddOptionId(const std::string& optionId)
+// The add row's Preset combo: every registry descriptor's display name
+// (option id = descriptor id), then one "Custom (<kind>)" entry per
+// MidiProfileKind in this fixed order, option id `custom.<kind token>` using
+// the existing MidiProfileKindName (the add handler parses it back with the
+// existing MidiProfileKindFromName -- no second token switch).
+inline std::vector<ui::ControlOption> BuildAddPresetOptions(
+    const std::vector<ControllerWizardDescriptor>& layouts)
 {
-    if (optionId == "mftwister")
+    std::vector<ui::ControlOption> options;
+    options.reserve(layouts.size() + 4);
+    for (const ControllerWizardDescriptor& descriptor : layouts)
     {
-        return MidiProfileKind::MfTwister;
+        options.push_back({descriptor.id, descriptor.displayName});
     }
-    if (optionId == "launchpad")
+    constexpr MidiProfileKind kCustomKinds[] = {MidiProfileKind::Generic, MidiProfileKind::MfTwister,
+                                                MidiProfileKind::Launchpad, MidiProfileKind::WrldBldr};
+    for (MidiProfileKind kind : kCustomKinds)
     {
-        return MidiProfileKind::Launchpad;
+        options.push_back({std::string("custom.") + MidiProfileKindName(kind),
+                           std::string("Custom (") + MidiProfileKindDisplayName(kind) + ")"});
     }
-    if (optionId == "generic")
+    return options;
+}
+
+// The add row's Preset combo defaults to its first option when no draft has
+// been recorded yet. Derived from BuildAddPresetOptions itself -- not a
+// second "first option" rule -- so the row's displayed default and the id
+// HandleAddController installs from cannot drift apart.
+inline std::string EffectiveAddPresetId(const std::vector<ControllerWizardDescriptor>& layouts,
+                                        const std::string& draft)
+{
+    if (!draft.empty())
     {
-        return MidiProfileKind::Generic;
+        return draft;
     }
-    return MidiProfileKind::WrldBldr;
+    return BuildAddPresetOptions(layouts).front().id;
 }
 
 }  // namespace ControllersLayout
@@ -1025,8 +1104,7 @@ public:
                                         m_discovery,
                                         m_contentBounds,
                                         m_statusText,
-                                        m_addControllerName,
-                                        m_addControllerKindId,
+                                        m_addPresetId,
                                         m_renameDrafts);
     }
 
@@ -1194,14 +1272,13 @@ public:
         return m_treeRevision;
     }
 
-    void SetAddControllerDraft(std::string name, std::string kindOptionId)
+    void SetAddPresetDraft(std::string presetId)
     {
-        if (m_addControllerName == name && m_addControllerKindId == kindOptionId)
+        if (m_addPresetId == presetId)
         {
             return;
         }
-        m_addControllerName = std::move(name);
-        m_addControllerKindId = std::move(kindOptionId);
+        m_addPresetId = std::move(presetId);
         ++m_treeRevision;
     }
 
@@ -1424,15 +1501,9 @@ private:
             return;
         }
 
-        if (action.name == Actions::kAddNameDraft)
+        if (action.name == Actions::kAddPresetDraft)
         {
-            SetAddControllerDraft(action.value, m_addControllerKindId);
-            return;
-        }
-
-        if (action.name == Actions::kAddKindDraft)
-        {
-            SetAddControllerDraft(m_addControllerName, action.value);
+            SetAddPresetDraft(action.value);
             return;
         }
 
@@ -1767,6 +1838,10 @@ private:
             },
             "Renamed " + name))
         {
+            // Re-key m_vm's per-row UI caches now, before RefreshOnTick's
+            // next Rebuild() runs -- Rebuild() erases cache entries for
+            // names no longer present, and by then the old name is gone.
+            m_vm.NoteControllerRenamed(identity->second, name);
             m_renameDrafts.erase(identity->second);
         }
     }
@@ -2146,31 +2221,12 @@ private:
         if (optionIx < layouts.size())
         {
             const ControllerWizardDescriptor& descriptor = layouts[optionIx];
-            std::unique_ptr<ControllerWizard> wizard = MakeControllerWizard(layouts, descriptor.id);
-            if (!wizard)
+            std::string reason;
+            if (!ControllersLayout::InstallDescriptorProfile(layouts, descriptor, replacement, &reason))
             {
-                SetStatus("Refused: controller wizard is unavailable");
+                SetStatus("Refused: " + reason);
                 return;
             }
-            std::unique_ptr<ControllerConfigForm> form = wizard->ConfigForm(std::nullopt);
-            if (!form)
-            {
-                SetStatus("Refused: controller wizard could not open a form");
-                return;
-            }
-            WizardGenerationResult generated = wizard->GenerateProfile(
-                *form,
-                {.name = replacement.name, .input = replacement.input, .output = replacement.output});
-            if (!generated)
-            {
-                SetStatus("Refused: " +
-                          (generated.error.empty() ? std::string("controller profile generation failed")
-                                                    : generated.error));
-                return;
-            }
-            replacement.kind = generated.controller->kind;
-            replacement.config = std::move(generated.controller->config);
-            replacement.wizardId = generated.controller->wizardId;
             statusText = descriptor.displayName + " installed";
         }
         else
@@ -2314,33 +2370,94 @@ private:
         }
     }
 
-    void HandleAddController(const std::string& value)
+    void HandleAddController(const std::string& /*value*/)
     {
-        const auto parts = Split(value, ':');
-        std::string name = m_addControllerName;
-        std::string kindId = m_addControllerKindId;
-        if (parts.size() >= 2)
+        if (!m_callbacks.instrumentSnapshot)
         {
-            name = parts[0];
-            kindId = parts[1];
-        }
-        if (name.empty())
-        {
-            SetStatus("Refused: name must not be empty");
             return;
         }
-        MidiInstrumentConfig out;
-        std::string reason;
-        if (m_vm.AddController(name, ControllersLayout::KindFromAddOptionId(kindId), out, &reason))
+        const MidiInstrumentConfig instrument = m_callbacks.instrumentSnapshot();
+        const std::vector<ControllerWizardDescriptor>& layouts = m_vm.Layouts();
+        // The combo defaults to its first option when no draft was recorded
+        // (e.g. Add pressed on a freshly opened page with the combo never
+        // touched); this must match what the row actually displayed.
+        const std::string presetId = ControllersLayout::EffectiveAddPresetId(layouts, m_addPresetId);
+        constexpr std::string_view kCustomPrefix = "custom.";
+
+        if (presetId.starts_with(kCustomPrefix))
         {
-            Commit(std::move(out));
-            SetStatus("Added " + name);
-            m_addControllerName.clear();
+            // BuildAddPresetOptions is the only source of a "custom." id, and it
+            // builds the token with MidiProfileKindName over exactly the four
+            // kinds MidiProfileKindFromName parses -- the parse cannot fail, so
+            // there is no refusal branch for it.
+            MidiProfileKind kind = MidiProfileKind::Generic;
+            MidiProfileKindFromName(presetId.substr(kCustomPrefix.size()), kind);
+            const std::string name = AvailableControllerName(instrument, MidiProfileKindDisplayName(kind));
+            MidiInstrumentConfig out;
+            std::string reason;
+            if (m_vm.AddController(name, kind, out, &reason))
+            {
+                Commit(std::move(out));
+                SetStatus("Added " + name);
+            }
+            else
+            {
+                SetStatus("Refused: " + reason);
+            }
+            return;
         }
-        else
+
+        const ControllerWizardDescriptor* descriptor = nullptr;
+        for (const ControllerWizardDescriptor& candidate : layouts)
+        {
+            if (candidate.id == presetId)
+            {
+                descriptor = &candidate;
+                break;
+            }
+        }
+        if (descriptor == nullptr)
+        {
+            SetStatus("Refused: unknown controller preset");
+            return;
+        }
+
+        MidiControllerSlot slot;
+        slot.name = AvailableControllerName(instrument, descriptor->displayName);
+
+        // A candidate needs an unclaimed input AND output matching the preset's
+        // aliases; with only one side connected there is no candidate, and both
+        // ports are left unset so their combos read "(none)".
+        const WizardDiscovery addDiscovery = DiscoverControllerWizards(m_devices, instrument, layouts);
+        for (const WizardCandidate& candidate : addDiscovery.available)
+        {
+            if (candidate.wizardId == descriptor->id)
+            {
+                slot.input = {.identifier = candidate.input.identifier, .name = candidate.input.name};
+                slot.output = {.identifier = candidate.output.identifier, .name = candidate.output.name};
+                break;
+            }
+        }
+
+        std::string reason;
+        if (!ControllersLayout::InstallDescriptorProfile(layouts, *descriptor, slot, &reason))
         {
             SetStatus("Refused: " + reason);
+            return;
         }
+
+        MidiInstrumentConfig out = instrument;
+        if (!out.AddController(slot))
+        {
+            SetStatus("Refused: generated controller record is invalid");
+            return;
+        }
+        if (!Commit(std::move(out)))
+        {
+            SetStatus("Refused: host rejected the instrument commit");
+            return;
+        }
+        SetStatus("Added " + slot.name);
     }
 
     void CloseWizardSession()
@@ -2368,11 +2485,11 @@ private:
     // the Back action, the heading, an optional status line, and one button per
     // candidate. Nothing here carries bounds — every extent is declared and the
     // resolver derives the geometry from the page extent it is handed, so no
-    // backend has to flow or size any of it (sru-49, sru-50).
+    // backend has to flow or size any of it.
     //
     // Before this it set bounds on the root and on nothing else, and the
     // auto-flow cursor both backends have since deleted was the only thing
-    // positioning its children. Task 5.9 rebuilds the whole Controllers page
+    // positioning its children. The Controllers page is built
     // this way; the chooser is here early because the deletions landed first.
     ui::NodeTree BuildWizardChooserTree() const
     {
@@ -2468,20 +2585,20 @@ private:
         // for 664 against this page's 640-wide body, so before this region
         // existed the form overhung its parent by 28px and both backends
         // clipped the right column's argument fields away with no diagnostic.
-        // sru-54 did not catch it because its gate is the STACKING axis and
-        // this is a cross-axis overrun of a fixed-extent child. (The form is
-        // 684 wide now -- widening `kMessageWidth` to stop the message
+        // This overflow did not register because the gate only checks the
+        // stacking axis, not cross-axis overruns of fixed-extent children. (The
+        // form is 684 wide now -- widening `kMessageWidth` to stop the message
         // selectors clipping their own text made the overhang larger, not
         // smaller, which is exactly why the host cannot rely on a form's
         // declared width being one it can show.)
         //
-        // A `ScrollArea` is one of sru-54's two sanctioned absorbing
+        // A `ScrollArea` is one of two sanctioned absorbing
         // mechanisms, and the resolver publishes its content extent from the
         // children it just placed -- on both axes -- so the whole form stays
         // reachable at any surface a host declares, including one narrower than
         // 640. This is the host's obligation and it holds for third-party
-        // wizards too, which the page cannot re-measure. Task 7.1 separately
-        // removes `TwisterFormLayout`'s arithmetic so the Twister form stops
+        // wizards too, which the page cannot re-measure. Removing
+        // `TwisterFormLayout`'s arithmetic separately stops the Twister form
         // needing to scroll at all; this region is what makes any form safe
         // meanwhile.
         ui::LayoutOptions formScroll;
@@ -2539,8 +2656,7 @@ private:
                                                   const WizardDiscovery& discovery,
                                                   ui::Bounds area,
                                                   const std::string& statusText,
-                                                  const std::string& addControllerName,
-                                                  const std::string& addControllerKindId,
+                                                  const std::string& addPresetId,
                                                   const std::map<std::string, std::string>& renameDrafts)
     {
         const auto renameDraftFor = [&](const std::string& name) {
@@ -3080,24 +3196,6 @@ private:
                                          "MIDI out: " +
                                              ControllersLayout::StoredEndpointLabel(rowVm.storedOutput),
                                          labelStyle(ControllersLayout::kBlacklistedEndpointLabelWidth));
-                                ui::ControlStyle blacklistedRenameDraftStyle =
-                                    fieldControl(ControllersLayout::kLifecycleDraftWidth);
-                                blacklistedRenameDraftStyle.caption = "Rename to";
-                                row.TextField(
-                                    NodeIds::ControllerRenameDraft(controllerIx),
-                                    "Rename",
-                                    renameDraftFor(rowVm.name),
-                                    ui::Action::WithValue(
-                                        Actions::kControllerRenameDraft,
-                                        NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                    blacklistedRenameDraftStyle);
-                                row.Button(
-                                    NodeIds::ControllerRename(controllerIx),
-                                    "Rename",
-                                    ui::Action::WithValue(
-                                        Actions::kControllerRename,
-                                        NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                    button(ControllersLayout::kLifecycleRenameWidth));
                                 if (rowVm.hasResolvedWizard)
                                 {
                                     row.Button(
@@ -3138,34 +3236,6 @@ private:
                                      MidiProfileKindDisplayName(rowVm.kind),
                                      labelStyle(ControllersLayout::kControllerKindWidth));
 
-                            ui::LayoutOptions dotsCellLayout;
-                            dotsCellLayout.main =
-                                ui::Extent::Px(ControllersLayout::kStatusDotsWidth);
-                            dotsCellLayout.cross = ui::Extent::Px(
-                                ControllersLayout::kControllerHeaderLineHeight);
-                            row.Section(
-                                NodeIds::ControllerStatusDots(controllerIx) + ".cell",
-                                dotsCellLayout,
-                                [&](ui::Builder& dotsCell) {
-                                    const float dotsY =
-                                        (ControllersLayout::kControllerHeaderLineHeight - 8.0f) /
-                                        2.0f;
-                                    dotsCell.Draw(
-                                        NodeIds::ControllerStatusDots(controllerIx),
-                                        {0.0f,
-                                         dotsY,
-                                         ControllersLayout::kStatusDotsWidth,
-                                         8.0f},
-                                        {ui::DrawCommand::FillEllipse(
-                                             {0.0f, 0.0f, 8.0f, 8.0f},
-                                             ControllersLayout::EndpointStatusColor(
-                                                 rowVm.inputStatus)),
-                                         ui::DrawCommand::FillEllipse(
-                                             {14.0f, 0.0f, 8.0f, 8.0f},
-                                             ControllersLayout::EndpointStatusColor(
-                                                 rowVm.outputStatus))}, {});
-                                });
-
                             {
                                 std::string selectedLayout;
                                 std::vector<ui::ControlOption> layoutOptions =
@@ -3173,7 +3243,7 @@ private:
                                         vm.Layouts(), rowVm.wizardId, selectedLayout);
                                 ui::ControlStyle layoutStyle =
                                     fieldControl(ControllersLayout::kLifecycleLayoutWidth);
-                                layoutStyle.caption = "Layout";
+                                layoutStyle.caption = "Preset";
                                 row.ComboBox(NodeIds::ControllerLayout(controllerIx),
                                              std::move(layoutOptions),
                                              selectedLayout,
@@ -3206,69 +3276,71 @@ private:
                                  scrollWidth,
                                  ControllersLayout::kLifecycleControlGap),
                         [&](ui::Builder& row) {
+                            const float portWidth = ControllersLayout::kStatusDotWidth +
+                                                    ControllersLayout::kLifecycleControlGap +
+                                                    ControllersLayout::kEndpointFieldWidth;
                             const float endpointClusterWidth =
-                                ControllersLayout::kEndpointFieldWidth +
-                                ControllersLayout::kEndpointBoxGap +
-                                ControllersLayout::kEndpointFieldWidth;
+                                portWidth + ControllersLayout::kEndpointBoxGap + portWidth;
+                            ui::LayoutOptions portLayout =
+                                layout(ui::Extent::Px(portWidth),
+                                      ui::Extent::Px(ControllersLayout::kControllerHeaderLineHeight),
+                                      ControllersLayout::kLifecycleControlGap);
                             row.Row(NodeIds::ControllerRow(controllerIx) + ".endpoints",
                                    layout(ui::Extent::Px(endpointClusterWidth),
                                           ui::Extent::Px(ControllersLayout::kControllerHeaderLineHeight),
                                           ControllersLayout::kEndpointBoxGap),
                                    [&](ui::Builder& endpoints) {
-                                       std::string selectedInput;
-                                       ui::ControlStyle inputStyle =
-                                           fieldControl(ControllersLayout::kEndpointFieldWidth);
-                                       inputStyle.caption = "MIDI in";
-                                       endpoints.ComboBox(
-                                           NodeIds::ControllerInput(controllerIx),
-                                           ControllersLayout::BuildEndpointOptions(
-                                               devices.inputs,
-                                               rowVm.inputStatus,
-                                               rowVm.storedInput,
-                                               rowVm.inputDeviceLabel,
-                                               selectedInput),
-                                           selectedInput,
-                                           ui::Action::WithValue(
-                                               Actions::kEndpointSelect,
-                                               std::to_string(controllerIx) + ":input"),
-                                           inputStyle);
-
-                                       std::string selectedOutput;
-                                       ui::ControlStyle outputStyle =
-                                           fieldControl(ControllersLayout::kEndpointFieldWidth);
-                                       outputStyle.caption = "MIDI out";
-                                       endpoints.ComboBox(
-                                           NodeIds::ControllerOutput(controllerIx),
-                                           ControllersLayout::BuildEndpointOptions(
-                                               devices.outputs,
-                                               rowVm.outputStatus,
-                                               rowVm.storedOutput,
-                                               rowVm.outputDeviceLabel,
-                                               selectedOutput),
-                                           selectedOutput,
-                                           ui::Action::WithValue(
-                                               Actions::kEndpointSelect,
-                                               std::to_string(controllerIx) + ":output"),
-                                           outputStyle);
+                                       endpoints.Row(
+                                           NodeIds::ControllerRow(controllerIx) + ".input_port",
+                                           portLayout,
+                                           [&](ui::Builder& inputPort) {
+                                               ControllersLayout::EmitStatusDot(inputPort,
+                                                          NodeIds::ControllerInputStatus(controllerIx),
+                                                          rowVm.inputStatus);
+                                               std::string selectedInput;
+                                               ui::ControlStyle inputStyle =
+                                                   fieldControl(ControllersLayout::kEndpointFieldWidth);
+                                               inputStyle.caption = "MIDI in";
+                                               inputPort.ComboBox(
+                                                   NodeIds::ControllerInput(controllerIx),
+                                                   ControllersLayout::BuildEndpointOptions(
+                                                       devices.inputs,
+                                                       rowVm.inputStatus,
+                                                       rowVm.storedInput,
+                                                       rowVm.inputDeviceLabel,
+                                                       selectedInput),
+                                                   selectedInput,
+                                                   ui::Action::WithValue(
+                                                       Actions::kEndpointSelect,
+                                                       std::to_string(controllerIx) + ":input"),
+                                                   inputStyle);
+                                           });
+                                       endpoints.Row(
+                                           NodeIds::ControllerRow(controllerIx) + ".output_port",
+                                           portLayout,
+                                           [&](ui::Builder& outputPort) {
+                                               ControllersLayout::EmitStatusDot(outputPort,
+                                                          NodeIds::ControllerOutputStatus(controllerIx),
+                                                          rowVm.outputStatus);
+                                               std::string selectedOutput;
+                                               ui::ControlStyle outputStyle =
+                                                   fieldControl(ControllersLayout::kEndpointFieldWidth);
+                                               outputStyle.caption = "MIDI out";
+                                               outputPort.ComboBox(
+                                                   NodeIds::ControllerOutput(controllerIx),
+                                                   ControllersLayout::BuildEndpointOptions(
+                                                       devices.outputs,
+                                                       rowVm.outputStatus,
+                                                       rowVm.storedOutput,
+                                                       rowVm.outputDeviceLabel,
+                                                       selectedOutput),
+                                                   selectedOutput,
+                                                   ui::Action::WithValue(
+                                                       Actions::kEndpointSelect,
+                                                       std::to_string(controllerIx) + ":output"),
+                                                   outputStyle);
+                                           });
                                    });
-                            ui::ControlStyle activeRenameDraftStyle =
-                                fieldControl(ControllersLayout::kLifecycleDraftWidth);
-                            activeRenameDraftStyle.caption = "Rename to";
-                            row.TextField(
-                                NodeIds::ControllerRenameDraft(controllerIx),
-                                "Rename",
-                                renameDraftFor(rowVm.name),
-                                ui::Action::WithValue(
-                                    Actions::kControllerRenameDraft,
-                                    NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                activeRenameDraftStyle);
-                            row.Button(
-                                NodeIds::ControllerRename(controllerIx),
-                                "Rename",
-                                ui::Action::WithValue(
-                                    Actions::kControllerRename,
-                                    NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                button(ControllersLayout::kLifecycleRenameWidth));
                             row.Button(NodeIds::ControllerDelete(controllerIx),
                                       "Delete",
                                       ui::Action::WithValue(
@@ -3357,22 +3429,7 @@ private:
                             pairLayout.padding = 0.0f;
                             pairLayout.gap = ControllersLayout::kLifecycleControlGap;
                             legend.Row(pairId, pairLayout, [&](ui::Builder& pair) {
-                                ui::LayoutOptions dotLayout;
-                                dotLayout.main =
-                                    ui::Extent::Px(ControllersLayout::kStatusLegendDotWidth);
-                                const MidiEndpointStatus status = entry.status;
-                                pair.Draw(dotId,
-                                         dotLayout,
-                                         [status](ui::Bounds nodeExtent) {
-                                             constexpr float kDotSize = 8.0f;
-                                             return std::vector<ui::DrawCommand>{
-                                                 ui::DrawCommand::FillEllipse(
-                                                     {(nodeExtent.width - kDotSize) / 2.0f,
-                                                      (nodeExtent.height - kDotSize) / 2.0f,
-                                                      kDotSize,
-                                                      kDotSize},
-                                                     ControllersLayout::EndpointStatusColor(status))};
-                                         });
+                                ControllersLayout::EmitStatusDot(pair, dotId, entry.status);
                                 ui::ControlStyle labelAutoStyle;
                                 labelAutoStyle.textStyle = pagestyle::kDefaultTextStyle;
                                 pair.Label(labelId, entry.word, labelAutoStyle);
@@ -3389,6 +3446,32 @@ private:
                     {
                         continue;
                     }
+                    // The expanded editor's first row, above the three section
+                    // toggles: the record's name, moved here from the header.
+                    scroll.Row(
+                        NodeIds::ControllerRow(controllerIx) + ".name_row",
+                        rowLayout(ControllersLayout::kControllerHeaderLineHeight, scrollWidth,
+                                 ControllersLayout::kLifecycleControlGap),
+                        [&](ui::Builder& row) {
+                            ui::ControlStyle nameDraftStyle =
+                                fieldControl(ControllersLayout::kLifecycleDraftWidth);
+                            nameDraftStyle.caption = "Name";
+                            row.TextField(
+                                NodeIds::ControllerRenameDraft(controllerIx),
+                                "Rename",
+                                renameDraftFor(rowVm.name),
+                                ui::Action::WithValue(
+                                    Actions::kControllerRenameDraft,
+                                    NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                nameDraftStyle);
+                            row.Button(
+                                NodeIds::ControllerRename(controllerIx),
+                                "Rename",
+                                ui::Action::WithValue(
+                                    Actions::kControllerRename,
+                                    NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                button(ControllersLayout::kLifecycleRenameWidth));
+                        });
                     for (MidiConfigSection section : rowVm.sections)
                     {
                         emitSection(scroll, controllerIx, section);
@@ -3399,20 +3482,18 @@ private:
                                      scrollWidth,
                                      ControllersLayout::kAvailableControlGap),
                            [&](ui::Builder& row) {
-                               row.TextField(NodeIds::kAddName,
-                                             "New controller name",
-                                             addControllerName,
-                                             ui::Action::Named(Actions::kAddNameDraft),
-                                             fieldControl(180.0f, ControllersLayout::kAddRowHeight));
-                               ui::ControlStyle addKindStyle =
-                                   fieldControl(190.0f, ControllersLayout::kAddRowHeight);
-                               addKindStyle.caption = "Device";
-                               row.ComboBox(NodeIds::kAddKind,
-                                            ControllersLayout::BuildAddControllerKindOptions(),
-                                            addControllerKindId.empty() ? "wrldbldr"
-                                                                        : addControllerKindId,
-                                            ui::Action::Named(Actions::kAddKindDraft),
-                                            addKindStyle);
+                               std::vector<ui::ControlOption> presetOptions =
+                                   ControllersLayout::BuildAddPresetOptions(vm.Layouts());
+                               const std::string selectedPreset =
+                                   ControllersLayout::EffectiveAddPresetId(vm.Layouts(), addPresetId);
+                               ui::ControlStyle addPresetStyle =
+                                   fieldControl(260.0f, ControllersLayout::kAddRowHeight);
+                               addPresetStyle.caption = "Preset";
+                               row.ComboBox(NodeIds::kAddPreset,
+                                            std::move(presetOptions),
+                                            selectedPreset,
+                                            ui::Action::Named(Actions::kAddPresetDraft),
+                                            addPresetStyle);
                                row.Button(NodeIds::kAddButton,
                                           "Add",
                                           ui::Action::Named(Actions::kAddController),
@@ -3436,9 +3517,8 @@ private:
     std::string m_wizardChooserStatus;
     ui::Bounds m_contentBounds{0.0f, 0.0f, 640.0f, 480.0f};
     std::string m_statusText = "Ready";
-    std::string m_addControllerName;
+    std::string m_addPresetId;
     std::map<std::string, std::string> m_renameDrafts;
-    std::string m_addControllerKindId = "wrldbldr";
     bool m_dirty = true;
     std::string m_lastFingerprint;
     std::uint64_t m_treeRevision = 1;

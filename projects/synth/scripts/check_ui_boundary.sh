@@ -59,7 +59,6 @@ fail() {
 # Excluded from every backend scan.
 #   *Tests.cpp                 test binaries: they build trees with the builder
 #                              and name retired symbols in re-pin assertions
-#   ControllersHarnessApp.cpp  developer harness, not shipped
 #   ControllersPageHarness.hpp developer harness, not shipped
 # Discovery takes EVERY file under the backend roots and removes named
 # non-backend files here. It is deliberately not a list of extensions to
@@ -69,7 +68,6 @@ fail() {
 # automatically; only the names below are trusted, and each says why.
 BACKEND_EXCLUDED_FROM_ALL=(
     '-g!*Tests.cpp'
-    '-g!ControllersHarnessApp.cpp'
     '-g!ControllersPageHarness.hpp'
     # Build and publish tooling. These are Node scripts that run at build time,
     # never shipped runtime modules, and `check:generic-runtime` is the scan

@@ -180,7 +180,7 @@ bool AllEqual(const std::vector<float>& offsets)
 // stated rather than assumed. Callers used to take `.front()` on the vector
 // above, which is safe only because a preceding `AllEqual` Require aborts first
 // -- `AllEqual` returns false on an empty vector. That was undocumented,
-// order-dependent, and one reordered assertion away from a crash (task 7.1).
+// order-dependent, and one reordered assertion away from a crash.
 float SharedColumnXOffsetOf(const synth::ui::NodeTree& tree, const char* formId, std::size_t column)
 {
     const std::vector<float> offsets = ColumnXOffsetsOf(tree, formId, column);
@@ -265,8 +265,8 @@ void RequireNodeContainedInParent(const synth::ui::NodeTree& tree, const std::st
             {
                 continue;
             }
-            // A ScrollArea's children are placed in scroll-CONTENT space
-            // (sru-46), so the extent that must contain them is the content
+            // A ScrollArea's children are placed in scroll-CONTENT space,
+            // so the extent that must contain them is the content
             // extent the resolver published -- which is exactly what both
             // backends size their content surface to (`max(bounds, declared)`).
             // Checking them against the viewport box instead would assert that
@@ -477,7 +477,7 @@ void RequireSubtreeIsSplicedWhole(const synth::ui::NodeTree& page,
     }
 }
 
-// The subtree's first node, whatever kind it is. Since sru-16's boundary moved
+// The subtree's first node, whatever kind it is. Since the boundary moved
 // the whole viewer into the subtree this is the title, not a row -- so it is
 // named for what it returns rather than for what a row assertion would want.
 // To assert about a row, find a child of `kFileBrowserList` instead.
@@ -794,7 +794,7 @@ void TestGangedRandomLfoBackgroundOptOut()
     synth::ui::BuildGangedRandomLfoCommands(snapshot, bounds, optedOutCommands, false);
 
     // Default must have Fill and Line commands. Pin the full default stream
-    // by construction rather than merely bounding it (Task 5 review Finding 2):
+    // by construction rather than merely bounding it:
     // for this snapshot the present sample (3) lies strictly between 0 and the
     // shared duration (12 samples, from voice 1's ceil(8)+ceil(4)), so every
     // voice emits its maximal past-polyline + dashed-future-polylines + dot
@@ -1511,7 +1511,7 @@ static void TestHiddenInputSelectorLeavesNoOrphanedCaption()
             "a page without an input selector offers no input retry");
 }
 
-// sru-3: `Retry Input` exists only while browser capture is offline, and it is a
+// `Retry Input` exists only while browser capture is offline, and it is a
 // form row like every other Audio control -- an uncaptioned button would sit
 // outside the form grid's label/control columns and break the shared offsets
 // the selectors above it are aligned to.
@@ -1576,7 +1576,7 @@ static void TestLiveInputCaptureHidesTheRetryRow()
             "hiding retry does not hide the input selector");
 }
 
-// sprs-16: a verbatim copy of BuildAudioPageTree's body as it stood before the
+// A verbatim copy of BuildAudioPageTree's body as it stood before the
 // app-supplied-section change -- the pre-change tree the spec requires the
 // default path to stay byte-identical to. Any drift the two-pass
 // implementation introduces (node count, ids, kinds, or resolved bounds)
@@ -1676,7 +1676,7 @@ static void TestAudioPageAppendsSuppliedSectionBeneathDeviceRowsWithinRemainingA
     std::optional<synth::ui::Bounds> handedBounds;
     snapshot.appSection = [&handedBounds](synth::ui::Bounds bounds) {
         handedBounds = bounds;
-        // sprs-16: ui::Subtree, built the Rootless()/BuildSubtree() way --
+        // ui::Subtree, built the Rootless()/BuildSubtree() way --
         // the same idiom BuildPatchBrowserSubtree/BuildPatchVersionsSubtree
         // use (RuntimePages.hpp:954-1001, 1006-1019) -- not a Root+Build()
         // NodeTree, so the app's own layout declarations reach the splice.
@@ -1739,8 +1739,7 @@ static void TestAudioPageAppendsSuppliedSectionBeneathDeviceRowsWithinRemainingA
                 "the form's layout is unchanged by an appended section");
 }
 
-// sprs-16 review: the finding this test closes is that Splice(NodeTree)
-// carries no layout map (see Splice(NodeTree) in PortableUIBuilders.hpp --
+// This test closes a gap: Splice(NodeTree) carries no layout map (see Splice(NodeTree) in PortableUIBuilders.hpp --
 // it forwards to Splice(Subtree{tree, {}, {}})), so a nested Row/Column the
 // app declares with a weighted extent or explicit padding would silently
 // re-resolve with LayoutOptions{} defaults once the page's outer Build(area)
@@ -1877,8 +1876,8 @@ static void TestPatchBrowserSplicesAsARootlessSubtree()
                 "the patch browser produces a rootless subtree");
     }
 
-    // sru-16's boundary: the viewer -- rows, save-name entry, status text and
-    // confirm/cancel -- is the subtree. The page owns the panel and the splice.
+    // The viewer -- rows, save-name entry, status text and confirm/cancel --
+    // is the subtree. The page owns the panel and the splice.
     const std::vector<std::string> roots = ForestRootsOf(browser);
     const std::vector<std::string> expected{
         synth::runtime_ui::NodeIds::kFileBrowserTitle,
@@ -2022,7 +2021,7 @@ static void TestFilePageFitsWithinTheRuntimeRoot()
     }
 }
 
-// sru-54: the smallest surface any first-party app declares. `uiHeight` is
+// The smallest surface any first-party app declares. `uiHeight` is
 // per-app compile-time config -- braid-4 560, miniapp 560, FakeBrowserApp 480 --
 // so 480 is the floor every page and app has to resolve at.
 constexpr synth::ui::Bounds kSmallestDeclaredSurface{0.0f, 0.0f, 640.0f, 480.0f};
@@ -2079,8 +2078,8 @@ void RequireRegionAbsorbsTheDifference(const synth::ui::NodeTree& shortSurface,
 // the assertion behind it, and the absorption pin above is not that assertion:
 // it constrains the region's height and the furniture's, and would sit green
 // through a status line that shifted, an inserted gap, or a changed left edge.
-// Task 17 pairs over these two surfaces, so an unexplained shift there is the
-// failure mode to close here.
+// An unexplained shift across these two surfaces is the failure mode to
+// close here.
 void RequireStatusLinesStackFromTheRegionTop(const synth::ui::NodeTree& tree,
                                              const char* regionId,
                                              const std::vector<std::string>& lineIds,
@@ -2377,14 +2376,13 @@ static void TestControllersWizardAndBraid4ResolveAtTheSmallestDeclaredSurface()
 }
 
 // ---------------------------------------------------------------------------
-// sru-48 named visual criteria over every real surface (tasks 6.1-6.3), and
-// task 6.2a's absorbing-region pins for the three surfaces that had only
-// "it resolved".
+// Named visual criteria over every real surface, and absorbing-region pins for
+// the three surfaces that had only "it resolved".
 //
-// The fixture state below is task 1.4's, named once and used by both halves of
+// The fixture state below is named once and used by both halves of
 // the criteria suite. Lengths are chosen to exercise the scrolling path rather
-// than the three-item happy case, because tasks 5.6 and 5.9 both showed list
-// length changing layout materially.
+// than the three-item happy case, because list length changes layout
+// materially.
 // ---------------------------------------------------------------------------
 
 namespace criteria = synth::ui::criteria;
@@ -2446,8 +2444,8 @@ const std::vector<float>& StandardAppSpacing()
 // The wizard form's own spacing table, `TwisterFormLayout`, is private to
 // `src/ControllerWizard.cpp` and cannot be named from a test. Its values are
 // restated here rather than reached, which is weaker than every other entry in
-// this file -- and it is the one table task 7.1 already commits to deleting as
-// producer-side layout arithmetic sru-53 bans. The outer wizard page furniture
+// this file -- and it is the one table that carries producer-side layout
+// arithmetic, which the layout contract bans. The outer wizard page furniture
 // is the Controllers page's, so those constants ARE named.
 const std::vector<float>& WizardFormSpacing()
 {
@@ -2474,8 +2472,8 @@ struct CriteriaSurface {
     std::set<std::string> containmentExempt;
     std::set<std::string> overlapExempt;
     // Form controls with no visible caption today, each named individually with
-    // the reason it has none. A PRODUCT decision for task 6.5, not a residual
-    // the suite has blessed; tasks.md 6.5b carries the same list.
+    // the reason it has none. A product decision, not a residual
+    // the suite has blessed.
     std::map<std::string, std::string> uncaptioned;
     // The exact number of form controls this fixture puts on the surface.
     //
@@ -2501,8 +2499,8 @@ struct CriteriaSurface {
     std::vector<FormGrid> formGrids;
 };
 
-// The three cross-backend residuals disclosed during 2.5a and left unpinned by
-// 3.11-3.12, ADJUDICATED in task 7.1 rather than inherited.
+// The three cross-backend residuals disclosed during 2.5a and left unpinned
+// are ADJUDICATED here rather than inherited.
 //
 // All three are real, none is reachable by any producer, and all three are
 // ACCEPTED rather than fixed -- fixing any of them means changing one backend's
@@ -2538,13 +2536,13 @@ void RequireNoProducerReachesAnUnpinnedBackendDivergence(const CriteriaSurface& 
                     (prefix + "'" + node.id.value +
                      "' declares a ScrollArea border. JUCE paints it over its children and the "
                      "browser paints it under them; decide which is right before shipping it "
-                     "(residual (i), recorded under tasks.md 3.11)")
+                     "(residual (i))")
                         .c_str());
             Require(!node.cornerRadius.has_value(),
                     (prefix + "'" + node.id.value +
                      "' declares a ScrollArea corner radius. Neither backend clips scrolled "
                      "children to the radius path; decide what a rounded scroll area should do "
-                     "before shipping it (residual (ii), recorded under tasks.md 3.11)")
+                     "before shipping it (residual (ii))")
                         .c_str());
         }
         if (node.cornerRadius.has_value() && node.borderWidth.has_value())
@@ -2553,8 +2551,7 @@ void RequireNoProducerReachesAnUnpinnedBackendDivergence(const CriteriaSurface& 
                     (prefix + "'" + node.id.value +
                      "' declares a corner radius below half its border width. JUCE's centred "
                      "stroke floors the path radius at zero there and the browser does not, so "
-                     "the two outer radii diverge by a hairline (residual (iii), recorded under "
-                     "tasks.md 3.11)")
+                     "the two outer radii diverge by a hairline (residual (iii))")
                         .c_str());
         }
     }
@@ -2689,31 +2686,14 @@ struct ControllersFixture {
     }
 };
 
-std::set<std::string> ControllerStatusDotIds(std::size_t controllers)
-{
-    // Each row's status dots are an explicitly bounded Draw the producer
-    // hand-centres inside its cell (`(kControllerHeaderLineHeight - 8) / 2`), so it
-    // is out of flow and contributes no stacking gap. The arithmetic itself is
-    // the sru-47/sru-53 residual recorded in tasks.md under 6.5b: the library
-    // has no cross-axis alignment for a producer to declare instead.
-    std::set<std::string> ids;
-    for (std::size_t ix = 0; ix < controllers; ++ix)
-    {
-        ids.insert(synth::runtime_ui::NodeIds::ControllerStatusDots(ix));
-    }
-    return ids;
-}
-
 // ---------------------------------------------------------------------------
 // The caption exceptions, one control at a time with one reason each.
 //
-// These are NOT residuals the suite has decided are acceptable. sru-48 requires
-// every form control to carry a visible caption, and each control below fails
-// that today. They are recorded here, individually and with a stated reason,
+// These are NOT residuals the suite has decided are acceptable. Every form
+// control must carry a visible caption, and each control below fails that
+// today. They are recorded here, individually and with a stated reason,
 // because whether a table cell should gain a caption or its table should gain a
-// column heading is a PRODUCT decision -- and task 6.5 is the pairing session
-// where a human makes it. tasks.md 6.5b carries the same list for that
-// conversation.
+// column heading is a product decision.
 //
 // The shape matters as much as the content: an id-to-reason map cannot grow by
 // a new control happening to match a pattern, and `residualsMatched` makes an
@@ -2725,8 +2705,11 @@ void Except(std::map<std::string, std::string>& into, std::string id, std::strin
     into.emplace(std::move(id), std::move(reason));
 }
 
-// 12 rows x {input, output, rename_draft, layout}, the two add-row fields,
-// and the 13 mapping cells row 0's expanded encoders section publishes.
+// 12 rows x {input, output, layout} on the header, the one Name draft row 0's
+// expanded editor adds, the add row's one Preset field, and the 13 mapping
+// cells row 0's expanded encoders section publishes. The rename draft moved
+// out of the header into the editor, so it no longer appears on all 12 rows
+// unconditionally -- only on row 0, which this fixture expands.
 // Stated so a new control cannot arrive unexamined under an exception.
 // A mapping table's cells are identified by their COLUMN HEADING rather than by
 // a per-cell caption, and a caption on every cell would repeat the heading on
@@ -2774,18 +2757,15 @@ std::map<std::string, std::string> MappingCellExceptions(const synth::ui::NodeTr
     return exceptions;
 }
 
-constexpr std::size_t kFixtureControllerExpectedControls = 12 * 4 + 2 + 13;
+constexpr std::size_t kFixtureControllerExpectedControls = 12 * 3 + 1 + 1 + 13;
 
 std::map<std::string, std::string> ControllerCaptionExceptions(std::size_t controllers,
                                                                const synth::ui::NodeTree& tree)
 {
+    // Both the add row's Preset combo and the editor's Name draft carry their
+    // own visible caption ("Preset", "Name"), so neither needs an exception
+    // here the way the old bare add-row name TextField did.
     std::map<std::string, std::string> exceptions = MappingCellExceptions(tree);
-    Except(exceptions, synth::runtime_ui::NodeIds::kAddName,
-           "add-row name field; the add row has no column headings and the field carries its "
-           "prompt only in TextField::label, which no backend renders");
-    // The rename draft field now carries its own "Rename to" caption (it used
-    // to rely on the adjacent Rename button to name it), so it is no longer
-    // excused from the caption criterion here.
     (void)controllers;
     return exceptions;
 }
@@ -2821,7 +2801,7 @@ struct Braid4Fixture {
 };
 
 // A visible visualizer, so the criteria set contains at least one tree that
-// actually CARRIES an sru-25 underlay. Without one, `UnderlayViolations` would
+// actually CARRIES an underlay. Without one, `UnderlayViolations` would
 // return empty over every first-party surface for the uninteresting reason
 // that no surface has an underlay, and the overlap criterion's only exception
 // would be untested against real producer output.
@@ -2940,11 +2920,14 @@ static void TestNamedVisualCriteriaHoldOnEveryPageAndApp()
             candidates.push_back(FixtureCandidate(("-" + std::to_string(ix)).c_str()));
         }
         controllers.surface->SetDiscovery({.available = candidates});
+        // The per-port status dots are laid out through the same LayoutOptions
+        // Draw as the legend's dots (ControllersPageUI.hpp), so unlike the
+        // header's old hand-centred single Draw they are normal, in-flow,
+        // correctly-gapped children and need no out-of-flow exception.
         RequireSurfaceMeetsTheNamedCriteria(
             {.name = "Controllers (12 controllers, 2 available)",
              .tree = controllers.surface->BuildTree(),
              .spacing = &ControllersSpacing(),
-             .outOfFlow = ControllerStatusDotIds(kFixtureControllerCount),
              .uncaptioned = ControllerCaptionExceptions(kFixtureControllerCount,
                                                         controllers.surface->BuildTree()),
              .expectedFormControls = kFixtureControllerExpectedControls});
@@ -2996,7 +2979,7 @@ static void TestNamedVisualCriteriaHoldOnEveryPageAndApp()
              .outOfFlow = {synth_braid4::Braid4NodeIds::kBackground},
              .expectedFormControls = 1});
 
-        // Mini App on the same standard layout, with a live sru-25 underlay on
+        // Mini App on the same standard layout, with a live underlay on
         // encoder 0. Its `.visualizer` node is NOT exempted from the overlap
         // check: `UnderlayViolations` pins it congruent with the encoder it
         // names, and the overlap check still fails it against any other
@@ -3005,7 +2988,7 @@ static void TestNamedVisualCriteriaHoldOnEveryPageAndApp()
         const synth::ui::NodeTree miniTree = mini.surface.BuildTree();
         const std::string underlayId = synth_miniapp::MiniAppNodeIds::Encoder(0) + ".visualizer";
         Require(FindNodeById(miniTree, underlayId) != nullptr,
-                "the Mini App fixture really does emit the sru-25 underlay the exception is for");
+                "the Mini App fixture really does emit the underlay this exception is for");
         RequireSurfaceMeetsTheNamedCriteria(
             {.name = "Mini App (encoder 0 modulated)",
              .tree = miniTree,
@@ -3168,6 +3151,26 @@ static void TestControllersRowFitsWithinFroggersNarrowestHost()
         Require(status.rfind("Refused", 0) != 0, label);
     };
 
+    // Positive control: every requireFits() call below only proves the page
+    // still fits AT 900 wide -- a gate that always passes proves nothing
+    // about itself. Build the same collapsed state 140px narrower than the
+    // header's own 740px minimum and confirm FitsWithinViolations actually
+    // reports something, then restore 900 before the real assertions run.
+    {
+        const synth::ui::Bounds narrowerThanMinimum{0.0f, 0.0f, 600.0f, 620.0f};
+        surface.SetContentBounds(narrowerThanMinimum);
+        const synth::ui::NodeTree narrowTree = surface.BuildTree();
+        const std::vector<std::string> narrowViolations =
+            synth::ui::criteria::FitsWithinViolations(narrowTree, narrowerThanMinimum);
+        std::fprintf(stderr, "FitsWithinViolations[positive control, 600px]: count=%zu\n",
+                    narrowViolations.size());
+        Require(!narrowViolations.empty(),
+                "positive control: built 140px narrower than the 740px header minimum, the "
+                "fits-within gate must report at least one violation here -- zero would mean the "
+                "gate itself is dead, not that the page somehow fits");
+        surface.SetContentBounds(froggersContentBounds);
+    }
+
     requireFits("collapsed rows: a Twister, a Generic, a Launchpad and a Blacklisted controller "
                 "with long device names");
 
@@ -3239,15 +3242,15 @@ static void TestControllersRowFitsWithinFroggersNarrowestHost()
             "the Generic system row's Message combo offers the app catalog's 24 choices");
 }
 
-// Task 6.2a. `TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface` and its
+// `TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface` and its
 // wizard/Braid 4 twin prove these three surfaces RESOLVE at the 480 floor and,
 // for the Controllers page, the chooser and Braid 4, nothing more: deleting
-// sru-54's overflow gate entirely would leave all three green, because only
+// the overflow gate entirely would leave all three green, because only
 // Sync, Audio, the File page and the wizard column carry positive geometry
 // pins. What follows is the treatment the others already have -- what each
 // surface's absorbing region actually DOES with the difference between two
 // surface heights, and what the furniture around it keeps.
-// sru-48's checklist is the contract, and it exists twice: `NamedCriteria()`
+// The checklist is the contract, and it exists twice: `NamedCriteria()`
 // here and `VISUAL_CRITERIA` in `browser/tests/visual-criteria.spec.ts`. Two
 // copies of a contract drift, and a criterion silently present in one half and
 // absent from the other is precisely how this suite stops meaning what it says.
@@ -3302,7 +3305,7 @@ static void TestTheNamedCriteriaAreTheOnesThePlaywrightSuiteNames()
 // third-party one. `TwisterFormLayout` asked for 664 against the page's 640-wide
 // body, so before the page hosted the spliced form in a `ScrollArea` the form
 // overhung its parent by 28px and both backends clipped the right column's
-// argument fields away silently. sru-54's gate is the STACKING axis, so a
+// argument fields away silently. The overflow gate is the STACKING axis, so a
 // cross-axis overrun of a fixed-extent child went straight past it; the
 // containment criterion is what found it.
 //

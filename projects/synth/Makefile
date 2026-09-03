@@ -1,6 +1,7 @@
 CXX ?= clang++
 CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2
 CPPFLAGS ?= -Iinclude
+DEPFLAGS := -MMD -MP
 BUILD_DIR := build
 BUILD_SENTINEL := $(BUILD_DIR)/.dir
 LIB := $(BUILD_DIR)/libsynth.a
@@ -185,29 +186,32 @@ $(VIEWMODEL_TEST_BIN): tests/viewmodel_tests.cpp $(LIB) include/synth/MidiConfig
 $(BLOCKS_TEST_BIN): tests/blocks_tests.cpp $(LIB) include/synth/MidiConfigBlocks.hpp include/synth/MidiController.hpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
-$(PORTABLE_UI_TEST_BIN): tests/portable_ui_tests.cpp tests/support/VisualCriteria.hpp apps/miniapp/MiniAppDraw.hpp apps/miniapp/MiniAppUI.hpp apps/miniapp/MiniAppUiModel.hpp apps/miniapp/MiniAppCore.hpp apps/braid-4/Braid4Draw.hpp apps/braid-4/Braid4UI.hpp apps/braid-4/Braid4UiModel.hpp apps/braid-4/Braid4Core.hpp include/synth/EncoderDraw.hpp include/synth/PortableScopeVisualizer.hpp include/synth/PortableUILayout.hpp include/synth/PortableUIStandardLayout.hpp include/synth/ConstantBarVisualizer.hpp include/synth/NoiseWaveformVisualizer.hpp include/synth/DspConstant.hpp include/synth/DspNoise.hpp $(RUNTIME_PAGE_HEADERS) include/synth/ControllersPageUI.hpp include/synth/MidiConfigBlocks.hpp include/synth/AppConcepts.hpp $(STANDARD_MODULATOR_HEADERS) $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+$(PORTABLE_UI_TEST_BIN): tests/portable_ui_tests.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(LIB) -o $@
 
 $(PORTABLE_UI_LAYOUT_TEST_BIN): tests/portable_ui_layout_tests.cpp tests/support/VisualCriteria.hpp include/synth/PortableUI.hpp include/synth/PortableUIBuilders.hpp include/synth/PortableUILayout.hpp include/synth/PortableUIMetrics.hpp include/synth/PortableUIStandardLayout.hpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
-$(RUNTIME_MAIN_COMPONENT_TEST_BIN): tests/runtime_main_component_tests.cpp include/synth/RuntimeMainComponent.hpp include/synth/AppConcepts.hpp include/synth/ControllerWizardDiscoveryCache.hpp include/synth/ControllersPageUI.hpp include/synth/MidiConfigViewModel.hpp $(RUNTIME_PAGE_HEADERS) include/synth/RuntimePagePolicy.hpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+$(RUNTIME_MAIN_COMPONENT_TEST_BIN): tests/runtime_main_component_tests.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(LIB) -o $@
 
 $(RUNTIME_FILE_SERVICE_TEST_BIN): tests/runtime_file_service_tests.cpp include/synth/RuntimeFileService.hpp $(RUNTIME_PAGE_HEADERS) $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
-$(CONTROLLERS_PAGE_UI_TEST_BIN): tests/controllers_page_ui_tests.cpp include/synth/ControllersPageUI.hpp include/synth/MidiConfigViewModel.hpp include/synth/MidiConfigBlocks.hpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+$(CONTROLLERS_PAGE_UI_TEST_BIN): tests/controllers_page_ui_tests.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(LIB) -o $@
 
-$(BROWSER_CONTRACT_TEST_BIN): tests/browser_runtime_contract_tests.cpp browser/cpp/BrowserRuntimeAbi.cpp include/synth/browser/BrowserAppEntry.hpp include/synth/browser/BrowserRuntime.hpp include/synth/browser/BrowserRuntimeMainServices.hpp include/synth/browser/BrowserAudioDevices.hpp include/synth/browser/BrowserMidiBridge.hpp include/synth/browser/BrowserCommandBuffer.hpp include/synth/ControllerWizardDiscoveryCache.hpp include/synth/RuntimeMainComponent.hpp $(RUNTIME_PAGE_HEADERS) include/synth/RuntimePagePolicy.hpp include/synth/RuntimeFileService.hpp include/synth/AppConcepts.hpp include/synth/AppContext.hpp include/synth/Engine.hpp include/synth/MasterClock.hpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< browser/cpp/BrowserRuntimeAbi.cpp $(LIB) -o $@
+$(BUILD_DIR)/BrowserRuntimeAbi.o: browser/cpp/BrowserRuntimeAbi.cpp | $(BUILD_SENTINEL)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(BROWSER_CONTRACT_TEST_BIN): tests/browser_runtime_contract_tests.cpp $(BUILD_DIR)/BrowserRuntimeAbi.o $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(BUILD_DIR)/BrowserRuntimeAbi.o $(LIB) -o $@
 
 $(BROWSER_COMMAND_BUFFER_TEST_BIN): tests/browser_command_buffer_tests.cpp apps/miniapp/MiniAppDraw.hpp include/synth/browser/BrowserCommandBuffer.hpp $(RUNTIME_PAGE_HEADERS) $(STANDARD_MODULATOR_HEADERS) $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
-$(BROWSER_AUDIO_DEVICE_TEST_BIN): tests/browser_audio_device_tests.cpp include/synth/browser/BrowserAudioDevices.hpp include/synth/browser/BrowserRuntimeMainServices.hpp include/synth/browser/BrowserMidiBridge.hpp include/synth/ControllersPageUI.hpp include/synth/Engine.hpp include/synth/RuntimeFileService.hpp $(RUNTIME_PAGE_HEADERS) include/synth/PatchPersistence.hpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+$(BROWSER_AUDIO_DEVICE_TEST_BIN): tests/browser_audio_device_tests.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(LIB) -o $@
 
 $(BROWSER_MIDI_BRIDGE_TEST_BIN): tests/browser_midi_bridge_tests.cpp include/synth/browser/BrowserMidiBridge.hpp include/synth/Engine.hpp include/synth/MidiReconcile.hpp include/synth/MidiController.hpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
@@ -296,3 +300,5 @@ clean:
 	rm -rf $(BUILD_DIR)
 	if [ -f "$(MINIAPP_DIR)/Makefile" ]; then $(MAKE) -C $(MINIAPP_DIR) clean; fi
 	if [ -f "$(SHEAF_PATCH_DIR)/Makefile" ]; then $(MAKE) -C $(SHEAF_PATCH_DIR) clean; fi
+
+-include $(wildcard $(BUILD_DIR)/*.d)

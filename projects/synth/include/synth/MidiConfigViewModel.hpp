@@ -3,8 +3,8 @@
 // MidiConfigViewModel.hpp — JUCE-free view model for the Controllers page.
 //
 // This header (and its .cpp) contain ALL tree/edit logic for the Controllers
-// page; the upcoming JUCE page is a thin renderer over this model (Plan 4
-// Task 1). Nothing here includes JUCE, so it is headlessly testable via
+// page; the JUCE page is a thin renderer over this model. Nothing here
+// includes JUCE, so it is headlessly testable via
 // tests/viewmodel_tests.cpp.
 //
 // Edits operate through the open presentation when one exists. A section
@@ -34,7 +34,7 @@ struct ControllerWizardDescriptor;
 
 // Ring buffer tracking a rolling maximum over its last `capacity` writes.
 // Message-thread only (no atomics) -- callers write once per UI timer tick
-// and read back for display (e.g. the sidebar's deadline readout, sru-2).
+// and read back for display (e.g. the sidebar's deadline readout).
 // Once `capacity` values have been written, each new Write() overwrites the
 // oldest slot, so the max "forgets" spikes older than the window.
 struct RollingMax {
@@ -79,7 +79,7 @@ inline std::size_t DeadlineWindowCapacity(int uiFrameHz) {
 
 // One editable row rendered inside a section's mapping list.
 //
-// Presentation (midi-config-blocks change, task group 2 / design.md D5): a
+// Presentation (midi-config-blocks change): a
 // row is one of three kinds (see `kind` below) --
 //   Individual  -- one config element (an encoder turn/push mapping, an
 //                  analog gesture mapping, or a system-message association).
@@ -92,7 +92,7 @@ inline std::size_t DeadlineWindowCapacity(int uiFrameHz) {
 //                  before, never deletable, never part of a block.
 // `deletable` is the renderer's single source of truth for whether to show a
 // delete ("x") affordance -- true for Individual and Block rows, false for
-// ConfigLevel (sru-11's "config-level rows are not deletable").
+// ConfigLevel: config-level rows are not deletable.
 struct MidiMappingRowVM {
     enum class Field {
         Channel,
@@ -114,14 +114,14 @@ struct MidiMappingRowVM {
         // contract, but against the analog-only catalog rather than
         // MessageCatalog()).
         AppAction,
-        // Twister side-button system rows only (sru-8/D1): the logical side
+        // Twister side-button system rows only: the logical side
         // button 0..5, persisted as control->cc = 8 + button on the fixed
         // channel 3 (display-only, not independently editable). Kept
         // distinct from Field::Cc (which means "raw CC 0-127" everywhere
         // else) so its 0..5 validation domain and "Btn" label can't be
         // confused with a generic Cc editor.
         Button,
-        // --- Block-row fields (kind == Block only; task group 2 / D3/D6) ---
+        // --- Block-row fields (kind == Block only) ---
         // A block row's editableFields is drawn from this subset, per its
         // form (EncoderBlock/AnalogBlock/SystemBlock 1-D generic/2-D
         // wrldbldr-launchpad):
@@ -338,7 +338,7 @@ struct MidiControllerRowVM {
     std::string inputDeviceLabel;   // present device name; stored ref + " (offline)"; or "(none)"
     std::string outputDeviceLabel;
     // Stored endpoint references, independent of connection status. A
-    // Blacklisted record's endpoints stay deliberately Unconfigured, so sru-4's
+    // Blacklisted record's endpoints stay deliberately Unconfigured, so
     // "show their stored endpoint labels" cannot be served by the
     // status-derived labels above, and endpoint pickers need the exact stored
     // identifier to stay unambiguous across duplicate same-name devices.
@@ -348,7 +348,7 @@ struct MidiControllerRowVM {
     std::vector<MidiConfigSection> sections;  // kind-filtered via KindSupport, each starts collapsed
 };
 
-// --- Open section presentation (task group 2 / design.md D5) ---------------
+// --- Open section presentation ---------------
 //
 // Internal to MidiConfigViewModel -- exposed at namespace (not class) scope,
 // in a `detail` sub-namespace, purely so the .cpp's free helper functions
@@ -400,7 +400,7 @@ struct SectionPresentation {
 }  // namespace detail
 
 // JUCE-free view model driving the Controllers page. Rebuild() is a pure
-// data transform from the Plan 1 model (MidiInstrumentConfig) and the
+// data transform from the persisted model (MidiInstrumentConfig) and the
 // runtime's per-controller connection state (MidiConnectionState) into the
 // row tree above. Expand/collapse state is kept keyed by controller NAME (in
 // a std::map, so it is stable regardless of controller reordering) and
@@ -516,11 +516,11 @@ public:
     bool SetEndpointRef(std::size_t controllerIx, bool output, MidiEndpointRef ref,
                         MidiInstrumentConfig& out) const;
 
-    // --- Presentation: add/delete (task group 2 / design.md D5, sru-11) ----
+    // --- Presentation: add/delete ------------------------------------
     //
     // Every mutating presentation method below shares ApplyMappingEdit's
     // contract: `out` is populated (and normalized via
-    // NormalizeMidiProfileConfig, sru-9) only on success; on failure `out` is
+    // NormalizeMidiProfileConfig) only on success; on failure `out` is
     // untouched and `reason` (if non-null) explains why. Successful calls
     // also leave the open presentation in the edited shape; the host commits
     // `out` and calls Rebuild() again, and that Rebuild() preserves already
@@ -530,7 +530,7 @@ public:
 
     // True iff the row at (controllerIx, section, rowIx) may be deleted --
     // Individual and Block rows (MidiMappingRowVM::Kind), never ConfigLevel
-    // (encoder mode/turn step/scene blend, sru-11's "config-level rows are
+    // (encoder mode/turn step/scene blend: "config-level rows are
     // not deletable"). Mirrors (and is the single source of truth behind)
     // each SectionRows() row's own cached `deletable` field -- exposed
     // separately so the renderer can query it without re-deriving the whole
@@ -541,7 +541,7 @@ public:
     // Deletes the row at (controllerIx, section, rowIx): for an Individual
     // row, removes that one config element (encoder mapping / analog gesture
     // mapping / system-message association); for a Block row, removes every
-    // config element the block covers in the SAME commit (sru-11's "a block
+    // config element the block covers in the SAME commit ("a block
     // delete removes all its cells in one commit"). Refused (false, `out`
     // untouched) for a ConfigLevel row, an out-of-range (controllerIx,
     // rowIx), or a resulting section that fails validation.
@@ -549,7 +549,7 @@ public:
                    std::string* reason = nullptr) const;
 
     // Appends one new Individual row to `group` with kind-appropriate
-    // "next-free" defaults (sru-11's "+": the lowest address/argument not
+    // "next-free" defaults ("+": the lowest address/argument not
     // already used by that group -- see the .cpp's NextFree* helpers for the
     // exact per-group rule) and commits it. `group` must be one of the row
     // groups SectionRows() can produce for `section` on this controller's
@@ -568,10 +568,10 @@ public:
     // Appends one new Block row to `group`, seeded from the next free
     // address/argument range (same "next free" rule AddSingle uses, sized to
     // a small default run -- see the .cpp), committing its expansion in one
-    // shot (sru-11's "+B": "append a block, committed as its expansion").
+    // shot ("+B": "append a block, committed as its expansion").
     // Only legal where blocks apply (EncoderTurn/EncoderPush/AnalogGesture,
     // and System for a kind/message combination that supports blocking --
-    // never MfTwister, D4 point 3, and never AnalogAppAction, which is
+    // never MfTwister, and never AnalogAppAction, which is
     // individual-only); refused with a reason otherwise
     // (including "no room for a default block" if no >=2-wide free range
     // exists in the group's domain).
@@ -583,9 +583,9 @@ public:
     // combination AddSingle's own dispatch recognizes at all (encoder turn/
     // push, analog gesture, or system), independent of any per-controller
     // runtime state (missing encoder/analog input, no free address, etc.,
-    // which AddSingle still checks and can still refuse for). Design D6
-    // ("renderer stays thin; all decisions from the view model"), reviewer
-    // finding 2: this is the single source of truth the renderer queries to
+    // which AddSingle still checks and can still refuse for).
+    // Keeps the renderer thin: all decisions come from the view model, and
+    // this is the single source of truth the renderer queries to
     // decide whether to paint a "+" affordance at all, so that decision can
     // never drift from AddSingle's actual dispatch the way a page-local
     // reimplementation could. `controllerIx` is accepted (and validated) for
@@ -598,11 +598,11 @@ public:
 
     // Whether AddBlock(controllerIx, section, group, ...) could possibly
     // succeed for this (controllerIx, section, group) -- the AddBlock
-    // counterpart to GroupSupportsAdd() above (reviewer finding 2). False
+    // counterpart to GroupSupportsAdd() above. False
     // for every group GroupSupportsAdd() itself refuses (a group with no
     // individual-row affordance has no block affordance either), and also
     // false for the System group on a MidiProfileKind::MfTwister controller
-    // (D4 point 3, "twister system messages never block" -- mirrors
+    // ("twister system messages never block" -- mirrors
     // AddBlock's own MfTwister refusal). Unlike GroupSupportsAdd(), this
     // DOES depend on controllerIx (to read the controller's kind), so an
     // out-of-range controllerIx returns false here for a real reason, not
@@ -622,7 +622,7 @@ public:
     // (EncoderMode/EncoderStep/AnalogSceneBlend) never appear here, same as
     // GroupSupportsAdd's own refusal for them.
     //
-    // sru-11 "empty group still offers add": SectionRows()' row-walk in
+    // "empty group still offers add": SectionRows()' row-walk in
     // ControllersPage.hpp's SectionBody only emits a RowGroupHeader (and
     // therefore a "+"/"+B" affordance) for a group that has at least one
     // ROW -- so a group with zero existing mappings (or a whole empty
@@ -679,7 +679,7 @@ public:
     // Rewrites EVERY launchpad association's `launchpadPosition->controller`
     // in this slot's system messages to LaunchpadVariantCatalog()[variantIndex]
     // -- e.g. switching X -> Pro MK3 widens the addressable grid; Pro MK3 ->
-    // X (or Mini MK3) can shrink it. All-or-nothing (sru-10's block-commit
+    // X (or Mini MK3) can shrink it. All-or-nothing (block-commit
     // convention, applied here to the whole slot): each existing position's
     // (x, y) is validated against the NEW variant's shape via
     // LaunchpadShapeSupports before anything is written; if any position
@@ -688,7 +688,7 @@ public:
     // position (e.g. "position (x, y) is not valid on <variant name>"), so a
     // shrink (e.g. Pro MK3 -> X) that would silently drop an edge button is
     // never allowed to partially apply. On success, every position's
-    // controller is rewritten, NormalizeMidiProfileConfig runs (sru-9), and
+    // controller is rewritten, NormalizeMidiProfileConfig runs, and
     // `out` holds the fully edited instrument -- same "host commits `out`
     // via EditInstrument, then Rebuild()s again" contract as every other
     // mutating method on this class. Returns false (out untouched) for an
@@ -696,6 +696,16 @@ public:
     // out-of-range variantIndex (< 0 or >= LaunchpadVariantCatalog().size()).
     bool SetLaunchpadVariant(std::size_t controllerIx, int variantIndex, MidiInstrumentConfig& out,
                             std::string* reason = nullptr) const;
+
+    // Re-keys the per-row UI caches (expand state and section presentations)
+    // from `from` to `to` after a controller is renamed. Both caches are
+    // keyed by controller name because that is the only stable-enough handle
+    // Rebuild() has across a rebuild; without this call a rename would look,
+    // to those name-keyed maps, exactly like `from` disappearing and `to`
+    // appearing fresh, so the row's expand/section state would be silently
+    // discarded by Rebuild()'s own orphan sweeps. Calling this before the
+    // next Rebuild() keeps that state attached to the renamed row instead.
+    void NoteControllerRenamed(const std::string& from, const std::string& to);
 
 private:
     struct ExpandState {

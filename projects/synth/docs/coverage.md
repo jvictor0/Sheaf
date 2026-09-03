@@ -393,9 +393,6 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
   action/commit simulation while rendering the real `ControllersPageSurface`
   through `synth_juce::PortableComponent` and comparing containment in common
   surface coordinates.
-- [`ControllersHarnessApp.cpp`](../juce/ControllersHarnessApp.cpp): the
-  standalone visual harness uses `synth_juce::PortableComponent` over the same
-  production `ControllersPageSurface` path.
 
 ### `sru-1` (modified) - Main Pane, Sidebar, And Content Host
 

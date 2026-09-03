@@ -166,6 +166,51 @@
       runs against the built bundle, so the select-fills-wrapper
       assertion (sprs-18) is checked on every push to main.
       File: `.github/workflows/synth-browser-pages.yml`.
+- [x] 1.23 Move the Name row into the expanded editor and re-key a rename
+      across it: the header's rename field and button are gone (a
+      blacklisted row, which has no expanded editor, now has no Rename
+      control at all); the expanded editor's first row holds a Name field
+      and Rename button; `MidiConfigViewModel::NoteControllerRenamed(from,
+      to)` re-keys `expandState_` and `presentations_` by their old name so
+      a rename keeps the row expanded and its open sections open, and the
+      page calls it on the rename success path, before the next
+      `RefreshOnTick` rebuild would otherwise erase the old name's cache
+      entries.
+      Files: `include/synth/MidiConfigViewModel.hpp`,
+      `src/MidiConfigViewModel.cpp`, `include/synth/ControllersPageUI.hpp`.
+      Test: `viewmodel_tests.cpp: RenameOfExpandedRowKeepsSectionPresentationOpen`,
+      `RenameOfCollapsedRowLeavesItCollapsed`, `SameNameReaddAfterDeleteStartsFullyCollapsed`,
+      `controllers_page_ui_tests.cpp: TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`,
+      `juce/ControllersPageSimulationTests.cpp: RunControllerWizardParitySimulation`.
+- [x] 1.24 Remove the standalone Controllers harness app: it duplicated
+      the production `ControllersPageSurface` path the simulation tests
+      already exercise. Deleted `apps/controllers_harness/` (`Info.plist`,
+      `Makefile`, `README.md`) and `juce/ControllersHarnessApp.cpp`;
+      dropped the harness's carve-out from `check_ui_boundary.sh`'s
+      `BACKEND_EXCLUDED_FROM_ALL` list and its entry from `docs/coverage.md`.
+      Files: `scripts/check_ui_boundary.sh`, `docs/coverage.md`.
+- [x] 1.25 Generated header dependency lists: `DEPFLAGS := -MMD -MP`,
+      applied to the `portable_ui_tests`, `runtime_main_component_tests`,
+      `controllers_page_ui_tests`, `browser_runtime_contract_tests`, and
+      `browser_audio_device_tests` rules; `browser/cpp/BrowserRuntimeAbi.cpp`
+      split into its own `$(BUILD_DIR)/BrowserRuntimeAbi.o` object rule
+      (also under `DEPFLAGS`) so its translation unit gets its own depfile.
+      Both translation units reach `ControllersPageUI.hpp`, and one compiler
+      invocation over two sources writes a single depfile recording only the
+      last of them, so without the split the test unit's own headers would
+      go unrecorded; `-include
+      $(wildcard $(BUILD_DIR)/*.d)` added at the bottom of the Makefile so
+      a header edit rebuilds every binary that reaches it.
+      File: `Makefile`.
+- [x] 1.26 Rewrote sru-4, sru-60, sru-61, and sru-62 in
+      `specs/synth-runtime-ui/spec.md` against the page as it now stands:
+      the Name row moved into the expanded editor and a rename re-keying
+      its UI state; the per-controller combo recaptioned Layout to Preset
+      (sru-60); the two-line header's per-row composition, its 740 px
+      minimum width, and the blacklisted row's loss of Rename (sru-61);
+      and the add row's Preset combo, per-port status dots, and their
+      "Preset" caption (sru-62).
+      File: `specs/synth-runtime-ui/spec.md`.
 
 ## 2. Postflight and delivery
 

@@ -765,7 +765,7 @@ std::string SystemMessageAddressLabel(const MidiControllerSystemMessageAssociati
         oss << "pos ch" << channel << " (" << static_cast<int>(association.wrldBldrPosition->x) << ","
             << static_cast<int>(association.wrldBldrPosition->y) << ")";
     } else if (kind == MidiProfileKind::MfTwister && association.control.has_value()) {
-        // sru-8/D1: twister's sole address is the logical side button (cc -
+        // Twister's sole address is the logical side button (cc -
         // 8); the fixed channel 3 is shown read-only alongside it.
         const int button = static_cast<int>(association.control->cc) - 8;
         oss << "ch" << static_cast<int>(association.control->channel) << " btn" << button;
@@ -790,7 +790,7 @@ std::string SystemMessageLabel(const MidiControllerSystemMessageAssociation& ass
     return oss.str();
 }
 
-// --- Open section presentation (task group 2 / design.md D5) ---------------
+// --- Open section presentation -----------------------------------------------
 
 using PresentationRow = detail::PresentationRow;
 using SectionPresentation = detail::SectionPresentation;
@@ -849,7 +849,7 @@ void MidiConfigViewModel::Rebuild(const MidiInstrumentConfig& instrument, const 
         controllers_.push_back(std::move(row));
     }
 
-    // Finding 5: erase expand-state entries for controller names no longer
+    // Erase expand-state entries for controller names no longer
     // present, for the same reason presentation entries are erased below --
     // a same-name readd should start "fully collapsed" like any other
     // first-ever appearance (this class's own doc comment above, and
@@ -885,9 +885,8 @@ void MidiConfigViewModel::Rebuild(const MidiInstrumentConfig& instrument, const 
     // lazily building a fresh reconstruction from the reappeared
     // controller's actual config. Erasing lets PresentationFor's
     // find()-miss -> BuildFreshPresentation() path run again for that name,
-    // matching sru-11 "re-expanding presents the fresh minimal
-    // reconstruction" (a same-name readd is, presentation-wise, exactly
-    // like a fresh expand).
+    // so re-expanding presents a fresh minimal reconstruction (a same-name
+    // readd is, presentation-wise, exactly like a fresh expand).
     // Collects orphaned keys first and erases in a second pass, since
     // erasing a std::map entry while range-for is iterating that SAME
     // element is undefined behavior; this stays correct without relying on
@@ -916,6 +915,33 @@ const MidiConfigViewModel::ExpandState* MidiConfigViewModel::StateForConst(const
     return it != expandState_.end() ? &it->second : nullptr;
 }
 
+// expandState_ and presentations_ are two caches of one concept -- per-row UI
+// state keyed by a controller name the user can change -- so a rename has to
+// move both together or the row's cached state gets orphaned (and discarded)
+// by Rebuild()'s name-based sweeps the next time it runs.
+void MidiConfigViewModel::NoteControllerRenamed(const std::string& from, const std::string& to) {
+    auto expandIt = expandState_.find(from);
+    if (expandIt != expandState_.end()) {
+        expandState_[to] = std::move(expandIt->second);
+        expandState_.erase(expandIt);
+    }
+
+    // Collects the affected keys first and rewrites them in a second pass,
+    // since erasing a std::map entry while range-for is iterating that SAME
+    // element is undefined behavior.
+    std::vector<PresentationKey> renamedKeys;
+    for (const auto& [presentationKey, presentation] : presentations_) {
+        (void)presentation;
+        if (presentationKey.first == from) {
+            renamedKeys.push_back(presentationKey);
+        }
+    }
+    for (const PresentationKey& key : renamedKeys) {
+        presentations_[PresentationKey{to, key.second}] = std::move(presentations_[key]);
+        presentations_.erase(key);
+    }
+}
+
 void MidiConfigViewModel::ToggleConfig(std::size_t controllerIx) {
     if (controllerIx >= controllers_.size()) {
         return;
@@ -934,8 +960,8 @@ void MidiConfigViewModel::ToggleSection(std::size_t controllerIx, MidiConfigSect
     bool& expanded = state.sections[section];
     expanded = !expanded;
     if (!expanded) {
-        // D5: "discarded on expanded->collapsed" -- the next expand rebuilds
-        // a fresh minimal reconstruction (sru-11's "collapsing and
+        // Discarded on expanded->collapsed -- the next expand rebuilds
+        // a fresh minimal reconstruction ("collapsing and
         // re-expanding present the fresh minimal reconstruction").
         DiscardPresentation(name, section);
     } else {
@@ -961,7 +987,7 @@ bool MidiConfigViewModel::SectionExpanded(std::size_t controllerIx, MidiConfigSe
 
 namespace {
 
-// editableFields for an Individual SystemMessages row, per kind (D1/sru-8) --
+// editableFields for an Individual SystemMessages row, per kind --
 // factored out of the old SectionRows() SystemMessages case so
 // BuildFreshPresentation/BuildSectionRows share the exact same table.
 std::vector<Field> SystemRowEditableFields(MidiProfileKind kind,
@@ -1002,8 +1028,8 @@ std::vector<Field> SystemRowEditableFields(MidiProfileKind kind,
     return fields;
 }
 
-// editableFields for a Block row, per its form (D1/D3/D6 -- see
-// MidiMappingRowVM::Field's Block* doc comment).
+// editableFields for a Block row, per its form.
+// See MidiMappingRowVM::Field's Block* doc comment.
 std::vector<Field> EncoderBlockEditableFields() {
     return {Field::Channel, Field::BlockStartCc, Field::BlockEndCc, Field::SlotIx, Field::BlockStartPos};
 }
@@ -1114,11 +1140,10 @@ namespace {
 // rows (Encoders' EncoderMode/TurnStep, Analogs' SceneBlend) as individual
 // ConfigLevel PresentationRows, and the blockable groups (encoder turns/
 // pushes, analog gestures, system messages) reconstructed via
-// MidiConfigBlocks.hpp's Reconstruct* (D5: "built ... at the collapsed ->
-// expanded transition"). This is also what a collapse+re-expand cycle
+// MidiConfigBlocks.hpp's Reconstruct* (built at the collapsed ->
+// expanded transition). This is also what a collapse+re-expand cycle
 // produces (DiscardPresentation followed by the next PresentationFor()
-// call), matching sru-11's "re-expanding presents the fresh minimal
-// reconstruction."
+// call), where re-expanding presents a fresh minimal reconstruction.
 SectionPresentation BuildFreshPresentation(const MidiControllerProfileConfig& config, MidiProfileKind kind,
                                            MidiConfigSection section) {
     SectionPresentation presentation;
@@ -1272,8 +1297,8 @@ namespace {
 // AnalogAppAction < AnalogSceneBlend < System, which is exactly section
 // display order); if
 // neither exists (no rows of this group AND no later-group rows either),
-// the very end of the presentation. Shared by AddSingle/AddBlock (sru-11
-// "+"/"+B" append presentation rows at the end of their group) so both
+// the very end of the presentation. Shared by AddSingle/AddBlock
+// ("+"/"+B" append presentation rows at the end of their group) so both
 // paths agree on where "end of group" means -- a
 // group with zero existing rows still has a well-defined "end" (immediately
 // before mode/step/scene-blend), not the tail of the whole section.
@@ -1563,7 +1588,7 @@ bool MidiConfigViewModel::RowFieldValue(std::size_t controllerIx, MidiConfigSect
             return true;
         }
         if (presentationRow.group == RowGroup::AnalogSceneBlend && field == Field::SceneBlend) {
-            // Finding 4 audit fallout: an unassigned sceneBlend (a common,
+            // An unassigned sceneBlend (a common,
             // valid state -- SlotValidForKind places no requirement on it,
             // see SceneBlendLabelReadsClearlyWhenAssignedAndUnassigned)
             // used to make THIS return false even though the row always
@@ -1572,10 +1597,10 @@ bool MidiConfigViewModel::RowFieldValue(std::size_t controllerIx, MidiConfigSect
             // value_or(MidiControlAddress{})). Returning false here made
             // ControllersPage.hpp's renderer skip building an editor
             // entirely for this row once it started checking
-            // RowFieldValue's return value (finding 4's fix), which would
+            // RowFieldValue's return value, which would
             // have made an unassigned scene blend permanently unassignable
-            // from the UI -- a real regression the finding's own goal
-            // ("visible but not silently corruptible") doesn't intend.
+            // from the UI -- a real regression, and not what "visible but not
+            // silently corruptible" aims at.
             // 0.0 (cc 0) matches ApplyMappingEdit's own default-construction
             // value for the same unassigned case, so a freshly-seeded
             // editor and a freshly-committed edit agree on what "unassigned,
@@ -1734,7 +1759,7 @@ namespace {
 
 // True when `value` is representable as a non-negative integer -- the
 // baseline domain check for SlotIx/Position/GestureIx/bank & scene indices
-// and catalog indices (brief finding 3: "integral (value == floor(value)),
+// and catalog indices ("integral (value == floor(value)),
 // within the field's domain ... at minimum non-negative").
 //
 // Also bounds `value` from above so every caller's later
@@ -1814,8 +1839,8 @@ namespace {
 // validating domain per-field the same way the individual-row cases below
 // do (Channel 0-15, coordinates integral, message-type/bool toggle indices
 // in range). Does NOT re-validate the whole expansion (ApplyMappingEdit's
-// Block case does that separately via ExpandSystemBlock, sru-10's
-// "all-or-nothing").
+// Block case does that separately via ExpandSystemBlock, an
+// all-or-nothing validation).
 bool ApplyEncoderBlockField(EncoderBlock& block, Field field, double value, std::string& validationError) {
     switch (field) {
         case Field::AddressType:
@@ -2115,11 +2140,11 @@ bool HasDuplicateAnalogAddress(const std::vector<AnalogMidiMapping>& gestures,
     return false;
 }
 
-// One association's address tuple per the kind's schema (D1) -- the same
+// One association's address tuple per the kind's schema -- the same
 // fields SystemAddressSchema(kind) names, flattened to a comparable form.
 // Twister's address is its `control` (channel 3, cc 8-13) same as generic;
 // distinguishing twister isn't needed here since MfTwister never blocks
-// (D4) and AddSingle is the only twister caller, which already refuses via
+// and AddSingle is the only twister caller, which already refuses via
 // NextFreeTwisterButton exhaustion before reaching this check.
 bool SameSystemAddress(const MidiControllerSystemMessageAssociation& a,
                        const MidiControllerSystemMessageAssociation& b, MidiProfileKind kind) {
@@ -2718,7 +2743,7 @@ bool MidiConfigViewModel::AddController(std::string name, MidiProfileKind kind, 
             slot.config = MidiControllerProfileConfig{};
             break;
     }
-    // sru-9: every commit path normalizes, including a freshly-seeded default
+    // Every commit path normalizes, including a freshly-seeded default
     // profile (already canonical in practice for every factory today, but
     // this keeps the guarantee independent of that incidental fact).
     NormalizeMidiProfileConfig(slot.config, kind);
@@ -2913,8 +2938,8 @@ bool MidiConfigViewModel::DeleteRow(std::size_t controllerIx, MidiConfigSection 
 
 namespace {
 
-// Lowest non-negative integer not present in `used` (sru-11's "+": "append
-// one config with next-free defaults").
+// Lowest non-negative integer not present in `used`. "+" appends one
+// config with next-free defaults.
 std::size_t LowestFree(const std::vector<bool>& used) {
     for (std::size_t ix = 0; ix < used.size(); ++ix) {
         if (!used[ix]) {
@@ -3035,7 +3060,7 @@ std::pair<std::uint8_t, std::uint8_t> NextFreeGenericAddress(
 }
 
 // Lowest-unused MfTwister side button 0..5 (the only shape twister
-// associations can occupy, D1) -- returns 6 (invalid, refused by the caller)
+// associations can occupy -- returns 6 (invalid, refused by the caller)
 // if all 6 are taken.
 std::size_t NextFreeTwisterButton(const std::vector<MidiControllerSystemMessageAssociation>& associations) {
     std::vector<bool> used(6, false);
@@ -3534,9 +3559,9 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
         return false;
     }
 
-    // Default block width (sru-11: "a small default run" -- see this
-    // method's header doc comment); large enough to demonstrate a block (>=2
-    // per D3/D4) without presuming a huge free range exists.
+    // Default block width (a small default run -- see this
+    // method's header doc comment); large enough to demonstrate a block (>=2)
+    // without presuming a huge free range exists.
     constexpr std::size_t kDefaultBlockWidth = 2;
 
     PresentationRow rowToAppend;
@@ -3711,7 +3736,7 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
     return true;
 }
 
-// Reviewer finding 2 (D6): the renderer's "+" gating used to reimplement
+// The renderer's "+" gating used to reimplement
 // this dispatch itself (SectionBody::AddableGroup in ControllersPage.hpp);
 // that page-local copy could silently drift from AddSingle's actual switch
 // above. This is the single source of truth both now share -- kept
@@ -3749,11 +3774,11 @@ bool MidiConfigViewModel::GroupSupportsAdd(std::size_t controllerIx, MidiConfigS
     return false;
 }
 
-// Reviewer finding 2 (D6): the renderer's "+B" gating used to reimplement
+// The renderer's "+B" gating used to reimplement
 // this dispatch itself (SectionBody::GroupSupportsBlocks in
 // ControllersPage.hpp, including the twister no-block special case); this
 // is now the single source of truth, mirroring AddBlock's own dispatch
-// above (including its MfTwister refusal, D4 point 3) so the two can never
+// above (including its MfTwister refusal) so the two can never
 // drift apart.
 bool MidiConfigViewModel::GroupSupportsBlocks(std::size_t controllerIx, MidiConfigSection section,
                                               MidiMappingRowVM::RowGroup group) const {
@@ -3782,7 +3807,7 @@ std::vector<MidiMappingRowVM::RowGroup> MidiConfigViewModel::AddableGroups(std::
     // InsertionIndexForGroup/SectionRows' own section-display order, per
     // this method's header doc comment) -- walking the enum in that order
     // and filtering through GroupSupportsAdd (the single dispatch source of
-    // truth AddSingle/AddBlock themselves share, reviewer finding 2) is the
+    // truth AddSingle/AddBlock themselves share) is the
     // only way to build this list, so it can never drift from what
     // GroupSupportsAdd itself would say for any individual group.
     static constexpr MidiMappingRowVM::RowGroup kCanonicalOrder[] = {
@@ -3907,7 +3932,7 @@ bool MidiConfigViewModel::SetLaunchpadVariant(std::size_t controllerIx, int vari
         return true;
     }
 
-    // All-or-nothing (sru-10 convention): validate EVERY existing position
+    // All-or-nothing: validate EVERY existing position
     // against the new variant's shape before writing anything, so a shrink
     // that would drop an edge button is refused wholesale rather than
     // partially applied.

@@ -137,13 +137,11 @@ private:
     ActionHandler handler_;
 };
 
-// Task 8.3 (sprs-13): browser-backend parity for the extent-aware hook. The
+// Browser-backend parity for the extent-aware hook. The
 // browser Runtime shares synth::runtime_ui::RuntimeMainComponent verbatim
-// (BrowserRuntime.hpp:1040 constructs RuntimeMainComponent<App,
-// BrowserRuntimeMainServices<App>>; BuildUiFrame() at :712 just serializes
-// its BuildTree()), so exercising the same class directly under this
-// (non-JUCE) browser translation unit proves the identical resolved-width
-// rule applies here too.
+// (it constructs RuntimeMainComponent<App, BrowserRuntimeMainServices<App>>),
+// so exercising the same class directly under this (non-JUCE) browser
+// translation unit proves the identical resolved-width rule applies here too.
 class ExtentAwareContractSurface final : public synth::ui::Surface,
                                          public synth::ui::ExtentAwareSurface
 {
@@ -547,7 +545,7 @@ void TestBrowserRuntimeMainComponentSidebarTracksResolvedAppWidth()
     // The browser host offers a new live extent through the same
     // RuntimeMainComponent::SetContentExtent hook the JUCE renderer would
     // use; the resolved app width and sidebar placement track it identically
-    // (sprs-13 backend parity -- same class, same composition arithmetic).
+    // (backend parity -- same class, same composition arithmetic).
     mainComponent.SetContentExtent({0.0f, 0.0f, 800.0f, 480.0f});
     const synth::ui::NodeTree resized = mainComponent.BuildTree();
     const synth::ui::Node* appRoot = FindPortableNode(resized, "extent.contract.app.root");
@@ -558,14 +556,14 @@ void TestBrowserRuntimeMainComponentSidebarTracksResolvedAppWidth()
     Require(NearlyEqual(sidebarResized->bounds.x, 800.0f),
             "browser composition tracks the resized extent identically to JUCE");
 
-    // Fix round 1, finding 2: a vertical resize too -- the composite root
+    // A vertical resize too -- the composite root
     // (runtime.main.root) height must track the resolved app height rather
-    // than staying pinned to config.uiHeight (480). Before the fix, the
-    // composite root's height was hardcoded to config.uiHeight even on this
-    // extent-aware branch, so this resize would validate (the validator
-    // only checks the app root) and then throw inside
-    // RequireCompositionHolds, because the taller app root no longer fit
-    // inside a 480-tall composite root.
+    // than staying pinned to config.uiHeight (480). The composite root's
+    // height used to stay hardcoded to config.uiHeight even on this
+    // extent-aware branch, so this resize would validate (the validator only
+    // checks the app root) and then throw inside RequireCompositionHolds,
+    // because the taller app root no longer fit inside a 480-tall composite
+    // root.
     mainComponent.SetContentExtent({0.0f, 0.0f, 800.0f, 600.0f});
     const synth::ui::NodeTree resizedTaller = mainComponent.BuildTree();
     const synth::ui::Node* appRootTaller = FindPortableNode(resizedTaller, "extent.contract.app.root");
@@ -700,8 +698,8 @@ void TestWizardSubmitRefusesACandidateRemovedSinceTheLastFrame()
             "the unique candidate opens its wizard form");
 
     // The controller is unplugged and Submit is activated before the host
-    // builds another frame. D5 requires Submit to recheck that the candidate is
-    // still present, so the cached classification has to follow the device-list
+    // builds another frame. Submit must recheck that the candidate is
+    // still present, so the cached classification follows the device-list
     // change itself rather than the next frame build.
     fixture.runtime.SubmitMidiEndpoints({});
     fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
@@ -968,6 +966,12 @@ void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
                     persisted.controllers.size() == expectedCount,
                 label);
     };
+
+    Require(FindNode(fixture.Frame(), synth::runtime_ui::NodeIds::ControllerRenameDraft(2).c_str()) == nullptr,
+            "browser Rename draft field is absent while controller 2 is collapsed");
+    Require(FindNode(fixture.Frame(), synth::runtime_ui::NodeIds::ControllerRename(2).c_str()) == nullptr,
+            "browser Rename button is absent while controller 2 is collapsed");
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kToggleConfig, "2");
 
     dispatchNode(synth::runtime_ui::NodeIds::ControllerRenameDraft(2), ":Browser Twister");
     const synth_browser::DecodedCommandBuffer renamedDraftFrame = fixture.Frame();
