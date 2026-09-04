@@ -616,6 +616,10 @@ public:
     void HandlePress(PhysicalEncoderId encoderId, std::span<const PhysicalEncoderId> physicalLayout);
     void HandleTick(PhysicalEncoderId encoderId, const SceneState& scene, float delta);
     void HandleSetAbsolute(PhysicalEncoderId encoderId, const SceneState& scene, float normalizedTarget);
+    // Resolves the encoder against this bank's own top-level mapping rather
+    // than whatever page it currently has visible, so the write reaches the
+    // parameter even while this bank is drilled into a modulation view.
+    void HandleSetAbsoluteOnTopLevel(PhysicalEncoderId encoderId, const SceneState& scene, float normalizedTarget);
     void ApplyModifierToTopLevel(Modifier modifier, const SceneState& scene);
     void Deselect();
     bool ShowingModulation() const;
@@ -640,6 +644,7 @@ private:
     void AssociateSlot(BankSlot& slot);
     Cell* FindVisibleCell(PhysicalEncoderId encoderId);
     const Cell* FindVisibleCell(PhysicalEncoderId encoderId) const;
+    Cell* FindTopLevelCell(PhysicalEncoderId encoderId);
     Parameter* EnsureModulationDepthParameter(Parameter& parameter, std::size_t modIx);
     bool CanOpenModulationView(const Parameter& parameter) const;
     std::size_t MissingModulationDepthCount(const Parameter& parameter) const;
@@ -842,6 +847,13 @@ public:
     void HandleTick(std::size_t slotIx, std::size_t position, float delta);
     void HandleSetAbsolute(std::size_t slotIx, std::size_t position, float normalizedTarget,
                            std::uint64_t absoluteEpoch = 0);
+    // Writes to the bank at bankIx directly, bypassing the addressed slot's
+    // bank selection entirely: never calls BankSlot::SelectBank, never
+    // touches selectedBank_, never goes through BankSlot::Owns. slotIx is
+    // consulted only to resolve position to a physical encoder through that
+    // slot's own layout, and to record absoluteEpoch on that slot.
+    void HandleSetAbsoluteOnBank(std::size_t bankIx, std::size_t slotIx, std::size_t position,
+                                 float normalizedTarget, std::uint64_t absoluteEpoch = 0);
     bool SelectBankForSlot(std::size_t slotIx, std::size_t bankIx);
     bool NavigateBankForSlot(std::size_t slotIx, BankDirection direction);
 
@@ -950,6 +962,10 @@ struct MessageIn {
         SelectGrid,
         NextParamBank,
         PrevParamBank,
+        // Appended rather than inserted alongside ParamSetAbsolute so every
+        // existing enumerator keeps its ordinal (see SystemMessageSortKey's
+        // declaration-order dependency in MidiConfigBlocks.hpp).
+        ParamSetAbsoluteOnBank,
     };
 
     std::uint64_t timestamp = 0;
@@ -975,6 +991,13 @@ struct MessageIn {
     static MessageIn ParamIncDec(std::uint64_t timestamp, std::size_t slotIx, std::size_t position, float delta);
     static MessageIn ParamSetAbsolute(std::uint64_t timestamp, std::size_t slotIx, std::size_t position,
                                       float normalizedValue, std::uint64_t absoluteEpoch = 0);
+    // Addressed to bankIx directly rather than to whatever bank slotIx's
+    // BankSlot currently has selected; slotIx still supplies the encoder
+    // layout used to resolve position, exactly as it does for
+    // ParamSetAbsolute.
+    static MessageIn ParamSetAbsoluteOnBank(std::uint64_t timestamp, std::size_t bankIx, std::size_t slotIx,
+                                            std::size_t position, float normalizedValue,
+                                            std::uint64_t absoluteEpoch = 0);
     static MessageIn ParamPush(std::uint64_t timestamp, std::size_t slotIx, std::size_t position);
     static MessageIn ToggleReset(std::uint64_t timestamp);
     static MessageIn SetReset(std::uint64_t timestamp, bool held);

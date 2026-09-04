@@ -14,7 +14,7 @@ function app(appId: string, displayName: string) {
     category: "Instrument",
     buildId,
     browser: {
-      abiVersion: 4,
+      abiVersion: 6,
       uiProtocolVersion: 2,
       runtimeConfigVersion: 1,
       entry,
@@ -132,7 +132,7 @@ test("locks selection after success without rendering an in-page return control"
       category: "Instrument",
       buildId: `${appId}-build-1`,
       browser: {
-        abiVersion: 4,
+        abiVersion: 6,
         uiProtocolVersion: 2,
         runtimeConfigVersion: 1,
         entry: `${appId}.js`,
@@ -182,7 +182,7 @@ test("does not overwrite runtime DOM that replaces the exact pending-selection s
       category: "Instrument",
       buildId: "one-build-1",
       browser: {
-        abiVersion: 4,
+        abiVersion: 6,
         uiProtocolVersion: 2,
         runtimeConfigVersion: 1,
         entry: "one.js",

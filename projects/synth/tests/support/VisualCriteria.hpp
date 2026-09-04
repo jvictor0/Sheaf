@@ -416,11 +416,14 @@ inline SpacingReport SpacingConformance(const NodeTree& tree,
 }
 
 // sru-48: like-type controls share column positions. A form grid aligns the
-// label and control columns of its participating rows to shared x-offsets, so
-// the check is that every row of `containerId` puts its n-th child at the same
-// x and gives it the same width. Rows with a different child count are not
-// part of the same column set and are skipped, which is why the caller gets
-// told how many rows were actually compared.
+// label and control columns of its participating rows to a shared left edge,
+// so the check is that every row of `containerId` puts its n-th child at the
+// same x. Width is NOT compared: it is a per-control declaration -- a button
+// sized to its own caption instead of stretching across the column is
+// intended, not a violation, as long as it still starts where the rest of the
+// column starts. Rows with a different child count are not part of the same
+// column set and are skipped, which is why the caller gets told how many rows
+// were actually compared.
 struct ColumnReport {
     std::vector<std::string> violations;
     std::size_t comparedRows = 0;
@@ -474,13 +477,6 @@ inline ColumnReport ColumnAlignment(const NodeTree& tree, const std::string& con
                 report.violations.push_back(cells[ix]->id.value + " x=" + Format(cells[ix]->bounds.x) +
                                             " leaves column " + std::to_string(column) + " held by " +
                                             cells[0]->id.value + " at x=" + Format(cells[0]->bounds.x));
-            }
-            if (std::abs(cells[ix]->bounds.width - cells[0]->bounds.width) > kTolerance)
-            {
-                report.violations.push_back(cells[ix]->id.value + " width=" +
-                                            Format(cells[ix]->bounds.width) + " leaves column " +
-                                            std::to_string(column) + " width " +
-                                            Format(cells[0]->bounds.width));
             }
         }
     }

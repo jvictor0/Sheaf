@@ -104,6 +104,13 @@ public:
         , midiEpoch_(synth_juce::RuntimeMidiEpoch::Capture(startTime_))
         , engine_([this]() -> std::uint64_t { return NowMicros(); })
         , midiConnections_(std::make_unique<MidiConnectionManager<App>>(engine_, midiEpoch_)) {
+        // sar-33: wires the external-input-routed signal's storage into the
+        // AppContext apps see, before Start()/engine_.Initialize() can ever
+        // run App::Init(). inputRoutingSignal_ is a member of this Runtime
+        // (constructed above, in the member-init list, before this
+        // constructor body runs), so its address is already stable here.
+        engine_.Context().inputRoutingSignal = &inputRoutingSignal_;
+
         // The engine invokes this synchronously, on whichever thread is
         // performing a rebuild, immediately BEFORE midiProcessors_ is
         // destroyed/replaced (Initialize()'s rebuilds and
@@ -246,22 +253,16 @@ public:
         // unsized.
         midiConnections_->StartupReconcile();
 
-        // An input-inclusive initialisation that fails leaves the host with no
-        // device at all, output included, and the returned error is the only
-        // notice. Publish it, then retry output-only so independent output
-        // still runs while the input diagnostic honestly reports `active 0`.
-        const juce::String initialiseError =
-            deviceManager_.initialiseWithDefaultDevices(config.numAudioInputs, config.numAudioOutputs);
+        // No input device opens merely because the application requested
+        // input channels -- the operator selects one explicitly (below, from
+        // the persisted selection, or later via the combo), and only then do
+        // the requested channels get opened. Startup therefore always
+        // initialises output-only; a failure here is output failing to open
+        // at all, and the returned error is the only notice.
+        const juce::String initialiseError = deviceManager_.initialiseWithDefaultDevices(0, config.numAudioOutputs);
         if (initialiseError.isNotEmpty()) {
             INFO("Audio device initialise FAILED: %s", initialiseError.toRawUTF8());
             SetAudioStatus(initialiseError);
-            if (config.numAudioInputs > 0) {
-                const juce::String outputOnlyError =
-                    deviceManager_.initialiseWithDefaultDevices(0, config.numAudioOutputs);
-                if (outputOnlyError.isNotEmpty()) {
-                    INFO("Audio device output-only initialise FAILED: %s", outputOnlyError.toRawUTF8());
-                }
-            }
         }
 
         // Prefer the persisted output device over the platform default, but
@@ -286,9 +287,7 @@ public:
         if (config.numAudioInputs > 0) {
             const juce::String wantedInputName = juce::String(engine_.AudioDeviceSnapshot().inputDeviceName);
             if (wantedInputName.isNotEmpty() && IsEnumeratedInputDevice(wantedInputName)) {
-                juce::AudioDeviceManager::AudioDeviceSetup setup = deviceManager_.getAudioDeviceSetup();
-                setup.inputDeviceName = wantedInputName;
-                if (ApplyInputDeviceSetup(setup, "startup")) {
+                if (ApplyInputDeviceSetup(wantedInputName, "startup")) {
                     ApplyPreferredRateAndBlockSize();
                 }
             } else {
@@ -326,6 +325,12 @@ public:
         // must show it even on a clean startup); for a zero-input app it is a
         // no-op, so nothing claims an input path that was never opened.
         PublishPendingInputStatus();
+
+        // sar-33: derives the startup value of the external-input-routed
+        // signal -- false for a platform-default device, true for a
+        // successfully reapplied persisted selection. See
+        // RefreshInputRoutedState's doc comment.
+        RefreshInputRoutedState();
 
         startTimerHz(config.uiFrameHz > 0 ? config.uiFrameHz : 30);
     }
@@ -424,6 +429,7 @@ public:
         SwitchOutputDevice(outputName, "selection");
         SetAudioStatus(outputName.isEmpty() ? "Audio: System Default" : "Audio: " + outputName);
         SyncAudioSelection();
+        RefreshInputRoutedState();
     }
 
     // AudioConfigPage's input combo onChange target (Task 3 review, Minor,
@@ -432,16 +438,14 @@ public:
     // identically to ApplyAudioDeviceSelection above, just for the input
     // device name field: records the selection via
     // engine_.SetAudioDeviceFromHost (same shadow-advancing rationale) then
-    // applies it via AudioDeviceSetup.inputDeviceName + setAudioDeviceSetup,
-    // with the same absent-device handling (an inputName not currently
-    // enumerated is not applied; the status label reports it, matching
-    // SwitchOutputDevice/OnEngineAudioDeviceChanged's "absent -> keep
-    // current, no failure" contract). "System Default" (the empty
-    // host-neutral name) needs exactly the same concrete-name resolution
-    // SwitchOutputDevice performs for outputs: the persisted name stays empty,
-    // but AudioDeviceSetup reads an empty inputDeviceName as "no input device
-    // at all", so passing it through would silently stop capture for an app
-    // that asked for input -- see ResolveInputDeviceName.
+    // applies it via ApplyInputDeviceSetup, with the same absent-device
+    // handling (an inputName not currently enumerated is not applied; the
+    // status label reports it, matching SwitchOutputDevice/
+    // OnEngineAudioDeviceChanged's "absent -> keep current, no failure"
+    // contract). "System Default" (the empty host-neutral name) is passed
+    // through as-is: an empty inputDeviceName is what opens no input device
+    // at all, which is the correct outcome for declining input, not a hazard
+    // to route around.
     void ApplyAudioDeviceInputSelection(const juce::String& inputName) {
         synth::AudioDeviceState newState = engine_.AudioDeviceSnapshot();
         newState.inputDeviceName = inputName.toStdString();
@@ -452,28 +456,27 @@ public:
             INFO("%s", message.toRawUTF8());
             SetAudioStatus(message);
             SyncAudioSelection();
+            RefreshInputRoutedState();
             return;
         }
 
-        juce::AudioDeviceManager::AudioDeviceSetup setup = deviceManager_.getAudioDeviceSetup();
-        setup.inputDeviceName = ResolveInputDeviceName(inputName);
-        if (!ApplyInputDeviceSetup(setup, "selection")) {
+        if (!ApplyInputDeviceSetup(inputName, "selection")) {
             SyncAudioSelection();
+            RefreshInputRoutedState();
             return;
         }
         ApplyPreferredRateAndBlockSize();
         SetAudioStatus(inputName.isEmpty() ? "Audio In: System Default" : "Audio In: " + inputName);
         SyncAudioSelection();
+        RefreshInputRoutedState();
     }
 
-    // The current audio callback load, as a percentage (Plan 4 Task 2,
-    // sru-2 binding: "RollingMax256 of deviceManager_.getCpuUsage() * 100.0,
-    // written once per UI timer tick"). The shell's MainPane<App> writes
-    // this into its RollingMax256 from the timer-driven repaint hook (see
-    // ShellComponent::RepaintAll in Shell.hpp) -- Runtime itself has no
-    // MainPane reference (MainPane owns a Runtime reference, not the other
-    // way around), so it exposes the raw sample here rather than writing
-    // into the pane directly.
+    // The current audio callback load, as a percentage (sru-2). The shell's
+    // MainPane<App> writes this into its rolling deadline-max window from
+    // the timer-driven repaint hook (see ShellComponent::RepaintAll in
+    // Shell.hpp) -- Runtime itself has no MainPane reference (MainPane owns
+    // a Runtime reference, not the other way around), so it exposes the raw
+    // sample here rather than writing into the pane directly.
     float DeadlineSamplePct() const { return static_cast<float>(deviceManager_.getCpuUsage() * 100.0); }
 
     // Installs the shell's repaint hook (Task 4): invoked at the end of
@@ -613,41 +616,53 @@ private:
         return deviceType != nullptr && deviceType->getDeviceNames(true).contains(name);
     }
 
-    // Input-side counterpart of SwitchOutputDevice's "System Default"
-    // resolution. The portable Audio page's System Default option is an empty
-    // host-neutral device name, and that empty name is what persists in
-    // config.json -- but AudioDeviceSetup reads an empty inputDeviceName as
-    // "no input device wanted" and opens the device with no capture at all, so
-    // handing "" straight to setAudioDeviceSetup would silently disable input
-    // for an application that requested it. Resolve it to the concrete native
-    // default input device name instead, exactly as SwitchOutputDevice does
-    // for the output side, and leave the persisted name alone.
+    // sar-33: recomputes and publishes the external-input-routed signal from
+    // current device state. Routed iff the user-selected input device name
+    // -- engine_.AudioDeviceSnapshot().inputDeviceName, the same persisted
+    // selection Start() applies at startup (:287-290) and
+    // ApplyAudioDeviceInputSelection/OnEngineAudioDeviceChanged apply live --
+    // is non-empty AND matches deviceManager_'s CURRENTLY OPEN input device
+    // (getAudioDeviceSetup().inputDeviceName, with a device actually current).
     //
-    // A zero-input application is left untouched: its "" genuinely means "no
-    // input device", and resolving it would open a capture path (and raise the
-    // macOS microphone prompt) that the application never asked for.
-    juce::String ResolveInputDeviceName(const juce::String& inputName) const {
-        if (inputName.isNotEmpty() || requestedInputChannels_ <= 0) {
-            return inputName;
-        }
-        juce::AudioIODeviceType* deviceType = deviceManager_.getCurrentDeviceTypeObject();
-        if (deviceType == nullptr) {
-            return inputName;
-        }
-        const juce::StringArray names = deviceType->getDeviceNames(true);
-        const int defaultIx = deviceType->getDefaultDeviceIndex(true);
-        if (defaultIx >= 0 && defaultIx < names.size()) {
-            return names[defaultIx];
-        }
-        return inputName;
+    // With no persisted selection, Start() opens no input device at all: the
+    // output device may still be current, but getAudioDeviceSetup() names no
+    // input, so selectedInputName.isNotEmpty() alone already derives false. A
+    // selection that fails to open (see ApplyInputDeviceSetup) leaves the
+    // setup's actual inputDeviceName pointing at whatever
+    // RecoverOutputOnlyDevice restored (never the failed name), so it also
+    // derives false, matching "open and delivering".
+    //
+    // Message-thread only: see InputRoutingSignal::Publish's doc comment
+    // (AppContext.hpp) for why -- the registered app callback runs
+    // synchronously from Publish(), on whichever thread calls this method,
+    // and every caller of this method is a message-thread path (Start(),
+    // ApplyAudioDeviceSelection, ApplyAudioDeviceInputSelection,
+    // OnEngineAudioDeviceChanged), never the audio callback.
+    void RefreshInputRoutedState() {
+        const juce::String selectedInputName = juce::String(engine_.AudioDeviceSnapshot().inputDeviceName);
+        const bool routed = selectedInputName.isNotEmpty() &&
+                            deviceManager_.getCurrentAudioDevice() != nullptr &&
+                            deviceManager_.getAudioDeviceSetup().inputDeviceName == selectedInputName;
+        inputRoutingSignal_.Publish(routed);
     }
 
-    // Applies an AudioDeviceSetup that changes the input device, and owns the
-    // failure path. JUCE stops and deletes the current device before it opens
-    // the requested one and deletes it again if the open fails, so a failed
-    // input switch leaves the host with NO device at all -- output included --
-    // and the returned error string is the only notice anyone gets. Publish
-    // that error through the status line (rather than only INFO-logging it and
+    // Builds and applies the AudioDeviceSetup for `inputDeviceName`, and owns
+    // the failure path. This is the one place that decides both the input
+    // device name and its channel fields: a non-empty name gets
+    // useDefaultInputChannels cleared and the first requestedInputChannels_
+    // bits of inputChannels set, opening exactly the channel shape the
+    // application asked for; an empty name gets useDefaultInputChannels
+    // cleared and inputChannels cleared, opening no input device at all.
+    // Every caller that wants to change the input device -- startup applying
+    // a persisted selection, the operator picking a device from the combo, or
+    // a runtime-config-initiated change -- routes through here rather than
+    // building its own AudioDeviceSetup.
+    //
+    // JUCE stops and deletes the current device before it opens the requested
+    // one and deletes it again if the open fails, so a failed input switch
+    // leaves the host with NO device at all -- output included -- and the
+    // returned error string is the only notice anyone gets. Publish that
+    // error through the status line (rather than only INFO-logging it and
     // then reporting a success that did not happen), then recover a live
     // device so independent output keeps running.
     //
@@ -661,10 +676,18 @@ private:
     // Returns true when the requested setup applied, false when it failed (in
     // which case recovery has already run and the caller must not report
     // success).
-    bool ApplyInputDeviceSetup(const juce::AudioDeviceManager::AudioDeviceSetup& setup,
-                               const char* reason) {
-        const juce::AudioDeviceManager::AudioDeviceSetup lastKnownGood =
-            deviceManager_.getAudioDeviceSetup();
+    bool ApplyInputDeviceSetup(const juce::String& inputDeviceName, const char* reason) {
+        const juce::AudioDeviceManager::AudioDeviceSetup lastKnownGood = deviceManager_.getAudioDeviceSetup();
+        juce::AudioDeviceManager::AudioDeviceSetup setup = lastKnownGood;
+        setup.inputDeviceName = inputDeviceName;
+        setup.useDefaultInputChannels = false;
+        if (inputDeviceName.isNotEmpty()) {
+            juce::BigInteger channels;
+            channels.setRange(0, requestedInputChannels_, true);
+            setup.inputChannels = channels;
+        } else {
+            setup.inputChannels.clear();
+        }
         const juce::String setupError = deviceManager_.setAudioDeviceSetup(setup, true);
         if (setupError.isEmpty()) {
             return true;
@@ -878,22 +901,19 @@ private:
         // (SyncAudioSelection() below reads engine_.AudioDeviceSnapshot()
         // directly) without ever actually switching the input device on
         // deviceManager_. Apply it the same way ApplyAudioDeviceInputSelection
-        // does, via the AudioDeviceSetup.inputDeviceName path, still tolerant
-        // of the pre-device-open case (see this method's doc comment): an
-        // empty deviceManager_ device type makes IsEnumeratedInputDevice
-        // return false unconditionally, so this is a no-op until Start()'s
-        // own device-open step runs.
+        // does, via ApplyInputDeviceSetup, still tolerant of the
+        // pre-device-open case (see this method's doc comment): an empty
+        // deviceManager_ device type makes IsEnumeratedInputDevice return
+        // false unconditionally, so this is a no-op until Start()'s own
+        // device-open step runs. The persisted name is passed straight
+        // through, empty included -- an empty inputName is a deliberate "no
+        // input device" choice, not a value to resolve away.
         const juce::String inputName = juce::String(state.inputDeviceName);
         if (inputName.isEmpty() || IsEnumeratedInputDevice(inputName)) {
             if (deviceManager_.getCurrentAudioDevice() != nullptr) {
-                juce::AudioDeviceManager::AudioDeviceSetup setup = deviceManager_.getAudioDeviceSetup();
-                // Same System Default resolution as the combo path: the
-                // persisted empty name must not reach the setup verbatim for an
-                // input-capable app. See ResolveInputDeviceName.
-                const juce::String resolvedInputName = ResolveInputDeviceName(inputName);
-                if (setup.inputDeviceName != resolvedInputName) {
-                    setup.inputDeviceName = resolvedInputName;
-                    if (ApplyInputDeviceSetup(setup, "patch")) {
+                const juce::AudioDeviceManager::AudioDeviceSetup currentSetup = deviceManager_.getAudioDeviceSetup();
+                if (currentSetup.inputDeviceName != inputName) {
+                    if (ApplyInputDeviceSetup(inputName, "patch")) {
                         ApplyPreferredRateAndBlockSize();
                     }
                 }
@@ -905,6 +925,7 @@ private:
         }
 
         SyncAudioSelection();
+        RefreshInputRoutedState();
     }
 
     // Timer tick order (binding): engine message-thread tick -> MIDI
@@ -950,6 +971,22 @@ private:
     std::chrono::steady_clock::time_point startTime_;
     synth_juce::RuntimeMidiEpoch midiEpoch_;
     juce::AudioDeviceManager deviceManager_;
+
+    // Shutdown ordering (binding, review fix on sar-33): declared before
+    // engine_ so it is destroyed AFTER engine_ -- member destruction runs in
+    // the reverse of declaration order, so a member declared earlier outlives
+    // one declared later. engine_.Context().inputRoutingSignal (wired in the
+    // constructor, above) is a raw pointer into this object, and the engine
+    // -- including its own teardown and the App inside it -- may still read
+    // Context().inputRoutingSignal while engine_ itself is being destroyed.
+    // Declaring inputRoutingSignal_ after engine_ would destroy it first,
+    // leaving that pointer dangling for the whole remainder of engine_'s
+    // teardown. Mirrors BrowserRuntime.hpp, which declares
+    // inputRoutingSignal_ before engine_ for the same reason. See
+    // RefreshInputRoutedState for the JUCE derivation and every call site
+    // that keeps it current.
+    synth::InputRoutingSignal inputRoutingSignal_;
+
     synth::Engine<App> engine_;
     synth::RuntimeDataPaths dataPaths_;
     std::optional<synth::RuntimeDataPaths> dataPathsOverride_;

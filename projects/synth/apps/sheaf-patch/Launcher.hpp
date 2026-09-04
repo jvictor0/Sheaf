@@ -15,6 +15,26 @@
 
 namespace synth_sheaf_patch {
 
+// Resolves a launcher command-line argument to one of `apps`'s
+// registrations by stable appId. Returns nullptr -- the "show the picker"
+// sentinel -- when `argument` is empty or does not match any registered
+// appId, so callers can factor direct-launch selection from the picker's
+// own row-lookup logic and unit test it without constructing a
+// LauncherComponent or launching a real window.
+inline const synth::SynthAppRegistration* ResolveDirectLaunchApp(
+    const std::vector<synth::SynthAppRegistration>& apps, std::string_view argument) {
+    if (argument.empty()) {
+        return nullptr;
+    }
+
+    for (const auto& app : apps) {
+        if (app.manifest.appId == argument) {
+            return &app;
+        }
+    }
+    return nullptr;
+}
+
 class LauncherComponent final : public juce::Component {
 public:
     LauncherComponent(std::vector<synth::SynthAppRegistration> apps, std::filesystem::path dataRoot)

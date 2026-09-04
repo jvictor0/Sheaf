@@ -757,6 +757,129 @@ void TestGangedRandomLfoVisualizer()
     Require(visualizer.Draw().size() == 2, "unstable retained state fails closed");
 }
 
+void TestGangedRandomLfoBackgroundOptOut()
+{
+    // Create a valid snapshot for testing
+    synth::GangedRandomLfoSnapshot<2> snapshot;
+    snapshot.sampleRate = 48000.0;
+    snapshot.roundElapsedSamples = 3.0;
+    snapshot.voices[0] = {
+        .source = 0.0f,
+        .target = 1.0f,
+        .output = 0.91f,
+        .shape = 0.0f,
+        .waitingIncrement = 0.25,
+        .movingIncrement = 0.5,
+        .color = synth::Color::Cyan,
+    };
+    snapshot.voices[1] = {
+        .source = 1.0f,
+        .target = 0.25f,
+        .output = 0.02f,
+        .shape = 1.0f,
+        .waitingIncrement = 0.125,
+        .movingIncrement = 0.25,
+        .color = synth::Color::Orange,
+    };
+
+    const synth::ui::Bounds bounds{10.0f, 20.0f, 180.0f, 90.0f};
+
+    // Build default (with background)
+    std::vector<synth::ui::DrawCommand> defaultCommands;
+    synth::ui::BuildGangedRandomLfoCommands(snapshot, bounds, defaultCommands);
+
+    // Build with background opted out
+    std::vector<synth::ui::DrawCommand> optedOutCommands;
+    synth::ui::BuildGangedRandomLfoCommands(snapshot, bounds, optedOutCommands, false);
+
+    // Default must have Fill and Line commands. Pin the full default stream
+    // by construction rather than merely bounding it (Task 5 review Finding 2):
+    // for this snapshot the present sample (3) lies strictly between 0 and the
+    // shared duration (12 samples, from voice 1's ceil(8)+ceil(4)), so every
+    // voice emits its maximal past-polyline + dashed-future-polylines + dot
+    // set. Expected background/axis field values are derived by hand from
+    // AppendBackgroundAndAxis (GangedRandomLfoVisualizer.hpp:57-71) against
+    // nodeExtent {0,0,180,90} and its PlotBounds {4,4,172,82}.
+    Require(defaultCommands[0].kind == synth::ui::DrawCommand::Kind::Fill, "first command is background fill");
+    {
+        const synth::ui::Bounds expectedFillBounds{0.0f, 0.0f, bounds.width, bounds.height};
+        Require(std::memcmp(&defaultCommands[0].bounds, &expectedFillBounds, sizeof(synth::ui::Bounds)) == 0,
+                "background fill covers the full node extent");
+        Require(defaultCommands[0].color == synth::Color::Rgb(12, 14, 16),
+                "background fill uses the expected panel color");
+    }
+    Require(defaultCommands[1].kind == synth::ui::DrawCommand::Kind::Line, "second command is axis line");
+    {
+        const synth::ui::Point expectedFrom{4.0f, 45.0f};
+        const synth::ui::Point expectedTo{176.0f, 45.0f};
+        Require(std::memcmp(&defaultCommands[1].from, &expectedFrom, sizeof(synth::ui::Point)) == 0,
+                "axis line starts at the plot's left inset midline");
+        Require(std::memcmp(&defaultCommands[1].to, &expectedTo, sizeof(synth::ui::Point)) == 0,
+                "axis line ends at the plot's right inset midline");
+        Require(defaultCommands[1].color == synth::Color::Rgb(42, 46, 48),
+                "axis line uses the expected axis color");
+        Require(defaultCommands[1].strokeWidth == 1.0f, "axis line uses the expected stroke width");
+    }
+
+    constexpr std::size_t kDashSegments = (synth::ui::GangedRandomLfoGeometry::kPathSegments + 1) / 2;
+    constexpr std::size_t kCommandsPerVoice = 1 + kDashSegments + 1;
+    constexpr std::size_t kVoiceCount = 2;
+    Require(defaultCommands.size() == 2 + kVoiceCount * kCommandsPerVoice,
+            "default stream command count is fully pinned by construction, not merely bounded");
+    for (std::size_t voiceIndex = 0; voiceIndex < kVoiceCount; ++voiceIndex)
+    {
+        const std::size_t voiceStart = 2 + voiceIndex * kCommandsPerVoice;
+        Require(defaultCommands[voiceStart].kind == synth::ui::DrawCommand::Kind::Polyline,
+                "each voice's first trace command is the solid past polyline");
+        for (std::size_t dashIndex = 0; dashIndex < kDashSegments; ++dashIndex)
+        {
+            Require(defaultCommands[voiceStart + 1 + dashIndex].kind == synth::ui::DrawCommand::Kind::Polyline,
+                    "each voice's dashed future segments are polylines");
+        }
+        Require(defaultCommands[voiceStart + kCommandsPerVoice - 1].kind ==
+                    synth::ui::DrawCommand::Kind::FillEllipse,
+                "each voice's last trace command is the present-position dot");
+    }
+
+    // Opted out must have exactly 2 fewer commands (no Fill, no Line)
+    Require(optedOutCommands.size() == defaultCommands.size() - 2,
+            "opted-out stream has exactly two fewer commands (no background and no axis)");
+
+    // Verify remaining commands match exactly (skip first two from default).
+    // drawBackground does not affect nodeExtent or voice-trace generation, so
+    // this element-wise comparison against the independently built opt-out
+    // stream fully pins every field (points, strokeWidth, color, kind) of the
+    // default stream's trace commands without duplicating the algorithm's
+    // float geometry as literals in the test.
+    Require(optedOutCommands.size() >= 2, "opted-out stream still has voice traces");
+    for (std::size_t i = 0; i < optedOutCommands.size(); ++i)
+    {
+        const auto& optedCmd = optedOutCommands[i];
+        const auto& defaultCmd = defaultCommands[i + 2];
+        Require(optedCmd.kind == defaultCmd.kind, "opted-out command types match default (after background)");
+        if (optedCmd.kind == synth::ui::DrawCommand::Kind::Polyline)
+        {
+            Require(optedCmd.points.size() == defaultCmd.points.size(),
+                    "opted-out polyline has same point count");
+            for (std::size_t pointIx = 0; pointIx < optedCmd.points.size(); ++pointIx)
+            {
+                Require(std::memcmp(&optedCmd.points[pointIx], &defaultCmd.points[pointIx],
+                                     sizeof(synth::ui::Point)) == 0,
+                        "opted-out polyline points are byte-identical to default");
+            }
+            Require(optedCmd.strokeWidth == defaultCmd.strokeWidth,
+                    "opted-out polyline has same stroke width");
+            Require(optedCmd.color == defaultCmd.color, "opted-out polyline has same color");
+        }
+        else if (optedCmd.kind == synth::ui::DrawCommand::Kind::FillEllipse)
+        {
+            Require(std::memcmp(&optedCmd.bounds, &defaultCmd.bounds, sizeof(synth::ui::Bounds)) == 0,
+                    "opted-out dot bounds match default");
+            Require(optedCmd.color == defaultCmd.color, "opted-out dot has same color");
+        }
+    }
+}
+
 void TestScopeWaveformCommandsAreNodeLocal()
 {
     synth::ScopeWriter scope(1, 128);
@@ -1207,6 +1330,47 @@ static void TestCaptionIsAnEmittedLabelNodeNotAField()
             "the author's container holds the .row, not the bare control");
 }
 
+static void TestCaptionPlacementDefaultIsBeforeAndUnchanged()
+{
+    Require(synth::ui::ControlStyle{}.captionPlacement == synth::ui::CaptionPlacement::Before,
+            "a default-constructed ControlStyle places the caption Before the control");
+
+    synth::ui::ControlStyle style;
+    style.caption = "Output device";
+
+    synth::ui::Builder builder;
+    builder.Root("root", {0.0f, 0.0f, 400.0f, 300.0f});
+    builder.ComboBox("device", {}, "", synth::ui::Action::Named("pick"), style);
+    const synth::ui::NodeTree tree = builder.Build({0.0f, 0.0f, 400.0f, 300.0f});
+
+    Require(FindNode(tree, "device.row").children.size() == 2 &&
+                FindNode(tree, "device.row").children[0].value == "device.caption" &&
+                FindNode(tree, "device.row").children[1].value == "device",
+            "leaving captionPlacement unset emits the caption before the control, exactly as "
+            "before this change");
+}
+
+static void TestCaptionPlacementAfterEmitsCaptionAfterControl()
+{
+    synth::ui::ControlStyle style;
+    style.caption = "Output device";
+    style.captionPlacement = synth::ui::CaptionPlacement::After;
+
+    synth::ui::Builder builder;
+    builder.Root("root", {0.0f, 0.0f, 400.0f, 300.0f});
+    builder.ComboBox("device", {}, "", synth::ui::Action::Named("pick"), style);
+    const synth::ui::NodeTree tree = builder.Build({0.0f, 0.0f, 400.0f, 300.0f});
+
+    Require(FindNode(tree, "device.row").children.size() == 2 &&
+                FindNode(tree, "device.row").children[0].value == "device" &&
+                FindNode(tree, "device.row").children[1].value == "device.caption",
+            "captionPlacement After emits the control then the caption in the same .row");
+    Require(FindNode(tree, "device.caption").kind == synth::ui::NodeKind::Label,
+            "the trailing caption is still an ordinary Label node");
+    Require(FindNode(tree, "device.caption").text == "Output device",
+            "the trailing caption's id derivation and text sync match the leading form");
+}
+
 static void TestComboBoxAcceptsRuntimeOptionVectors()
 {
     synth::ui::Builder builder;
@@ -1280,10 +1444,12 @@ static void TestSyncPageFitsWithinTheRuntimeRoot()
 static void TestAudioSelectorsAreCaptionedWhileADeviceIsSelected()
 {
     synth::runtime_ui::AudioPageSnapshot snapshot;
-    snapshot.outputOptions =
-        synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Output"});
-    snapshot.inputOptions =
-        synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Microphone"});
+    snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Output"},
+        {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+    snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Microphone"},
+        {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
     snapshot.selectedOutputId = "Built-in Output";
     snapshot.selectedInputId = "Built-in Microphone";
     snapshot.showInputCombo = true;
@@ -1324,10 +1490,12 @@ static void TestAudioSelectorsAreCaptionedWhileADeviceIsSelected()
 static void TestHiddenInputSelectorLeavesNoOrphanedCaption()
 {
     synth::runtime_ui::AudioPageSnapshot snapshot;
-    snapshot.outputOptions =
-        synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Output"});
-    snapshot.inputOptions =
-        synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Microphone"});
+    snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Output"},
+        {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+    snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Microphone"},
+        {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
     snapshot.selectedOutputId = "Built-in Output";
     snapshot.selectedInputId = "Built-in Microphone";
     snapshot.showInputCombo = false;
@@ -1375,6 +1543,17 @@ static void TestOfflineInputCaptureOffersACaptionedRetryRow()
             "the retry row shares the Audio control column offset");
     Require(AllEqual(ColumnWidthsOf(tree, "runtime.audio.form", 0)),
             "the retry row shares the Audio caption column width");
+
+    // The retry button is a captioned FormButton, which declares Intrinsic
+    // controlWidth -- it must be sized to its own caption rather than
+    // stretched across the control column like the device selector next to it,
+    // while still sharing that column's left edge (already covered above by
+    // the column-1 AllEqual x-offset check).
+    const synth::ui::Node& inputSelector = FindNode(tree, synth::runtime_ui::NodeIds::kAudioInput);
+    Require(retry.bounds.width < inputSelector.bounds.width,
+            "the retry button is narrower than the full-width input device selector");
+    Require(std::fabs(retry.bounds.x - inputSelector.bounds.x) <= 0.0001f,
+            "the retry button's left edge matches the input device selector's left edge");
 }
 
 static void TestLiveInputCaptureHidesTheRetryRow()
@@ -1394,6 +1573,243 @@ static void TestLiveInputCaptureHidesTheRetryRow()
             "live capture leaves no orphaned retry caption");
     Require(HasNode(tree, synth::runtime_ui::NodeIds::kAudioInput),
             "hiding retry does not hide the input selector");
+}
+
+// sprs-16: a verbatim copy of BuildAudioPageTree's body as it stood before the
+// app-supplied-section change -- the pre-change tree the spec requires the
+// default path to stay byte-identical to. Any drift the two-pass
+// implementation introduces (node count, ids, kinds, or resolved bounds)
+// shows up as a mismatch against this independent reference.
+synth::ui::NodeTree ReferenceAudioPageTreeBeforeAppSection(
+    const synth::runtime_ui::AudioPageSnapshot& snapshot, synth::ui::Bounds area)
+{
+    using namespace synth::runtime_ui;
+    synth::ui::Builder builder;
+    builder.Root(NodeIds::kAudioRoot, area);
+    builder.Button(NodeIds::kAudioBack, "Back", synth::ui::Action::Named(Actions::kAudioBack),
+                   PageControls::BackButton());
+    builder.Column(NodeIds::kAudioForm, PageControls::FormGridLayout(), [&](synth::ui::Builder& form) {
+        form.ComboBox(NodeIds::kAudioOutput,
+                      PageControls::ControlOptionsFor(snapshot.outputOptions),
+                      snapshot.selectedOutputId,
+                      synth::ui::Action::Named(Actions::kAudioOutputSelect),
+                      PageControls::Field("Output device"));
+        if (snapshot.showInputCombo)
+        {
+            form.ComboBox(NodeIds::kAudioInput,
+                          PageControls::ControlOptionsFor(snapshot.inputOptions),
+                          snapshot.selectedInputId,
+                          synth::ui::Action::Named(Actions::kAudioInputSelect),
+                          PageControls::Field("Input device"));
+        }
+        if (snapshot.showInputRetry)
+        {
+            form.Button(NodeIds::kAudioInputRetry,
+                        "Retry Input",
+                        synth::ui::Action::Named(Actions::kAudioInputRetry),
+                        PageControls::FormButton("Input capture"));
+        }
+    });
+    builder.ScrollArea(
+        NodeIds::kAudioStatus, PageControls::StatusStackLayout(0.0f), [&](synth::ui::Builder& status) {
+            if (!snapshot.deviceLineText.empty())
+            {
+                status.Label(NodeIds::kAudioDeviceLine, snapshot.deviceLineText, PageControls::MutedText());
+            }
+            if (!snapshot.statusLineText.empty())
+            {
+                status.StatusText(NodeIds::kAudioStatusLine,
+                                  snapshot.statusLineText,
+                                  PageControls::MutedText());
+            }
+        });
+    return builder.Build(area);
+}
+
+static void TestAudioPageWithNoAppSectionIsByteIdenticalToBeforeTheChange()
+{
+    synth::runtime_ui::AudioPageSnapshot snapshot;
+    snapshot.outputOptions = {{"system_default", "System Default"}};
+    snapshot.inputOptions = {{"Built-in Microphone", "Built-in Microphone"}};
+    snapshot.selectedOutputId = "system_default";
+    snapshot.selectedInputId = "Built-in Microphone";
+    snapshot.showInputCombo = true;
+    snapshot.showInputRetry = true;
+    snapshot.deviceLineText = "Built-in Output: 48000 Hz, 512 frames";
+    snapshot.statusLineText = "Audio running";
+    Require(!snapshot.appSection, "a default-constructed snapshot supplies no app section builder");
+    const synth::ui::Bounds area{0.0f, 0.0f, 900.0f, 560.0f};
+
+    const synth::ui::NodeTree actual = synth::runtime_ui::BuildAudioPageTree(snapshot, area);
+    const synth::ui::NodeTree expected = ReferenceAudioPageTreeBeforeAppSection(snapshot, area);
+
+    Require(actual.nodes.size() == expected.nodes.size(),
+            "an unset app section builder adds no nodes to the pre-change tree");
+    for (std::size_t ix = 0; ix < expected.nodes.size(); ++ix)
+    {
+        const synth::ui::Node& a = actual.nodes[ix];
+        const synth::ui::Node& e = expected.nodes[ix];
+        Require(a.id == e.id, "node id order matches the pre-change tree exactly");
+        Require(a.kind == e.kind, "node kind matches the pre-change tree exactly");
+        RequireNear(a.bounds.x, e.bounds.x, 0.0001f, "node x matches the pre-change tree exactly");
+        RequireNear(a.bounds.y, e.bounds.y, 0.0001f, "node y matches the pre-change tree exactly");
+        RequireNear(a.bounds.width, e.bounds.width, 0.0001f, "node width matches the pre-change tree exactly");
+        RequireNear(a.bounds.height, e.bounds.height, 0.0001f, "node height matches the pre-change tree exactly");
+    }
+    Require(!HasNode(actual, synth::runtime_ui::NodeIds::kAudioAppSection),
+            "no app section mount node exists when no builder is supplied");
+}
+
+static void TestAudioPageAppendsSuppliedSectionBeneathDeviceRowsWithinRemainingArea()
+{
+    synth::runtime_ui::AudioPageSnapshot snapshot;
+    snapshot.outputOptions = {{"system_default", "System Default"}};
+    snapshot.inputOptions = {{"Built-in Microphone", "Built-in Microphone"}};
+    snapshot.selectedOutputId = "system_default";
+    snapshot.selectedInputId = "Built-in Microphone";
+    snapshot.showInputCombo = true;
+    snapshot.deviceLineText = "Built-in Output: 48000 Hz, 512 frames";
+    snapshot.statusLineText = "Audio running";
+    const synth::ui::Bounds area{0.0f, 0.0f, 900.0f, 560.0f};
+
+    std::optional<synth::ui::Bounds> handedBounds;
+    snapshot.appSection = [&handedBounds](synth::ui::Bounds bounds) {
+        handedBounds = bounds;
+        // sprs-16: ui::Subtree, built the Rootless()/BuildSubtree() way --
+        // the same idiom BuildPatchBrowserSubtree/BuildPatchVersionsSubtree
+        // use (RuntimePages.hpp:954-1001, 1006-1019) -- not a Root+Build()
+        // NodeTree, so the app's own layout declarations reach the splice.
+        synth::ui::Builder appBuilder;
+        appBuilder.Rootless();
+        appBuilder.Label("app.audio.section.label", "App section", {});
+        return appBuilder.BuildSubtree();
+    };
+
+    const synth::ui::NodeTree tree = synth::runtime_ui::BuildAudioPageTree(snapshot, area);
+
+    // The remaining area independently: the default-path tree's kAudioStatus
+    // region, which TestEveryRebuiltPageAbsorbsAtTheSmallestDeclaredSurface's
+    // RequireRegionAbsorbsTheDifference already establishes as the page's
+    // remaining area (it absorbs the whole difference between surface
+    // heights).
+    synth::runtime_ui::AudioPageSnapshot withoutBuilder = snapshot;
+    withoutBuilder.appSection = {};
+    const synth::ui::NodeTree defaultTree = synth::runtime_ui::BuildAudioPageTree(withoutBuilder, area);
+    const synth::ui::Node& statusWithoutBuilder =
+        FindNode(defaultTree, synth::runtime_ui::NodeIds::kAudioStatus);
+
+    Require(handedBounds.has_value(), "the supplied builder is invoked while resolving the page");
+    RequireNear(handedBounds->x, statusWithoutBuilder.bounds.x, 0.0001f,
+                "the handed bounds match the page's remaining area (x)");
+    RequireNear(handedBounds->y, statusWithoutBuilder.bounds.y, 0.0001f,
+                "the handed bounds match the page's remaining area (y)");
+    RequireNear(handedBounds->width, statusWithoutBuilder.bounds.width, 0.0001f,
+                "the handed bounds match the page's remaining area (width)");
+    RequireNear(handedBounds->height, statusWithoutBuilder.bounds.height, 0.0001f,
+                "the handed bounds match the page's remaining area (height)");
+
+    const synth::ui::Node& appSection =
+        FindNode(tree, synth::runtime_ui::NodeIds::kAudioAppSection);
+    Require(!appSection.children.empty(), "the app-supplied nodes attach beneath the audio page");
+    const synth::ui::Node& appLabel = FindNode(tree, "app.audio.section.label");
+    Require(appLabel.text == "App section", "the app-built node survives the splice");
+
+    const synth::ui::Node& statusWithSection =
+        FindNode(tree, synth::runtime_ui::NodeIds::kAudioStatus);
+    Require(!statusWithSection.children.empty() &&
+                statusWithSection.children.back().value == synth::runtime_ui::NodeIds::kAudioAppSection,
+            "the app section is appended after the existing device/status lines");
+
+    Require(appSection.bounds.x >= 0.0f && appSection.bounds.y >= 0.0f,
+            "the app section stays within the handed area's top-left corner");
+    RequireNear(appSection.bounds.width, handedBounds->width, 0.0001f,
+                "the app section is confined to the width of the area handed to the builder");
+    Require(appSection.bounds.height <= handedBounds->height + 0.0001f,
+            "the app section does not exceed the height of the area handed to the builder");
+    Require(appSection.bounds.y + appSection.bounds.height <= handedBounds->height + 0.0001f,
+            "the app section's whole extent, not just its top-left corner, is confined to the handed area");
+
+    // Not "device rows": the form's ComboBox rows are untouched by the append.
+    Require(HasNode(tree, synth::runtime_ui::NodeIds::kAudioOutput),
+            "device rows are unaffected by an appended section");
+    RequireNear(FindNode(tree, synth::runtime_ui::NodeIds::kAudioForm).bounds.height,
+                FindNode(defaultTree, synth::runtime_ui::NodeIds::kAudioForm).bounds.height,
+                0.0001f,
+                "the form's layout is unchanged by an appended section");
+}
+
+// sprs-16 review: the finding this test closes is that Splice(NodeTree)
+// carries no layout map (see Splice(NodeTree) in PortableUIBuilders.hpp --
+// it forwards to Splice(Subtree{tree, {}, {}})), so a nested Row/Column the
+// app declares with a weighted extent or explicit padding would silently
+// re-resolve with LayoutOptions{} defaults once the page's outer Build(area)
+// walked the spliced nodes from the root. TestAudioPageAppendsSuppliedSection...
+// above never nests a container inside the app section, so it could not have
+// caught that. This test declares a Row with non-default padding and two
+// children weighted 3:1, and asserts the RESOLVED bounds carry those
+// numbers rather than the default padding (kSpacing.padding == 12.0f) and an
+// even 1:1 split.
+static void TestAudioPageAppSectionNestedLayoutSurvivesTheSplice()
+{
+    synth::runtime_ui::AudioPageSnapshot snapshot;
+    snapshot.outputOptions = {{"system_default", "System Default"}};
+    snapshot.selectedOutputId = "system_default";
+    snapshot.deviceLineText = "Built-in Output: 48000 Hz, 512 frames";
+    snapshot.statusLineText = "Audio running";
+    const synth::ui::Bounds area{0.0f, 0.0f, 900.0f, 560.0f};
+
+    constexpr float kRowPadding = 40.0f;  // default LayoutOptions padding is kSpacing.padding == 12.0f
+    constexpr float kHeavyWeight = 3.0f;
+    constexpr float kLightWeight = 1.0f;
+
+    snapshot.appSection = [](synth::ui::Bounds) {
+        synth::ui::Builder appBuilder;
+        appBuilder.Rootless();
+        synth::ui::LayoutOptions rowLayout;
+        rowLayout.padding = kRowPadding;
+        appBuilder.Row("app.audio.section.row", rowLayout, [](synth::ui::Builder& row) {
+            synth::ui::ControlStyle heavy;
+            heavy.layout.main = synth::ui::Extent::Weight(kHeavyWeight);
+            row.Label("app.audio.section.heavy", "Heavy", heavy);
+            synth::ui::ControlStyle light;
+            light.layout.main = synth::ui::Extent::Weight(kLightWeight);
+            row.Label("app.audio.section.light", "Light", light);
+        });
+        return appBuilder.BuildSubtree();
+    };
+
+    const synth::ui::NodeTree tree = synth::runtime_ui::BuildAudioPageTree(snapshot, area);
+
+    const synth::ui::Node& row = FindNode(tree, "app.audio.section.row");
+    const synth::ui::Node& heavy = FindNode(tree, "app.audio.section.heavy");
+    const synth::ui::Node& light = FindNode(tree, "app.audio.section.light");
+
+    // Node bounds are parent-relative (a child's bounds are an offset within
+    // its own container, not a page-absolute position), so the row's declared
+    // padding shows up directly as the first child's x -- not as a difference
+    // against the row's own (differently-relative) bounds.x.
+    //
+    // The declared padding, not the default 12.0f: the first child starts
+    // kRowPadding from the row's left edge.
+    RequireNear(heavy.bounds.x, kRowPadding, 0.01f,
+                "the row's explicit padding is honored, not LayoutOptions{}'s default");
+
+    // The declared 3:1 weight split, not an even 1:1 default (a lost layout
+    // entry falls back to Extent::Intrinsic, giving both leaves their
+    // natural text width instead of a weighted share).
+    Require(heavy.bounds.width > 0.0f && light.bounds.width > 0.0f,
+            "both weighted children resolve to a positive width");
+    RequireNear(heavy.bounds.width / light.bounds.width, kHeavyWeight / kLightWeight, 0.02f,
+                "the declared 3:1 weight split is honored, not an even default split");
+
+    // The gap between them is the default 8.0f (unset in rowLayout), so this
+    // pins the light child's left edge relative to the heavy child's right
+    // edge, and the row's own resolved width is fully accounted for by
+    // padding + children + gap -- nothing left unexplained by a lost entry.
+    RequireNear(light.bounds.x, heavy.bounds.x + heavy.bounds.width + synth::ui::kSpacing.gap, 0.01f,
+                "the second child starts after the first plus the default gap");
+    RequireNear(light.bounds.x + light.bounds.width + kRowPadding, row.bounds.width, 0.01f,
+                "the row's own resolved width is fully accounted for by padding + children + gap");
 }
 
 // A patch root with more directories than the panel can show at the smallest
@@ -1700,8 +2116,12 @@ static void TestEveryRebuiltPageAbsorbsAtTheSmallestDeclaredSurface()
         "the Sync status region absorbs the whole difference between surface heights");
 
     synth::runtime_ui::AudioPageSnapshot audio;
-    audio.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Output"});
-    audio.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Microphone"});
+    audio.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Output"},
+        {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+    audio.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Microphone"},
+        {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
     audio.selectedOutputId = "Built-in Output";
     audio.selectedInputId = "Built-in Microphone";
     audio.showInputCombo = true;
@@ -1811,10 +2231,12 @@ static void TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface()
     sync.warningText = "96 PPQN is nonstandard";
 
     synth::runtime_ui::AudioPageSnapshot audioWithInput;
-    audioWithInput.outputOptions =
-        synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Output"});
-    audioWithInput.inputOptions =
-        synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Microphone"});
+    audioWithInput.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Output"},
+        {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+    audioWithInput.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Microphone"},
+        {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
     audioWithInput.selectedOutputId = "Built-in Output";
     audioWithInput.selectedInputId = "Built-in Microphone";
     audioWithInput.showInputCombo = true;
@@ -2214,8 +2636,12 @@ synth::runtime_ui::SyncPageSnapshot FixtureSyncState()
 synth::runtime_ui::AudioPageSnapshot FixtureAudioState()
 {
     synth::runtime_ui::AudioPageSnapshot snapshot;
-    snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Output"});
-    snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions({"Built-in Microphone"});
+    snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Output"},
+        {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+    snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Built-in Microphone"},
+        {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
     snapshot.selectedOutputId = "Built-in Output";
     snapshot.selectedInputId = "Built-in Microphone";
     snapshot.showInputCombo = true;
@@ -3159,8 +3585,99 @@ static void TestFilePageDelegatesItsListsToSplicedSubtrees()
     }
 }
 
+static void TestSidebarDeadlineNodeTextIsWholePercent()
+{
+    synth::runtime_ui::SidebarSnapshot snapshot;
+    snapshot.deadlinePercent = 12.4f;
+    const synth::ui::NodeTree tree = synth::runtime_ui::BuildSidebarTree(snapshot);
+    const synth::ui::Node* deadline = FindNodeById(tree, synth::runtime_ui::NodeIds::kSidebarDeadline);
+    Require(deadline != nullptr, "sidebar deadline node exists");
+    Require(deadline->text == "CPU 12%",
+            "the sidebar's own tree carries the whole-percent text, not a tenth");
+}
+
+// A control a page renders whose action the main component refuses to route is
+// a dead button: it looks live, it clicks, and nothing happens. That shipped
+// once -- `audio-input-permission` rendered and dispatched into nothing because
+// the router kept its own copy of the action list. Each surface's list is one
+// list now, and this walks the built page to prove the page cannot emit an
+// action that list omits.
+template <std::size_t N>
+void RequireEveryEmittedActionIsRoutable(const synth::ui::NodeTree& tree,
+                                         const std::string_view (&routed)[N],
+                                         std::size_t leastEmitted,
+                                         const char* unroutableLabel,
+                                         const char* silentPageLabel)
+{
+    std::size_t emitted = 0;
+    for (const synth::ui::Node& node : tree.nodes)
+    {
+        if (!node.action.has_value() || node.action->name.empty())
+        {
+            continue;
+        }
+        ++emitted;
+        bool routable = false;
+        for (const std::string_view candidate : routed)
+        {
+            if (node.action->name == candidate)
+            {
+                routable = true;
+                break;
+            }
+        }
+        Require(routable, unroutableLabel);
+    }
+    // POSITIVE CONTROL: a page that emitted nothing would pass the loop above
+    // without checking anything at all.
+    Require(emitted >= leastEmitted, silentPageLabel);
+}
+
+void TestEveryRuntimePageActionIsRoutable()
+{
+    using namespace synth::runtime_ui;
+    AudioPageSnapshot audio;
+    audio.showInputCombo = true;
+    audio.showInputRetry = true;
+    audio.showInputPermissionRequest = true;
+    audio.inputOptions = {{kNoInputOptionId, kNoInputOptionLabel}};
+    audio.outputOptions = {{kSystemDefaultOptionId, kSystemDefaultOptionLabel}};
+    RequireEveryEmittedActionIsRoutable(
+        BuildAudioPageTree(audio, {0.0f, 0.0f, 900.0f, 560.0f}),
+        Actions::kAudioActions,
+        3,
+        "the Audio page emits an action the main component will not route",
+        "the Audio page under test emits its controls");
+
+    SyncPageSnapshot sync;
+    RequireEveryEmittedActionIsRoutable(
+        BuildSyncPageTree(sync, {0.0f, 0.0f, 900.0f, 560.0f}),
+        Actions::kSyncActions,
+        3,
+        "the Sync page emits an action the main component will not route",
+        "the Sync page under test emits its controls");
+
+    // Two File states, because the browser is the same page in another state
+    // and a single snapshot cannot show both sets of controls at once.
+    FilePageSnapshot file;
+    file.hasCurrentPatch = true;
+    RequireEveryEmittedActionIsRoutable(
+        BuildFilePageTree(file, {0.0f, 0.0f, 900.0f, 560.0f}),
+        Actions::kFileActions,
+        3,
+        "the File page emits an action the main component will not route",
+        "the File page under test emits its controls");
+    RequireEveryEmittedActionIsRoutable(
+        BuildFilePageTree(RepresentativeBrowserState(), {0.0f, 0.0f, 900.0f, 560.0f}),
+        Actions::kFileActions,
+        3,
+        "the File browser emits an action the main component will not route",
+        "the File browser under test emits its controls");
+}
+
 int main()
 {
+    TestEveryRuntimePageActionIsRoutable();
     TestContainersNestToArbitraryDepth();
     TestComponentsComposeComponents();
     TestSpliceGraftsWithoutNestedRoot();
@@ -3171,6 +3688,8 @@ int main()
     TestContainerConstructionCarriesAppearance();
     TestUnstyledNodesCarryNothing();
     TestCaptionIsAnEmittedLabelNodeNotAField();
+    TestCaptionPlacementDefaultIsBeforeAndUnchanged();
+    TestCaptionPlacementAfterEmitsCaptionAfterControl();
     TestComboBoxAcceptsRuntimeOptionVectors();
     TestSyncPageAlignsThroughTheFormGrid();
     TestSyncPageFitsWithinTheRuntimeRoot();
@@ -3178,6 +3697,9 @@ int main()
     TestHiddenInputSelectorLeavesNoOrphanedCaption();
     TestOfflineInputCaptureOffersACaptionedRetryRow();
     TestLiveInputCaptureHidesTheRetryRow();
+    TestAudioPageWithNoAppSectionIsByteIdenticalToBeforeTheChange();
+    TestAudioPageAppendsSuppliedSectionBeneathDeviceRowsWithinRemainingArea();
+    TestAudioPageAppSectionNestedLayoutSurvivesTheSplice();
     TestPatchBrowserSplicesAsARootlessSubtree();
     TestPatchVersionsSplicesAsARootlessSubtree();
     TestSplicedListsKeepEveryEntryAtEveryExtent();
@@ -3188,6 +3710,7 @@ int main()
     TestFilePageCarriesPageColoursAndTextStyles();
     TestFilePanelsCarryAppearanceWithoutUnderlays();
     TestFilePageDelegatesItsListsToSplicedSubtrees();
+    TestSidebarDeadlineNodeTextIsWholePercent();
     TestEveryRebuiltPageAbsorbsAtTheSmallestDeclaredSurface();
     TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface();
     TestControllersWizardAndBraid4ResolveAtTheSmallestDeclaredSurface();
@@ -3197,6 +3720,7 @@ int main()
     TestControllersChooserAndBraid4PinTheirAbsorbingRegions();
 
     TestGangedRandomLfoVisualizer();
+    TestGangedRandomLfoBackgroundOptOut();
     TestScopeWaveformCommandsAreNodeLocal();
     TestEncoderDrawIsPositionIndependent();
     TestStandardModulatorVisualizersRemainPortable();
@@ -3845,7 +4369,7 @@ int main()
             "encoder retains double-click action");
 
     synth::runtime_ui::SidebarSnapshot sidebarSnapshot;
-    sidebarSnapshot.deadlinePercent = 12.5f;
+    sidebarSnapshot.deadlinePercent = 12.4f;
     const synth::ui::NodeTree sidebarTree = synth::runtime_ui::BuildSidebarTree(sidebarSnapshot);
     Require(FindNodeById(sidebarTree, synth::runtime_ui::NodeIds::kSidebarAudio) != nullptr, "sidebar audio node");
     Require(FindNodeById(sidebarTree, synth::runtime_ui::NodeIds::kSidebarControllers) != nullptr,
@@ -3856,7 +4380,7 @@ int main()
     Require(FindNodeById(sidebarTree, synth::runtime_ui::NodeIds::kSidebarDeadline) != nullptr,
             "sidebar deadline node");
     const synth::ui::Node* deadlineNode = FindNodeById(sidebarTree, synth::runtime_ui::NodeIds::kSidebarDeadline);
-    Require(deadlineNode->text == "12.5%", "deadline readout text");
+    Require(deadlineNode->text == "CPU 12%", "deadline readout text");
     // Re-pinned, not loosened, when the sidebar moved onto the library (7.1):
     // the Controllers entry is now a row so its warning badge can be an
     // out-of-flow overlay in the row's own space, so the root's second child is
@@ -3946,12 +4470,18 @@ int main()
     }
 
     synth::runtime_ui::AudioPageSnapshot audioSnapshot;
-    audioSnapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions({"Speakers", "Headphones"});
-    audioSnapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions({"Mic"});
-    Require(synth::runtime_ui::Layout::SelectedDeviceOptionId("Headphones", audioSnapshot.outputOptions) ==
+    audioSnapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Speakers", "Headphones"},
+        {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+    audioSnapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Mic"},
+        {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
+    Require(synth::runtime_ui::Layout::SelectedDeviceOptionId(
+                "Headphones", audioSnapshot.outputOptions, synth::runtime_ui::kSystemDefaultOptionId) ==
                 "Headphones",
             "known audio device option stays selected");
-    Require(synth::runtime_ui::Layout::SelectedDeviceOptionId("Vanished Device", audioSnapshot.outputOptions) ==
+    Require(synth::runtime_ui::Layout::SelectedDeviceOptionId(
+                "Vanished Device", audioSnapshot.outputOptions, synth::runtime_ui::kSystemDefaultOptionId) ==
                 synth::runtime_ui::kSystemDefaultOptionId,
             "unknown audio device option falls back to system default");
     audioSnapshot.selectedOutputId = "Speakers";
@@ -4066,7 +4596,7 @@ int main()
     synth::runtime_ui::SidebarSurface sidebarSurface;
     sidebarSurface.SetDeadlinePercent(3.0f);
     const synth::ui::NodeTree sidebarBuilt = sidebarSurface.BuildTree();
-    Require(FindNodeById(sidebarBuilt, synth::runtime_ui::NodeIds::kSidebarDeadline)->text == "3.0%",
+    Require(FindNodeById(sidebarBuilt, synth::runtime_ui::NodeIds::kSidebarDeadline)->text == "CPU 3%",
             "sidebar surface deadline refresh");
 
     synth::runtime_ui::AudioPageSurface audioSurface;
