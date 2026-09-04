@@ -1,0 +1,227 @@
+diff --git a/server/modules/file-tree/file-tree.service.ts b/server/modules/file-tree/file-tree.service.ts
+index 25ccd15..1ea0d4b 100644
+--- a/server/modules/file-tree/file-tree.service.ts
++++ b/server/modules/file-tree/file-tree.service.ts
+@@ -101,6 +101,12 @@ function resolvePathInsideProject(projectRoot: string, targetPath: string): stri
+   return resolvedPath;
+ }
+ 
++function resolveFileAccessPath(projectRoot: string, targetPath: string): string {
++  return path.isAbsolute(targetPath)
++    ? path.resolve(targetPath)
++    : resolvePathInsideProject(projectRoot, targetPath);
++}
++
+ function expandWorkspacePath(workspaceRoot: string, inputPath: string): string {
+   if (inputPath === '~') {
+     return workspaceRoot;
+@@ -409,7 +415,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
+ 
+     async readTextFile(projectId, filePath) {
+       const projectRoot = await resolveProjectRoot(projectId);
+-      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
++      const resolvedPath = resolveFileAccessPath(projectRoot, filePath);
+       try {
+         const content = await fileSystem.readTextFile(resolvedPath);
+         return { content, path: resolvedPath };
+@@ -423,7 +429,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
+ 
+     async openFile(projectId, filePath) {
+       const projectRoot = await resolveProjectRoot(projectId);
+-      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
++      const resolvedPath = resolveFileAccessPath(projectRoot, filePath);
+       try {
+         await fileSystem.access(resolvedPath);
+       } catch {
+@@ -438,7 +444,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
+ 
+     async saveTextFile(projectId, filePath, content) {
+       const projectRoot = await resolveProjectRoot(projectId);
+-      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
++      const resolvedPath = resolveFileAccessPath(projectRoot, filePath);
+       try {
+         await fileSystem.writeTextFile(resolvedPath, content);
+       } catch (error) {
+diff --git a/server/modules/file-tree/tests/file-tree.service.test.ts b/server/modules/file-tree/tests/file-tree.service.test.ts
+index 643d738..9a5fb38 100644
+--- a/server/modules/file-tree/tests/file-tree.service.test.ts
++++ b/server/modules/file-tree/tests/file-tree.service.test.ts
+@@ -343,6 +343,45 @@ test('readTextFile rejects traversal before invoking the filesystem adapter', as
+   assert.deepEqual(readPaths, []);
+ });
+ 
++test('file access uses an absolute path independently of the selected project', async () => {
++  const projectRoot = path.resolve('file-tree-test-project');
++  const siblingFile = path.resolve('sibling-worktree', 'proposal.md');
++  const readPaths: string[] = [];
++  const openedPaths: string[] = [];
++  const writes: Array<{ filePath: string; content: string }> = [];
++  const fileSystem = createFakeFileSystem({
++    access: async (filePath) => {
++      assert.equal(filePath, siblingFile);
++    },
++    readTextFile: async (filePath) => {
++      readPaths.push(filePath);
++      return 'the intended proposal';
++    },
++    createReadStream: (filePath) => {
++      openedPaths.push(filePath);
++      return Readable.from([]);
++    },
++    writeTextFile: async (filePath, content) => {
++      writes.push({ filePath, content });
++    },
++  });
++  const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
++
++  const readResult = await service.readTextFile('project-1', siblingFile);
++  await service.openFile('project-1', siblingFile);
++  const saveResult = await service.saveTextFile('project-1', siblingFile, 'updated proposal');
++
++  assert.deepEqual(readResult, { content: 'the intended proposal', path: siblingFile });
++  assert.deepEqual(saveResult, {
++    success: true,
++    path: siblingFile,
++    message: 'File saved successfully',
++  });
++  assert.deepEqual(readPaths, [siblingFile]);
++  assert.deepEqual(openedPaths, [siblingFile]);
++  assert.deepEqual(writes, [{ filePath: siblingFile, content: 'updated proposal' }]);
++});
++
+ test('createEntry performs filesystem mutation only through the injected adapter', async () => {
+   const projectRoot = path.resolve('file-tree-test-project');
+   const targetPath = path.join(projectRoot, 'notes.txt');
+diff --git a/src/hooks/fileOpenResolver.ts b/src/hooks/fileOpenResolver.ts
+new file mode 100644
+index 0000000..cde4153
+--- /dev/null
++++ b/src/hooks/fileOpenResolver.ts
+@@ -0,0 +1,38 @@
++export type FileReferenceCandidate = {
++  name: string;
++  path: string;
++};
++
++const normalize = (value: string): string => value.replace(/\\/g, '/');
++
++export const isAbsoluteFileReference = (value: string): boolean =>
++  value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\');
++
++// References inside chat messages are often bare basenames (`foo.ts`) or partial
++// paths (`utils/foo.ts`) rather than full paths, so match relative references by
++// path suffix and fall back to filename equality. Absolute paths are already
++// authoritative and must never be redirected to a same-named project file.
++export const resolveFileReference = (
++  files: FileReferenceCandidate[],
++  ref: string,
++): string => {
++  if (isAbsoluteFileReference(ref)) {
++    return ref;
++  }
++
++  const target = normalize(ref).replace(/^\.\//, '').replace(/^\/+/, '');
++  if (!target) {
++    return ref;
++  }
++
++  const suffixMatch = files.find((file) => {
++    const filePath = normalize(file.path);
++    return filePath === target || filePath.endsWith(`/${target}`);
++  });
++  if (suffixMatch) {
++    return suffixMatch.path;
++  }
++
++  const base = target.split('/').pop() || target;
++  return files.find((file) => file.name === base)?.path ?? ref;
++};
+diff --git a/src/hooks/useFileOpenResolver.test.ts b/src/hooks/useFileOpenResolver.test.ts
+new file mode 100644
+index 0000000..cb71077
+--- /dev/null
++++ b/src/hooks/useFileOpenResolver.test.ts
+@@ -0,0 +1,28 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++
++import { resolveFileReference } from './fileOpenResolver';
++
++test('resolveFileReference preserves an absolute path outside the selected project', () => {
++  const files = [
++    {
++      name: 'proposal.md',
++      path: '/workspace/current/.dev/worktree/other/openspec/changes/unrelated/proposal.md',
++    },
++  ];
++  const reference = '/workspace/sibling/openspec/changes/intended/proposal.md';
++
++  assert.equal(resolveFileReference(files, reference), reference);
++});
++
++test('resolveFileReference still resolves relative references against project files', () => {
++  const files = [
++    { name: 'other.ts', path: '/workspace/current/src/other.ts' },
++    { name: 'target.ts', path: '/workspace/current/src/utils/target.ts' },
++  ];
++
++  assert.equal(
++    resolveFileReference(files, 'src/utils/target.ts'),
++    '/workspace/current/src/utils/target.ts',
++  );
++});
+diff --git a/src/hooks/useFileOpenResolver.ts b/src/hooks/useFileOpenResolver.ts
+index ed5fd1f..89defea 100644
+--- a/src/hooks/useFileOpenResolver.ts
++++ b/src/hooks/useFileOpenResolver.ts
+@@ -2,6 +2,7 @@ import { useCallback, useRef } from 'react';
+ 
+ import { api } from '../utils/api';
+ import type { Project } from '../types/app';
++import { isAbsoluteFileReference, resolveFileReference } from './fileOpenResolver';
+ 
+ type FileNode = {
+   type: 'file' | 'directory';
+@@ -31,27 +32,6 @@ const flatten = (nodes: FileNode[], out: FlatFile[]): void => {
+   }
+ };
+ 
+-// References inside chat messages are often bare basenames (`foo.ts`) or partial
+-// paths (`utils/foo.ts`) rather than full paths, so match by path suffix and
+-// fall back to filename equality.
+-const findBestMatch = (files: FlatFile[], ref: string): string | null => {
+-  const target = normalize(ref).replace(/^\.\//, '').replace(/^\/+/, '');
+-  if (!target) {
+-    return null;
+-  }
+-
+-  const suffixMatch = files.find((file) => {
+-    const filePath = normalize(file.path);
+-    return filePath === target || filePath.endsWith(`/${target}`);
+-  });
+-  if (suffixMatch) {
+-    return suffixMatch.path;
+-  }
+-
+-  const base = target.split('/').pop() || target;
+-  return files.find((file) => file.name === base)?.path ?? null;
+-};
+-
+ /**
+  * Wraps an `onFileOpen` handler so a possibly bare/partial file reference is
+  * resolved against the project's file tree (cached per project) before the file
+@@ -98,9 +78,12 @@ export function useFileOpenResolver(
+   return useCallback(
+     (filePath: string, diffInfo?: any) => {
+       const ref = normalize(filePath).trim();
++      if (isAbsoluteFileReference(ref)) {
++        onFileOpen(ref, diffInfo);
++        return;
++      }
+       void loadFiles().then((files) => {
+-        const match = findBestMatch(files, ref);
+-        onFileOpen(match ?? filePath, diffInfo);
++        onFileOpen(resolveFileReference(files, ref), diffInfo);
+       });
+     },
+     [loadFiles, onFileOpen],

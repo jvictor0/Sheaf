@@ -7,4 +7,5 @@ patches = [
   "patches/0002-strong-dark-selected-chat.patch",
   "patches/0003-immediate-archive-independent-projects.patch",
   "patches/0004-steer-active-codex-turns.patch",
+  "patches/0005-open-absolute-file-links.patch",
 ]
