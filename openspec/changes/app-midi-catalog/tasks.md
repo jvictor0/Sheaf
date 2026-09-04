@@ -206,7 +206,7 @@
       `specs/synth-runtime-ui/spec.md` against the page as it now stands:
       the Name row moved into the expanded editor and a rename re-keying
       its UI state; the per-controller combo recaptioned Layout to Preset
-      (sru-60); the two-line header's per-row composition, its 740 px
+      (sru-60); the two-line header's per-row composition, its 724 px
       minimum width, and the blacklisted row's loss of Rename (sru-61);
       and the add row's Preset combo, per-port status dots, and their
       "Preset" caption (sru-62).

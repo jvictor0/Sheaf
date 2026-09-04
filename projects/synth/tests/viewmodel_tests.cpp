@@ -848,148 +848,6 @@ TEST_CASE(AddControllerLaunchpadSeedsDefaultProfile) {
     REQUIRE_TRUE(added->config.systemMessages.size() == expectedConfig.systemMessages.size());
 }
 
-// --- Launchpad controller-variant selector (label-launchpad-brief.md
-// Change 2) ------------------------------------------------------------
-
-TEST_CASE(LaunchpadVariantCatalogOrderMatchesEnum) {
-    // Index 0 = LaunchpadX, 1 = LaunchpadProMk3, 2 = LaunchpadMiniMk3 --
-    // MidiController.hpp's LaunchpadController declaration order.
-    const auto& catalog = synth::LaunchpadVariantCatalog();
-    REQUIRE_TRUE(catalog.size() == 3);
-    REQUIRE_TRUE(catalog[0] == "Launchpad X");
-    REQUIRE_TRUE(catalog[1] == "Launchpad Pro MK3");
-    REQUIRE_TRUE(catalog[2] == "Launchpad Mini MK3");
-}
-
-TEST_CASE(LaunchpadVariantIndexReadsCurrentVariant) {
-    MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument = MakeFourKindInstrument();  // "pads" (ix 2) is LaunchpadX by default
-    vm.Rebuild(instrument, MakeFourKindConnection());
-
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(2) == 0);  // LaunchpadX
-
-    // A non-launchpad controller reports -1 (kind != Launchpad).
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(0) == -1);  // "wrld" is WrldBldr
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(3) == -1);  // "blank" is Generic
-
-    // Out-of-range controllerIx.
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(99) == -1);
-}
-
-TEST_CASE(LaunchpadVariantIndexDefaultsToZeroWhenNoAssociations) {
-    // A Launchpad-kind slot with an empty systemMessages vector still
-    // reports index 0 (LaunchpadX) rather than -1 or an error -- "default 0
-    // when none" per this method's doc comment.
-    MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument;
-    MidiControllerSlot slot;
-    slot.name = "emptypads";
-    slot.kind = MidiProfileKind::Launchpad;
-    REQUIRE_TRUE(instrument.AddController(std::move(slot)));
-    vm.Rebuild(instrument, MidiConnectionState{});
-
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(0) == 0);
-}
-
-TEST_CASE(SetLaunchpadVariantRewritesAllPositionsXToProMk3) {
-    // X -> Pro MK3 only ever WIDENS the addressable grid (Pro MK3's shape is
-    // a superset of X's -- see LaunchpadShapeSupports), so every existing
-    // LaunchpadDefaultProfileConfig() position (x in 0..8, y in -1..7) stays
-    // valid; this should always succeed and rewrite every association's
-    // controller.
-    MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument;
-    instrument.AddController(MakeLaunchpadSlot("pads"));
-    vm.Rebuild(instrument, MakeSingleControllerConnection());
-
-    const std::size_t associationCount = instrument.controllers[0].config.systemMessages.size();
-    REQUIRE_TRUE(associationCount > 0);
-
-    MidiInstrumentConfig out;
-    std::string reason;
-    const bool ok = vm.SetLaunchpadVariant(0, 1, out, &reason);  // 1 = Launchpad Pro MK3
-    REQUIRE_TRUE(ok);
-    REQUIRE_TRUE(reason.empty());
-    REQUIRE_TRUE(out.controllers[0].config.systemMessages.size() == associationCount);
-    for (const auto& association : out.controllers[0].config.systemMessages) {
-        REQUIRE_TRUE(association.launchpadPosition.has_value());
-        REQUIRE_TRUE(association.launchpadPosition->controller == synth::LaunchpadController::LaunchpadProMk3);
-    }
-
-    // Re-Rebuild()ing on the committed result and reading the variant back
-    // confirms the slot-level index now reads Pro MK3.
-    vm.Rebuild(out, MakeSingleControllerConnection());
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(0) == 1);
-}
-
-TEST_CASE(SetLaunchpadVariantClearsWizardId) {
-    // A variant change rewrites every association's controller field, same
-    // as any other slot-mutating edit, so it drops wizardId the same way
-    // ApplyMappingEdit, DeleteRow, AddSingle and AddBlock do.
-    MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument;
-    MidiControllerSlot slot = MakeLaunchpadSlot("pads");
-    slot.wizardId = "froggers.launchpad";
-    instrument.AddController(std::move(slot));
-    vm.Rebuild(instrument, MakeSingleControllerConnection());
-
-    MidiInstrumentConfig out;
-    std::string reason;
-    const bool ok = vm.SetLaunchpadVariant(0, 1, out, &reason);  // 1 = Launchpad Pro MK3
-    REQUIRE_TRUE(ok);
-    REQUIRE_TRUE(!out.controllers[0].wizardId.has_value());
-}
-
-TEST_CASE(SetLaunchpadVariantOpenPresentationSurvivesFollowingEdits) {
-    MidiInstrumentConfig instrument;
-    MidiControllerSlot slot = MakeLaunchpadSlot("pads");
-    slot.config.systemMessages.clear();
-    MidiControllerSystemMessageAssociation association;
-    association.launchpadPosition =
-        synth::LaunchpadGridPosition{.controller = synth::LaunchpadController::LaunchpadX, .x = 0, .y = 0};
-    association.press = synth::MessageIn::SceneSelect(0, 0);
-    association.feedback = association.press;
-    association.outputFeedback = true;
-    slot.config.systemMessages.push_back(association);
-    REQUIRE_TRUE(instrument.AddController(slot));
-
-    MidiConnectionState connection = MakeSingleControllerConnection();
-    MidiConfigViewModel vm;
-    vm.Rebuild(instrument, connection);
-    vm.ToggleConfig(0);
-    vm.ToggleSection(0, MidiConfigSection::SystemMessages);
-
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(0) == 0);
-    const std::vector<MidiMappingRowVM> rows = vm.SectionRows(0, MidiConfigSection::SystemMessages);
-    REQUIRE_TRUE(rows.size() == 1);
-    REQUIRE_TRUE(rows[0].kind == MidiMappingRowVM::Kind::Individual);
-
-    MidiInstrumentConfig afterVariant;
-    std::string reason;
-    REQUIRE_TRUE(vm.SetLaunchpadVariant(0, 1, afterVariant, &reason));  // -> Pro MK3
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(0) == 1);
-    REQUIRE_TRUE(afterVariant.controllers[0].config.systemMessages[0].launchpadPosition->controller ==
-                 synth::LaunchpadController::LaunchpadProMk3);
-
-    MidiInstrumentConfig afterCoordinate;
-    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::SystemMessages, 0,
-                                     MidiMappingRowVM::Field::LaunchpadX, -1.0, afterCoordinate, &reason));
-    REQUIRE_TRUE(afterCoordinate.controllers[0].config.systemMessages.size() == 1);
-    const auto& moved = *afterCoordinate.controllers[0].config.systemMessages[0].launchpadPosition;
-    REQUIRE_TRUE(moved.controller == synth::LaunchpadController::LaunchpadProMk3);
-    REQUIRE_TRUE(moved.x == -1);
-    REQUIRE_TRUE(moved.y == 0);
-
-    vm.Rebuild(afterCoordinate, connection);
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(0) == 1);
-    MidiInstrumentConfig afterMessage;
-    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::SystemMessages, 0,
-                                     MidiMappingRowVM::Field::MessageArg, 4.0, afterMessage, &reason));
-    REQUIRE_TRUE(afterMessage.controllers[0].config.systemMessages[0].launchpadPosition->controller ==
-                 synth::LaunchpadController::LaunchpadProMk3);
-    REQUIRE_TRUE(afterMessage.controllers[0].config.systemMessages[0].press.sceneIx == 4);
-}
-
 TEST_CASE(LaunchpadCoordinateConflictKeepsTemporaryPresentationUntilResolved) {
     MidiInstrumentConfig instrument;
     MidiControllerSlot slot = MakeLaunchpadSlot("pads");
@@ -1077,114 +935,25 @@ TEST_CASE(LaunchpadCoordinateConflictKeepsTemporaryPresentationUntilResolved) {
     REQUIRE_TRUE(sawBlocker);
 }
 
-TEST_CASE(SetLaunchpadVariantProMk3ToXRefusedWithProOnlyEdgeButton) {
-    // Pro MK3 supports x = -1 (a column X/Mini MK3 do not -- their shape is
-    // x in [0, 9)); seed a slot with one association pinned at that
-    // Pro-only edge column, then attempt Pro MK3 -> X and confirm it is
-    // refused (config unchanged) rather than silently dropping the button.
-    MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument;
-    MidiControllerSlot slot;
-    slot.name = "pads";
-    slot.kind = MidiProfileKind::Launchpad;
-    slot.config = synth::LaunchpadDefaultProfileConfig(
-        {.controller = synth::LaunchpadController::LaunchpadProMk3});
-    MidiControllerSystemMessageAssociation edgeButton;
-    edgeButton.launchpadPosition =
-        synth::LaunchpadGridPosition{.controller = synth::LaunchpadController::LaunchpadProMk3, .x = -1, .y = 0};
-    edgeButton.press = synth::MessageIn::SetReset(0, true);
-    edgeButton.feedback = edgeButton.press;
-    slot.config.systemMessages.push_back(edgeButton);
-    REQUIRE_TRUE(instrument.AddController(std::move(slot)));
-    vm.Rebuild(instrument, MidiConnectionState{});
-
-    // Confirm the fixture is actually Pro-only before asserting the refusal
-    // (x = -1 is outside LaunchpadX's/MiniMk3's 0..8 range).
-    REQUIRE_TRUE(synth::LaunchpadShapeSupports(synth::LaunchpadController::LaunchpadProMk3, -1, 0));
-    REQUIRE_TRUE(!synth::LaunchpadShapeSupports(synth::LaunchpadController::LaunchpadX, -1, 0));
-
-    MidiInstrumentConfig out;
-    std::string reason;
-    const bool ok = vm.SetLaunchpadVariant(0, 0, out, &reason);  // 0 = Launchpad X
-    REQUIRE_TRUE(!ok);
-    REQUIRE_TRUE(!reason.empty());
-    // `out` must be untouched on refusal -- verify the ORIGINAL instrument
-    // (still available via the vm's own snapshot) is what a re-read reports.
-    REQUIRE_TRUE(vm.LaunchpadVariantIndex(0) == 1);  // still Pro MK3, unchanged
-}
-
-TEST_CASE(SetLaunchpadVariantProMk3ToXOkWhenOnlyShapeSafePositions) {
-    // A Pro MK3 slot whose positions all happen to also be valid on X (the
-    // LaunchpadDefaultProfileConfig() default shape: x in 0..8, y in -1..7)
-    // shrinks cleanly -- Pro MK3 -> X succeeds when no position falls
-    // outside X's shape.
-    MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument;
-    MidiControllerSlot slot;
-    slot.name = "pads";
-    slot.kind = MidiProfileKind::Launchpad;
-    slot.config = synth::LaunchpadDefaultProfileConfig(
-        {.controller = synth::LaunchpadController::LaunchpadProMk3});
-    REQUIRE_TRUE(instrument.AddController(std::move(slot)));
-    vm.Rebuild(instrument, MidiConnectionState{});
-
-    const std::size_t associationCount = instrument.controllers[0].config.systemMessages.size();
-    REQUIRE_TRUE(associationCount > 0);
-
-    MidiInstrumentConfig out;
-    std::string reason;
-    const bool ok = vm.SetLaunchpadVariant(0, 0, out, &reason);  // 0 = Launchpad X
-    REQUIRE_TRUE(ok);
-    REQUIRE_TRUE(reason.empty());
-    REQUIRE_TRUE(out.controllers[0].config.systemMessages.size() == associationCount);
-    for (const auto& association : out.controllers[0].config.systemMessages) {
-        REQUIRE_TRUE(association.launchpadPosition.has_value());
-        REQUIRE_TRUE(association.launchpadPosition->controller == synth::LaunchpadController::LaunchpadX);
-    }
-}
-
-TEST_CASE(SetLaunchpadVariantRefusedForNonLaunchpadController) {
-    MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument = MakeFourKindInstrument();
-    vm.Rebuild(instrument, MakeFourKindConnection());
-
-    MidiInstrumentConfig out;
-    std::string reason;
-    REQUIRE_TRUE(!vm.SetLaunchpadVariant(0, 1, out, &reason));  // "wrld" is WrldBldr, not Launchpad
-    REQUIRE_TRUE(!reason.empty());
-}
-
-TEST_CASE(SetLaunchpadVariantRefusedForOutOfRangeInputs) {
-    MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument = MakeFourKindInstrument();
-    vm.Rebuild(instrument, MakeFourKindConnection());
-
-    MidiInstrumentConfig out;
-    std::string reason;
-    REQUIRE_TRUE(!vm.SetLaunchpadVariant(99, 1, out, &reason));  // controllerIx out of range
-    reason.clear();
-    REQUIRE_TRUE(!vm.SetLaunchpadVariant(2, -1, out, &reason));  // variantIndex negative
-    reason.clear();
-    REQUIRE_TRUE(!vm.SetLaunchpadVariant(2, 3, out, &reason));  // variantIndex >= catalog size
-}
-
 TEST_CASE(AddSingleAfterVariantChangeSeedsNewVariant) {
-    // Once a slot's variant is switched, AddSingle's NextFreeLaunchpadPosition
-    // scan must seed new rows with the SLOT'S CURRENT variant, not a
-    // hardcoded LaunchpadX -- otherwise a button added to a Pro MK3
-    // controller would silently come back as an X button.
+    // A slot already on a non-default variant: AddSingle's
+    // NextFreeLaunchpadPosition scan must seed new rows with the SLOT'S
+    // CURRENT variant, not a hardcoded LaunchpadX -- otherwise a button
+    // added to a Pro MK3 controller would silently come back as an X
+    // button.
     MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument;
-    instrument.AddController(MakeLaunchpadSlot("pads"));
-    MidiConnectionState connection = MakeSingleControllerConnection();
-    vm.Rebuild(instrument, connection);
-
     MidiInstrumentConfig afterVariant;
-    std::string reason;
-    REQUIRE_TRUE(vm.SetLaunchpadVariant(0, 1, afterVariant, &reason));  // -> Pro MK3
+    MidiControllerSlot slot;
+    slot.name = "pads";
+    slot.kind = MidiProfileKind::Launchpad;
+    slot.config = synth::LaunchpadDefaultProfileConfig(
+        {.controller = synth::LaunchpadController::LaunchpadProMk3});
+    REQUIRE_TRUE(afterVariant.AddController(std::move(slot)));
+    MidiConnectionState connection = MakeSingleControllerConnection();
     vm.Rebuild(afterVariant, connection);
 
     MidiInstrumentConfig out;
+    std::string reason;
     REQUIRE_TRUE(vm.AddSingle(0, MidiConfigSection::SystemMessages, MidiMappingRowVM::RowGroup::System, out, &reason));
     // Find the newly-added association (the one absent from `afterVariant`)
     // and confirm it carries the Pro MK3 variant.
@@ -1219,7 +988,7 @@ TEST_CASE(AddBlockAfterVariantChangeSeedsNewVariant) {
     // guards, see AddBlockAppendsCommittedExpansion's sibling tests), not
     // something this test is about.
     MidiConfigViewModel vm;
-    MidiInstrumentConfig instrument;
+    MidiInstrumentConfig afterVariant;
     MidiControllerSlot slot;
     slot.name = "pads";
     slot.kind = MidiProfileKind::Launchpad;
@@ -1227,20 +996,16 @@ TEST_CASE(AddBlockAfterVariantChangeSeedsNewVariant) {
     // MK3's row-major scan tries -- so the default 2-wide block lands
     // without colliding with this lone association.
     MidiControllerSystemMessageAssociation lone;
-    lone.launchpadPosition = synth::LaunchpadGridPosition{.controller = synth::LaunchpadController::LaunchpadX, .x = 8, .y = 7};
+    lone.launchpadPosition = synth::LaunchpadGridPosition{.controller = synth::LaunchpadController::LaunchpadProMk3, .x = 8, .y = 7};
     lone.press = synth::MessageIn::SceneSelect(0, 0);
     lone.feedback = lone.press;
     slot.config.systemMessages.push_back(lone);
-    REQUIRE_TRUE(instrument.AddController(std::move(slot)));
+    REQUIRE_TRUE(afterVariant.AddController(std::move(slot)));
     MidiConnectionState connection = MakeSingleControllerConnection();
-    vm.Rebuild(instrument, connection);
-
-    MidiInstrumentConfig afterVariant;
-    std::string reason;
-    REQUIRE_TRUE(vm.SetLaunchpadVariant(0, 1, afterVariant, &reason));  // -> Pro MK3
     vm.Rebuild(afterVariant, connection);
 
     MidiInstrumentConfig out;
+    std::string reason;
     REQUIRE_TRUE(vm.AddBlock(0, MidiConfigSection::SystemMessages, MidiMappingRowVM::RowGroup::System, out, &reason));
     bool foundNewProMk3Position = false;
     for (const auto& association : out.controllers[0].config.systemMessages) {
@@ -2994,6 +2759,88 @@ TEST_CASE(AddBlockRefusedForTwister) {
         vm.AddBlock(0, MidiConfigSection::SystemMessages, MidiMappingRowVM::RowGroup::System, out, &reason);
     REQUIRE_TRUE(!ok);
     REQUIRE_TRUE(!reason.empty());
+}
+
+// --- A row's wizardId survives edit, delete, and add (provenance) ---
+//
+// slot.wizardId is which preset (if any) created a row, kept for as long as
+// the row exists so Restore/Release/Configure stay available after the row
+// has been hand-edited. ApplyMappingEdit, DeleteRow, AddSingle, and AddBlock
+// all mutate a row's stored mappings; none of them may clear it. The id
+// string below is opaque to every function under test here -- it is never
+// resolved against a registry in this file -- so any non-empty value proves
+// the point.
+
+TEST_CASE(ApplyMappingEditKeepsWizardIdProvenance) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument = MakeSingleTurnWrldBldrInstrument();
+    instrument.controllers[0].wizardId = "test.wizard";
+    vm.Rebuild(instrument, MakeSingleControllerConnection());
+
+    MidiInstrumentConfig edited;
+    std::string reason;
+    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::Encoders, 0, MidiMappingRowVM::Field::Position, 5.0,
+                                     edited, &reason));
+    REQUIRE_TRUE(edited.controllers[0].wizardId.has_value() &&
+                 *edited.controllers[0].wizardId == "test.wizard");
+}
+
+TEST_CASE(DeleteRowKeepsWizardIdProvenance) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument;
+    MidiControllerSlot slot = MakeGenericSlot("gen");
+    slot.wizardId = "test.wizard";
+    MidiControllerSystemMessageAssociation a;
+    a.control = MidiControlAddress{.channel = 0, .cc = 5};
+    a.press = synth::MessageIn::SceneSelect(0, 0);
+    a.feedback = a.press;
+    slot.config.systemMessages.push_back(a);
+    MidiControllerSystemMessageAssociation b;
+    b.control = MidiControlAddress{.channel = 0, .cc = 9};
+    b.press = synth::MessageIn::SceneSelect(0, 0);
+    b.feedback = b.press;
+    slot.config.systemMessages.push_back(b);
+    instrument.AddController(std::move(slot));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+
+    MidiInstrumentConfig out;
+    std::string reason;
+    REQUIRE_TRUE(vm.DeleteRow(0, MidiConfigSection::SystemMessages, 0, out, &reason));
+    REQUIRE_TRUE(out.controllers[0].wizardId.has_value() &&
+                 *out.controllers[0].wizardId == "test.wizard");
+}
+
+TEST_CASE(AddSingleKeepsWizardIdProvenance) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument = MakeSingleTurnWrldBldrInstrument();
+    instrument.controllers[0].wizardId = "test.wizard";
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+
+    MidiInstrumentConfig out;
+    std::string reason;
+    REQUIRE_TRUE(
+        vm.AddSingle(0, MidiConfigSection::Encoders, MidiMappingRowVM::RowGroup::EncoderTurn, out, &reason));
+    REQUIRE_TRUE(out.controllers[0].wizardId.has_value() &&
+                 *out.controllers[0].wizardId == "test.wizard");
+}
+
+TEST_CASE(AddBlockKeepsWizardIdProvenance) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument;
+    MidiControllerSlot slot = MakeLaunchpadSlot("pads");
+    slot.wizardId = "test.wizard";
+    instrument.AddController(std::move(slot));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+    vm.SectionRows(0, MidiConfigSection::SystemMessages);  // expand before AddBlock, matching the real host flow
+
+    MidiInstrumentConfig out;
+    std::string reason;
+    REQUIRE_TRUE(vm.AddBlock(0, MidiConfigSection::SystemMessages, MidiMappingRowVM::RowGroup::System, out, &reason));
+    REQUIRE_TRUE(out.controllers[0].wizardId.has_value() &&
+                 *out.controllers[0].wizardId == "test.wizard");
 }
 
 // --- First add creates an absent container --------------------------

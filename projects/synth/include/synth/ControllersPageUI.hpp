@@ -309,11 +309,6 @@ inline std::string ControllerBlacklist(std::size_t controllerIx)
     return ControllerRow(controllerIx) + ".blacklist";
 }
 
-inline std::string ControllerLayout(std::size_t controllerIx)
-{
-    return ControllerRow(controllerIx) + ".layout";
-}
-
 inline std::string ControllerConfigure(std::size_t controllerIx)
 {
     return ControllerRow(controllerIx) + ".configure";
@@ -324,6 +319,11 @@ inline std::string ControllerRemoveBlacklist(std::size_t controllerIx)
     return ControllerRow(controllerIx) + ".remove_blacklist";
 }
 
+inline std::string ControllerRestore(std::size_t controllerIx)
+{
+    return ControllerRow(controllerIx) + ".restore";
+}
+
 inline std::string ControllerInputLabel(std::size_t controllerIx)
 {
     return ControllerRow(controllerIx) + ".input_label";
@@ -332,11 +332,6 @@ inline std::string ControllerInputLabel(std::size_t controllerIx)
 inline std::string ControllerOutputLabel(std::size_t controllerIx)
 {
     return ControllerRow(controllerIx) + ".output_label";
-}
-
-inline std::string ControllerVariant(std::size_t controllerIx)
-{
-    return ControllerRow(controllerIx) + ".variant";
 }
 
 inline std::string ControllerInput(std::size_t controllerIx)
@@ -417,7 +412,6 @@ inline constexpr const char* kBack = "runtime.controllers.back";
 inline constexpr const char* kToggleConfig = "runtime.controllers.toggle_config";
 inline constexpr const char* kToggleSection = "runtime.controllers.toggle_section";
 inline constexpr const char* kEndpointSelect = "runtime.controllers.endpoint_select";
-inline constexpr const char* kVariantSelect = "runtime.controllers.variant_select";
 inline constexpr const char* kMappingFieldCommit = "runtime.controllers.mapping_field_commit";
 inline constexpr const char* kDeleteRow = "runtime.controllers.delete_row";
 inline constexpr const char* kAddSingle = "runtime.controllers.add_single";
@@ -438,7 +432,7 @@ inline constexpr const char* kControllerDelete = "runtime.controllers.controller
 inline constexpr const char* kControllerBlacklist = "runtime.controllers.controller.blacklist";
 inline constexpr const char* kControllerRemoveBlacklist = "runtime.controllers.controller.remove_blacklist";
 inline constexpr const char* kControllerConfigure = "runtime.controllers.controller.configure";
-inline constexpr const char* kControllerLayout = "runtime.controllers.controller.layout";
+inline constexpr const char* kControllerRestore = "runtime.controllers.controller.restore";
 
 // The fixed part of what the Controllers page emits. The per-controller and
 // wizard-step actions above are not listed: they are matched by prefix, because
@@ -449,7 +443,6 @@ inline constexpr std::string_view kControllersActions[] = {
     kToggleConfig,
     kToggleSection,
     kEndpointSelect,
-    kVariantSelect,
     kMappingFieldCommit,
     kDeleteRow,
     kAddSingle,
@@ -485,7 +478,6 @@ inline constexpr float kAddRowHeight = 40.0f;
 inline constexpr float kBaseEditorWidth = 90.0f;
 inline constexpr float kDeleteButtonWidth = 22.0f;
 inline constexpr float kAddButtonWidth = 62.0f;
-inline constexpr float kVariantFieldWidth = 200.0f;
 // The section heading's legend: three in-flow dot/word pairs (online, offline,
 // not set). Each dot sits in its own cell, sized for the 8px dot it centres;
 // the word beside it takes the word's own intrinsic width, so the two never
@@ -511,16 +503,18 @@ inline constexpr float kControllerDisclosureWidth = 24.0f;
 inline constexpr float kLifecycleDraftWidth = 160.0f;
 inline constexpr float kLifecycleRenameWidth = 72.0f;
 inline constexpr float kLifecycleDeleteWidth = 66.0f;
-inline constexpr float kLifecycleLayoutWidth = 200.0f;
 inline constexpr float kLifecycleBlacklistWidth = 78.0f;
+inline constexpr float kLifecycleRestoreWidth = 76.0f;
 inline constexpr float kLifecycleConfigureWidth = 86.0f;
 inline constexpr float kLifecycleRemoveWidth = 72.0f;
 inline constexpr float kLifecycleControlGap = 4.0f;
-// The Preset combo sits on line one beside the identity controls; the name
-// draft and Rename button moved into the expanded editor, so line two's
-// lifecycle block is just Delete and Blacklist.
+// The name draft and Rename button live in the expanded editor, so line two's
+// lifecycle block is Delete plus Restore and Release, each shown only when its
+// own row condition holds. Restore and Release can both show at once, so the
+// width below is their worst case, not their typical case.
 inline constexpr float kActiveLifecycleWidth =
-    kLifecycleDeleteWidth + kLifecycleControlGap + kLifecycleBlacklistWidth;
+    kLifecycleDeleteWidth + kLifecycleControlGap + kLifecycleRestoreWidth +
+    kLifecycleControlGap + kLifecycleBlacklistWidth;
 inline constexpr float kBlacklistedEndpointLabelWidth = 240.0f;
 inline constexpr float kBlacklistedBadgeWidth = 84.0f;
 // A blacklisted record has no expanded editor to hold a moved rename field,
@@ -528,13 +522,11 @@ inline constexpr float kBlacklistedBadgeWidth = 84.0f;
 // draft and Rename button are simply gone here, not moved.
 inline constexpr float kBlacklistedLifecycleWidth =
     kLifecycleConfigureWidth + kLifecycleControlGap + kLifecycleRemoveWidth;
-// Line one: disclosure, name, kind, Preset, and (worst case, a Launchpad)
-// Variant. The status dots are on line two now, beside the ports they
-// describe.
+// Line one: disclosure, name, kind. The status dots are on line two now,
+// beside the ports they describe.
 inline constexpr float kActiveHeaderLine1Width =
     kControllerDisclosureWidth + kLifecycleControlGap + kControllerNameWidth +
-    kLifecycleControlGap + kControllerKindWidth + kLifecycleControlGap +
-    kLifecycleLayoutWidth + kLifecycleControlGap + kVariantFieldWidth;
+    kLifecycleControlGap + kControllerKindWidth;
 // Line two: a status dot immediately before each port's combo, then the
 // lifecycle controls.
 inline constexpr float kActiveHeaderLine2Width =
@@ -543,7 +535,7 @@ inline constexpr float kActiveHeaderLine2Width =
     kActiveLifecycleWidth + kLifecycleControlGap;
 inline constexpr float kActiveControllerHeaderWidth =
     std::max(kActiveHeaderLine1Width, kActiveHeaderLine2Width);
-// Line one: name, kind, Blacklisted badge.
+// Line one: name, kind, Released badge.
 inline constexpr float kBlacklistedHeaderLine1Width =
     kControllerNameWidth + kLifecycleControlGap + kControllerKindWidth +
     kLifecycleControlGap + kBlacklistedBadgeWidth;
@@ -870,61 +862,16 @@ inline std::vector<ui::ControlOption> BuildEndpointOptions(const std::vector<Mid
     return options;
 }
 
-inline std::vector<ui::ControlOption> BuildLaunchpadVariantOptions(int selectedIndex, std::string& selectedOptionId)
-{
-    std::vector<ui::ControlOption> options;
-    const auto& catalog = LaunchpadVariantCatalog();
-    for (int ix = 0; ix < static_cast<int>(catalog.size()); ++ix)
-    {
-        const std::string id = std::to_string(ix);
-        options.push_back({id, catalog[static_cast<std::size_t>(ix)]});
-    }
-    if (selectedIndex >= 0 && selectedIndex < static_cast<int>(catalog.size()))
-    {
-        selectedOptionId = std::to_string(selectedIndex);
-    }
-    else if (!options.empty())
-    {
-        selectedOptionId = options.front().id;
-    }
-    return options;
-}
-
-inline constexpr const char* kLayoutCustomOptionLabel = "Custom";
-
-// The Layout combo's options: every registry descriptor's display name, in
-// registry order, followed by "Custom". Its current selection is the
-// descriptor whose id matches the slot's stored wizardId, else "Custom".
-inline std::vector<ui::ControlOption> BuildLayoutOptions(
-    const std::vector<ControllerWizardDescriptor>& layouts,
-    const std::optional<std::string>& wizardId,
-    std::string& selectedOptionId)
-{
-    std::vector<ui::ControlOption> options;
-    options.reserve(layouts.size() + 1);
-    std::optional<std::size_t> matchIx;
-    for (std::size_t ix = 0; ix < layouts.size(); ++ix)
-    {
-        options.push_back({std::to_string(ix), layouts[ix].displayName});
-        if (wizardId.has_value() && layouts[ix].id == *wizardId)
-        {
-            matchIx = ix;
-        }
-    }
-    const std::string customOptionId = std::to_string(layouts.size());
-    options.push_back({customOptionId, kLayoutCustomOptionLabel});
-    selectedOptionId = matchIx.has_value() ? std::to_string(*matchIx) : customOptionId;
-    return options;
-}
-
 // Installs a descriptor's default profile onto `slot`: opens the descriptor's
 // wizard, opens a blank form (ConfigForm(nullopt)), generates a profile from
 // it, then copies the generated kind, config and wizardId onto `slot`. On
-// failure `reason` (when non-null) gets the same wording HandleControllerLayout
-// used to produce inline; the caller formats its own "Refused: " + *reason.
-// HandleControllerLayout (choosing a preset for an existing row) and the add
-// row (adding a new row from a preset) are the only two sites that install a
-// descriptor from a blank form, and both call this one definition.
+// failure `reason` (when non-null) gets wording the caller can format as its
+// own "Refused: " + *reason. Three sites install a descriptor from a blank
+// form this way, and all three call this one definition: the add row (adding
+// a new row from a preset, below), and MidiConfigViewModel.cpp's
+// SlotMatchesWizardProfile (regenerating a row's wizard profile to compare it
+// against the row's current config) and RestoreController (reinstalling a
+// row's preset over a diverged config).
 inline bool InstallDescriptorProfile(const std::vector<ControllerWizardDescriptor>& layouts,
                                      const ControllerWizardDescriptor& descriptor,
                                      MidiControllerSlot& slot,
@@ -1022,7 +969,7 @@ struct ControllersPageCallbacks
     // app actions (MidiConfigViewModel's own default) -- a host with an app
     // catalog fills this from MakeAnalogAppActionChoices(engine.MidiCatalog()).
     std::vector<UISystemMessageChoice> analogActionCatalog;
-    // The Layout combo's offered descriptors, and the registry every wizard
+    // The add row's Preset combo options, and the registry every wizard
     // lookup on this page resolves against. Empty means the library default
     // (the Twister-only registry, MidiConfigViewModel's own default) -- a
     // host with an app catalog fills this from
@@ -1288,7 +1235,7 @@ public:
                action.name == Actions::kToggleSection ||
                action.name == Actions::kDeleteRow || action.name == Actions::kAddSingle ||
                action.name == Actions::kAddBlock || action.name == Actions::kEndpointSelect ||
-               action.name == Actions::kVariantSelect || action.name == Actions::kMappingFieldCommit ||
+               action.name == Actions::kMappingFieldCommit ||
                action.name == Actions::kAddController || action.name == Actions::kWizardOpen ||
                action.name == Actions::kAvailableConfigure ||
                action.name == Actions::kAvailableIgnore ||
@@ -1302,8 +1249,8 @@ public:
                action.name == Actions::kControllerDelete ||
                action.name == Actions::kControllerBlacklist ||
                action.name == Actions::kControllerRemoveBlacklist ||
-               action.name == Actions::kControllerConfigure ||
-               action.name == Actions::kControllerLayout;
+               action.name == Actions::kControllerRestore ||
+               action.name == Actions::kControllerConfigure;
     }
 
 private:
@@ -1465,18 +1412,6 @@ private:
             return;
         }
 
-        if (action.name == Actions::kVariantSelect)
-        {
-            HandleVariantSelect(action.value);
-            return;
-        }
-
-        if (action.name == Actions::kControllerLayout)
-        {
-            HandleControllerLayout(action.value);
-            return;
-        }
-
         if (action.name == Actions::kMappingFieldCommit)
         {
             HandleMappingFieldCommit(action.value);
@@ -1590,6 +1525,12 @@ private:
         if (action.name == Actions::kControllerRemoveBlacklist)
         {
             HandleRemoveFromBlacklist(action.value);
+            return;
+        }
+
+        if (action.name == Actions::kControllerRestore)
+        {
+            HandleRestoreController(action.value);
             return;
         }
 
@@ -1863,7 +1804,7 @@ private:
                        MidiInstrumentConfig& out, std::string* reason) {
                 return viewModel.BlacklistController(controllerIx, out, reason);
             },
-            "Blacklisted controller");
+            "Released controller");
     }
 
     void HandleRemoveFromBlacklist(const std::string& token)
@@ -1873,7 +1814,17 @@ private:
                        MidiInstrumentConfig& out, std::string* reason) {
                 return viewModel.RemoveFromBlacklist(controllerIx, out, reason);
             },
-            "Removed controller from blacklist");
+            "Reclaimed controller");
+    }
+
+    void HandleRestoreController(const std::string& token)
+    {
+        CommitLifecycleAction(
+            token, [&](MidiConfigViewModel& viewModel, std::size_t controllerIx,
+                       MidiInstrumentConfig& out, std::string* reason) {
+                return viewModel.RestoreController(controllerIx, out, reason);
+            },
+            "Restored controller");
     }
 
     void HandleWizardSubmit()
@@ -2150,107 +2101,6 @@ private:
             }
             return;
         }
-    }
-
-    void HandleVariantSelect(const std::string& value)
-    {
-        const auto parts = Split(value, ':');
-        if (parts.size() != 2)
-        {
-            return;
-        }
-        const std::size_t controllerIx = ParseIndex(parts[0]);
-        int variantIndex = 0;
-        try
-        {
-            variantIndex = std::stoi(parts[1]);
-        }
-        catch (...)
-        {
-            return;
-        }
-        MidiInstrumentConfig out;
-        std::string reason;
-        if (m_vm.SetLaunchpadVariant(controllerIx, variantIndex, out, &reason))
-        {
-            Commit(std::move(out));
-            if (variantIndex >= 0 && variantIndex < static_cast<int>(LaunchpadVariantCatalog().size()))
-            {
-                SetStatus("Selected " + LaunchpadVariantCatalog()[static_cast<std::size_t>(variantIndex)]);
-            }
-        }
-        else
-        {
-            SetStatus("Refused: " + reason);
-        }
-    }
-
-    void HandleControllerLayout(const std::string& value)
-    {
-        const auto parts = Split(value, ':');
-        if (parts.size() != 2)
-        {
-            return;
-        }
-        const std::size_t controllerIx = ParseIndex(parts[0]);
-        std::size_t optionIx = 0;
-        try
-        {
-            optionIx = static_cast<std::size_t>(std::stoul(parts[1]));
-        }
-        catch (...)
-        {
-            return;
-        }
-
-        if (!m_callbacks.instrumentSnapshot)
-        {
-            return;
-        }
-        MidiInstrumentConfig instrument = m_callbacks.instrumentSnapshot();
-        if (controllerIx >= instrument.controllers.size())
-        {
-            SetStatus("Refused: controller record changed; refresh and try again");
-            return;
-        }
-
-        const std::vector<ControllerWizardDescriptor>& layouts = m_vm.Layouts();
-        MidiControllerSlot replacement = instrument.controllers[controllerIx];
-        std::string statusText = "OK";
-
-        if (optionIx < layouts.size())
-        {
-            const ControllerWizardDescriptor& descriptor = layouts[optionIx];
-            std::string reason;
-            if (!ControllersLayout::InstallDescriptorProfile(layouts, descriptor, replacement, &reason))
-            {
-                SetStatus("Refused: " + reason);
-                return;
-            }
-            statusText = descriptor.displayName + " installed";
-        }
-        else
-        {
-            // "Custom": the stored wizard id is cleared and nothing else changes.
-            replacement.wizardId.reset();
-        }
-
-        if (!instrument.ReplaceController(controllerIx, std::move(replacement)))
-        {
-            SetStatus("Refused: generated controller record is invalid");
-            return;
-        }
-        if (!Commit(std::move(instrument)))
-        {
-            SetStatus("Refused: host rejected the instrument commit");
-            return;
-        }
-        RefreshDiscoveryFromCallbacks();
-        if (!SaveCommittedWizardAction(/*sessionStatus=*/false))
-        {
-            return;
-        }
-        SetStatus(std::move(statusText));
     }
 
     void HandleMappingFieldCommit(const std::string& value)
@@ -3179,7 +3029,7 @@ private:
                                          MidiProfileKindDisplayName(rowVm.kind),
                                          labelStyle(ControllersLayout::kControllerKindWidth));
                                 row.Label(NodeIds::ControllerBadge(controllerIx),
-                                         "Blacklisted",
+                                         "Released",
                                          labelStyle(ControllersLayout::kBlacklistedBadgeWidth));
                             });
                         section.Row(
@@ -3208,7 +3058,7 @@ private:
                                 }
                                 row.Button(
                                     NodeIds::ControllerRemoveBlacklist(controllerIx),
-                                    "Remove",
+                                    "Reclaim",
                                     ui::Action::WithValue(
                                         Actions::kControllerRemoveBlacklist,
                                         NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
@@ -3217,7 +3067,6 @@ private:
                         return;
                     }
 
-                    const bool hasVariant = rowVm.kind == MidiProfileKind::Launchpad;
                     section.Row(
                         NodeIds::ControllerRow(controllerIx) + ".line1",
                         rowLayout(ControllersLayout::kControllerHeaderLineHeight,
@@ -3235,39 +3084,6 @@ private:
                             row.Label(NodeIds::ControllerKind(controllerIx),
                                      MidiProfileKindDisplayName(rowVm.kind),
                                      labelStyle(ControllersLayout::kControllerKindWidth));
-
-                            {
-                                std::string selectedLayout;
-                                std::vector<ui::ControlOption> layoutOptions =
-                                    ControllersLayout::BuildLayoutOptions(
-                                        vm.Layouts(), rowVm.wizardId, selectedLayout);
-                                ui::ControlStyle layoutStyle =
-                                    fieldControl(ControllersLayout::kLifecycleLayoutWidth);
-                                layoutStyle.caption = "Preset";
-                                row.ComboBox(NodeIds::ControllerLayout(controllerIx),
-                                             std::move(layoutOptions),
-                                             selectedLayout,
-                                             ui::Action::WithValue(Actions::kControllerLayout,
-                                                                   std::to_string(controllerIx)),
-                                             layoutStyle);
-                            }
-                            if (hasVariant)
-                            {
-                                std::string selectedVariant;
-                                ui::ControlStyle variantStyle =
-                                    fieldControl(ControllersLayout::kVariantFieldWidth);
-                                variantStyle.caption = "Variant";
-                                row.ComboBox(
-                                    NodeIds::ControllerVariant(controllerIx),
-                                    ControllersLayout::BuildLaunchpadVariantOptions(
-                                        vm.LaunchpadVariantIndex(controllerIx),
-                                        selectedVariant),
-                                    selectedVariant,
-                                    ui::Action::WithValue(
-                                        Actions::kVariantSelect,
-                                        std::to_string(controllerIx)),
-                                    variantStyle);
-                            }
                         });
 
                     section.Row(
@@ -3347,18 +3163,25 @@ private:
                                           Actions::kControllerDelete,
                                           NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
                                       button(ControllersLayout::kLifecycleDeleteWidth));
-                            if (rowVm.hasResolvedWizard)
+                            if (rowVm.hasResolvedWizard && !rowVm.matchesWizardProfile)
                             {
-                                ui::ControlStyle blacklist =
-                                    button(ControllersLayout::kLifecycleBlacklistWidth);
-                                blacklist.enabled = rowVm.hasCompleteEndpointPair;
+                                row.Button(
+                                    NodeIds::ControllerRestore(controllerIx),
+                                    "Restore",
+                                    ui::Action::WithValue(
+                                        Actions::kControllerRestore,
+                                        NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
+                                    button(ControllersLayout::kLifecycleRestoreWidth));
+                            }
+                            if (rowVm.hasResolvedWizard && rowVm.hasCompleteEndpointPair)
+                            {
                                 row.Button(
                                     NodeIds::ControllerBlacklist(controllerIx),
-                                    "Blacklist",
+                                    "Release",
                                     ui::Action::WithValue(
                                         Actions::kControllerBlacklist,
                                         NodeIds::ControllerActionToken(controllerIx, rowVm.name)),
-                                    blacklist);
+                                    button(ControllersLayout::kLifecycleBlacklistWidth));
                             }
                         });
                 });

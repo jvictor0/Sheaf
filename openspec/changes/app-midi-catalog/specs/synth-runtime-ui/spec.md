@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: sru-4 — Controllers page: list, state, and adding
-WHEN the Controllers page is open, THE runtime library SHALL list every active and blacklisted controller record in instrument order, showing its name, hardware kind, and disposition. Active records SHALL also show each endpoint as online, offline, or unconfigured when its stored reference is empty; show the actual input and output choices as the present devices plus the stored reference when absent; preserve the existing low-level mapping editor; offer Delete on the header's ports line and, as the first row of the expanded editor, a Name field and Rename button; and offer a Preset combo (sru-60) and, when their persisted wizard id resolves in the current registry, Blacklist. A rename SHALL keep the row's expanded editor and its open sections open under the renamed row's new name, and a controller re-added under a name a deleted record previously held SHALL start fully collapsed regardless of that prior record's state. Blacklisted records SHALL show their stored endpoint labels and expose Remove and, when their wizard id resolves in the current registry, Configure, but SHALL expose no Rename, no disclosure, and no live endpoint selectors or mapping editor. The page SHALL list currently available wizard candidates separately with Configure and Ignore actions, SHALL preserve the add row that creates a named active controller from the chosen Preset option — a wizard registry descriptor or a per-device-kind Custom entry — named after that preset or kind and seeded from its generated profile, or an empty profile of the chosen kind for Custom, and SHALL commit device selections and lifecycle actions through instrument editing and reconciliation rather than opening or closing handlers directly.
+WHEN the Controllers page is open, THE runtime library SHALL list every active and blacklisted controller record in instrument order, showing its name, hardware kind, and disposition. Active records SHALL also show each endpoint as online, offline, or unconfigured when its stored reference is empty; show the actual input and output choices as the present devices plus the stored reference when absent; preserve the existing low-level mapping editor; offer Delete on the header's ports line and, as the first row of the expanded editor, a Name field and Rename button; and offer, when their persisted wizard id resolves in the current registry and their stored config no longer matches that preset's generated profile, Restore (sru-60), and, when their persisted wizard id resolves and both endpoint references are configured, Release. A rename SHALL keep the row's expanded editor and its open sections open under the renamed row's new name, and a controller re-added under a name a deleted record previously held SHALL start fully collapsed regardless of that prior record's state. Blacklisted records SHALL show their stored endpoint labels and expose Reclaim and, when their wizard id resolves in the current registry, Configure, but SHALL expose no Rename, no disclosure, and no live endpoint selectors or mapping editor. The page SHALL list currently available wizard candidates separately with Configure and Ignore actions, SHALL preserve the add row that creates a named active controller from the chosen Preset option — a wizard registry descriptor or a per-device-kind Custom entry — named after that preset or kind and seeded from its generated profile, or an empty profile of the chosen kind for Custom, and SHALL commit device selections and lifecycle actions through instrument editing and reconciliation rather than opening or closing handlers directly.
 
 #### Scenario: Connection state is visible
 - **WHEN** one active mapped controller is connected and another active controller's device is unplugged
@@ -11,23 +11,21 @@ WHEN the Controllers page is open, THE runtime library SHALL list every active a
 
 #### Scenario: Blacklisted record is visibly inert
 - **WHEN** a blacklisted controller record is listed
-- **THEN** its row shows a Blacklisted badge and its stored endpoint labels
+- **THEN** its row shows a Released badge and its stored endpoint labels
 - **AND** it exposes no mapping disclosure or live endpoint selectors
 
 #### Scenario: Manual and legacy profiles retain generic editing
 - **WHEN** an active record has no persisted wizard id
 - **THEN** its Rename, Delete, endpoint-selection, and low-level mapping controls remain available
-- **AND** the Preset combo is offered, defaulting to Custom
-- **AND** Blacklist is not offered
-- Check: `controllers_page_ui_tests.cpp: TestLayoutComboOffersLayoutNamesThenCustom`
+- **AND** neither Restore nor Release is offered, since both require a resolved wizard id
+- Check: `controllers_page_ui_tests.cpp: TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence`,
+  `TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`
 
 #### Scenario: Unknown opaque wizard id remains recoverable
 - **WHEN** a stored Active or Blacklisted record carries a well-formed wizard id that does not resolve in the current registry
-- **THEN** the record remains visible; an Active record still offers Rename, in its expanded editor, and Delete, and a Blacklisted record still offers Remove
-- **AND** Blacklist and Configure are not offered
-- **AND** an Active record's Preset combo is still offered, reading Custom since no registry descriptor matches its wizard id
-- Check: `controllers_page_ui_tests.cpp: TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`,
-  `TestLayoutComboReadsCustomForUnresolvedWizardId`
+- **THEN** the record remains visible; an Active record still offers Rename, in its expanded editor, and Delete, and a Blacklisted record still offers Reclaim
+- **AND** Restore, Release, and Configure are not offered
+- Check: `controllers_page_ui_tests.cpp: TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`
 
 #### Scenario: Add controller installs the chosen preset
 - **WHEN** the user presses Add without changing the Preset combo
@@ -50,8 +48,8 @@ WHEN the Controllers page is open, THE runtime library SHALL list every active a
 - **THEN** its available row is replaced by a persisted Blacklisted row
 - **AND** neither endpoint is opened
 
-#### Scenario: Remove from blacklist restores availability
-- **WHEN** the user removes a blacklisted record while its recognized pair remains present and unclaimed
+#### Scenario: Reclaim restores availability
+- **WHEN** the user reclaims a blacklisted record while its recognized pair remains present and unclaimed
 - **THEN** the inert record is removed
 - **AND** the pair returns to Available controllers and restores the sidebar warning
 
@@ -64,8 +62,8 @@ WHEN the Controllers page is open, THE runtime library SHALL list every active a
 - **THEN** the record is removed through the instrument commit path
 - **AND** reconciliation closes its endpoints and removes its processor/sender routing
 
-#### Scenario: Blacklist retains a dormant wizard profile
-- **WHEN** the user blacklists a wizard-associated active controller
+#### Scenario: Release retains a dormant wizard profile
+- **WHEN** the user releases a wizard-associated active controller
 - **THEN** its record changes to Blacklisted while retaining its prior profile as dormant reconfiguration seed data
 - **AND** reconciliation closes both endpoints and the row exposes no active mapping or endpoint controls
 
@@ -129,40 +127,35 @@ WHEN the Controllers page builds the message dropdown for a system-message or Ge
 - **AND** existing gesture mappings are unchanged
 - Check: `viewmodel_tests.cpp: AddAndCommitAnalogAppActionRowWritesAppActionsWithoutTouchingGestures`
 
-### Requirement: sru-60 — Controllers page: per-controller Preset combo
-WHEN an active controller row is presented, THE runtime library SHALL offer a Preset combo whose options are the current wizard registry's descriptor display names, in registry order, followed by "Custom," SHALL set its current value to the option whose descriptor id equals the slot's stored `wizardId`, or "Custom" when none does. Choosing a named option SHALL generate that descriptor's profile from the slot's own name and endpoints, replace the slot's kind, config, and `wizardId`, commit the instrument, and save the runtime configuration, all as one action with no intermediate form. Choosing "Custom" SHALL clear the slot's `wizardId` and change nothing else. THE runtime library SHALL also clear a slot's `wizardId` whenever any mapping edit — a field commit, an add, a delete, a block edit, or a Launchpad variant change — is committed on that slot, so the combo reads "Custom" once the installed layout's generated config no longer matches what is mapped.
+### Requirement: sru-60 — Controllers page: wizard identity persists; Restore reinstalls a diverged preset
+WHEN an active controller row's mapping is edited, added, deleted, or block-edited, THE runtime library SHALL leave the slot's stored `wizardId` unchanged, so a row keeps the identity of the preset that created it regardless of any later edit. WHEN a row's persisted wizard id resolves in the current registry and the slot's stored config no longer serializes identically to that descriptor's freshly generated profile, THE runtime library SHALL offer Restore on the row; choosing it SHALL regenerate that descriptor's profile from the slot's own current name and endpoint references and replace the slot's kind and config, leaving the slot's name, endpoint references, `wizardId`, and disposition unchanged, and SHALL commit the instrument and save the runtime configuration as one action with no intermediate form. THE runtime library SHALL NOT offer Restore when the row has no persisted wizard id, when that id does not resolve in the current registry, or when the stored config already matches the resolved descriptor's generated profile.
 
-#### Scenario: Combo lists layouts then Custom
-- **WHEN** the wizard registry holds two descriptors and the slot's `wizardId` matches neither
-- **THEN** the Preset combo offers both descriptors' display names, in registry order, followed by Custom
-- **AND** its current value is Custom
-- Check: `controllers_page_ui_tests.cpp: TestLayoutComboOffersLayoutNamesThenCustom`
+#### Scenario: A mapping edit no longer clears the wizard id
+- **WHEN** a preset-installed slot's mapping is edited and committed
+- **THEN** the slot's `wizardId` is unchanged
+- **AND** Restore becomes offered once the edited config no longer matches the preset's generated profile
+- Check: `controllers_page_ui_tests.cpp: TestReleaseRequiresResolvedWizardAndBoundEndpoints`,
+  `TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence`
 
-#### Scenario: Choosing a layout installs it in one action
-- **WHEN** the user selects a named layout option
-- **THEN** the slot's kind, config, and `wizardId` become that descriptor's generated result
-- **AND** the instrument is committed and the runtime configuration is saved exactly once
-- Check: `controllers_page_ui_tests.cpp: TestChoosingALayoutInstallsItsConfigAndSetsWizardId`
+#### Scenario: Restore is absent until the row actually diverges
+- **WHEN** a preset-installed row's stored config still matches what its preset generates
+- **THEN** Restore is not offered
+- Check: `controllers_page_ui_tests.cpp: TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence`
 
-#### Scenario: Choosing Custom clears the wizard id only
-- **WHEN** the user selects Custom on a slot with a stored `wizardId`
-- **THEN** the slot's `wizardId` is cleared
-- **AND** its stored config is unchanged, byte for byte
-- Check: `controllers_page_ui_tests.cpp: TestChoosingCustomClearsWizardIdWithoutTouchingConfig`
+#### Scenario: Restore reinstalls the preset without disturbing identity or endpoints
+- **WHEN** the user presses Restore on a row whose config has diverged from its resolved preset
+- **THEN** the slot's kind and config become that preset's freshly generated profile
+- **AND** the row's name, both endpoint references, and disposition are unchanged
+- **AND** Restore disappears from the row once it matches its preset again
+- Check: `controllers_page_ui_tests.cpp: TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence`
 
-#### Scenario: A mapping edit clears the installed wizard id
-- **WHEN** a layout-installed slot's mapping is edited and committed
-- **THEN** the slot's `wizardId` is cleared
-- **AND** the Preset combo subsequently reads Custom
-- Check: `controllers_page_ui_tests.cpp: TestChoosingALayoutInstallsItsConfigAndSetsWizardId`
-
-#### Scenario: Any other slot-mutating edit clears the wizard id the same way
-- **WHEN** a Launchpad slot's variant is changed
-- **THEN** its `wizardId` is cleared, the same as a mapping field commit, add, delete, or block edit would clear it
-- Check: `viewmodel_tests.cpp: SetLaunchpadVariantClearsWizardId`
+#### Scenario: Restore requires a resolved preset
+- **WHEN** a row has no persisted wizard id, or a wizard id that does not resolve in the current registry
+- **THEN** Restore is not offered, regardless of how far the stored config would otherwise diverge from any descriptor
+- Check: `controllers_page_ui_tests.cpp: TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence`
 
 ### Requirement: sru-61 — Controllers page: the controller row fits the host
-WHEN an active or blacklisted controller row is presented, THE runtime library SHALL lay out its header as two lines of 36 px each. An active row's first line SHALL hold its identity controls — disclosure, name, the device's display name, the Preset combo, and, for a Launchpad slot, the Variant combo — and its second line SHALL hold a status dot immediately before each of the MIDI in and MIDI out combos, then Delete and, when its wizard id resolves, Blacklist. A blacklisted row's first line SHALL hold its name, kind, and Blacklisted badge, and its second line SHALL hold its two stored-endpoint labels followed by Configure, when its wizard id resolves, and Remove. THE runtime library SHALL keep every control's node id unchanged by the reflow, and every node of the Controllers page SHALL lie inside the surface's content bounds at any app width of at least the header's minimum width, 740 px.
+WHEN an active or blacklisted controller row is presented, THE runtime library SHALL lay out its header as two lines of 36 px each. An active row's first line SHALL hold its identity controls — disclosure, name, and the device's display name — and its second line SHALL hold a status dot immediately before each of the MIDI in and MIDI out combos, then Delete and, when its wizard id resolves and its stored config no longer matches that preset, Restore, and, when its wizard id resolves and both endpoints are bound, Release. A blacklisted row's first line SHALL hold its name, kind, and Released badge, and its second line SHALL hold its two stored-endpoint labels followed by Configure, when its wizard id resolves, and Reclaim. THE runtime library SHALL keep every control's node id unchanged by the reflow, and every node of the Controllers page SHALL lie inside the surface's content bounds at any app width of at least the header's minimum width, 724 px.
 
 #### Scenario: The page fits a 900-wide host with its widest rows
 - **WHEN** the Controllers page lists a Twister, a Generic, a Launchpad, and a Blacklisted controller, each with device names as long as "Midi Fighter Twister (offline)", built at content bounds 900 by 620
@@ -170,18 +163,13 @@ WHEN an active or blacklisted controller row is presented, THE runtime library S
 - Check: `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`
 
 #### Scenario: The fits-within gate has a working positive control
-- **WHEN** the same collapsed rows are built 140 px narrower than the header's 740 px minimum, at 600 px wide
+- **WHEN** the same collapsed rows are built 124 px narrower than the header's 724 px minimum, at 600 px wide
 - **THEN** `FitsWithinViolations` reports at least one violation, proving the gate can actually fail rather than always passing
 - Check: `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`
 
-#### Scenario: A Launchpad row keeps its Variant combo on the identity line
-- **WHEN** a Launchpad slot's row is built
-- **THEN** the Variant combo sits on line one, to the right of the Preset combo, at the same line height
-- Check: `controllers_page_ui_tests.cpp: main`
-
 #### Scenario: A blacklisted row lays out on its own two lines, with no disclosure or live editor
 - **WHEN** a blacklisted controller record is listed
-- **THEN** its name, kind, and Blacklisted badge sit on line one, and its two stored-endpoint labels, Configure (when its wizard id resolves), and Remove sit on line two
+- **THEN** its name, kind, and Released badge sit on line one, and its two stored-endpoint labels, Configure (when its wizard id resolves), and Reclaim sit on line two
 - **AND** it has no disclosure control and no live endpoint selectors
 - Check: `controllers_page_ui_tests.cpp: TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`,
   `TestControllersSectionsNestThroughLibraryContainers`; `portable_ui_tests.cpp: TestControllersRowFitsWithinFroggersNarrowestHost`

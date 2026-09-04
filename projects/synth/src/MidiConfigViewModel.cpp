@@ -1,6 +1,7 @@
 #include "synth/MidiConfigViewModel.hpp"
 
 #include "synth/ControllerWizard.hpp"
+#include "synth/ControllersPageUI.hpp"
 #include "synth/MidiAppCatalog.hpp"
 
 #include <algorithm>
@@ -363,13 +364,6 @@ const std::vector<std::string>& BlockableMessageCatalog() {
     return catalog;
 }
 
-const std::vector<std::string>& LaunchpadVariantCatalog() {
-    // Indexed by LaunchpadController's declaration order (MidiController.hpp):
-    // 0 = LaunchpadX, 1 = LaunchpadProMk3, 2 = LaunchpadMiniMk3.
-    static const std::vector<std::string> catalog = {"Launchpad X", "Launchpad Pro MK3", "Launchpad Mini MK3"};
-    return catalog;
-}
-
 const char* FieldShortLabel(MidiMappingRowVM::Field field) {
     switch (field) {
         case Field::Channel:
@@ -605,6 +599,50 @@ std::vector<MidiConfigSection> SectionsForKind(MidiProfileKind kind) {
     return sections;
 }
 
+// Whether `slot`'s config is still exactly what its stored wizard id would
+// generate today: false with no stored wizard id, an id that resolves to no
+// known descriptor, or a descriptor whose freshly generated profile
+// serializes differently from the slot's current config. Regenerates the
+// descriptor's profile into a scratch slot via the one shared install path
+// (runtime_ui::ControllersLayout::InstallDescriptorProfile) and compares
+// serialized JSON rather than adding struct equality, so this stays in sync
+// with whatever ToJSON already treats as significant.
+bool SlotMatchesWizardProfile(const MidiControllerSlot& slot,
+                              const std::vector<ControllerWizardDescriptor>& layouts) {
+    if (!slot.wizardId.has_value()) {
+        return false;
+    }
+    const auto descriptorIt = std::find_if(layouts.begin(), layouts.end(),
+                                           [&](const ControllerWizardDescriptor& descriptor) {
+                                               return descriptor.id == *slot.wizardId;
+                                           });
+    if (descriptorIt == layouts.end()) {
+        return false;
+    }
+
+    MidiControllerSlot generated = slot;
+    if (!runtime_ui::ControllersLayout::InstallDescriptorProfile(layouts, *descriptorIt, generated, nullptr)) {
+        return false;
+    }
+
+    JsonArena arena(256 * 1024);
+    char* existingDump = ToJSON(arena, slot.config).Dumps(JSON_ENCODE_ANY);
+    if (existingDump == nullptr) {
+        return false;
+    }
+    const std::string existingJson(existingDump);
+    std::free(existingDump);
+
+    char* generatedDump = ToJSON(arena, generated.config).Dumps(JSON_ENCODE_ANY);
+    if (generatedDump == nullptr) {
+        return false;
+    }
+    const std::string generatedJson(generatedDump);
+    std::free(generatedDump);
+
+    return existingJson == generatedJson;
+}
+
 std::string DescribeMessage(const MessageIn& message) {
     std::ostringstream oss;
     switch (message.type) {
@@ -827,6 +865,7 @@ void MidiConfigViewModel::Rebuild(const MidiInstrumentConfig& instrument, const 
                         [&](const ControllerWizardDescriptor& descriptor) {
                             return descriptor.id == *slot.wizardId;
                         });
+        row.matchesWizardProfile = SlotMatchesWizardProfile(slot, Layouts());
         row.wizardId = slot.wizardId;
         row.hasCompleteEndpointPair = slot.input.IsConfigured() && slot.output.IsConfigured();
         row.inputStatus = inputConnection.status;
@@ -2709,10 +2748,6 @@ bool MidiConfigViewModel::ApplyMappingEdit(std::size_t controllerIx, MidiConfigS
         return false;
     }
 
-    // A committed mapping edit no longer matches whatever layout generated
-    // it (if any), so the Layout combo reads "Custom" from here on.
-    slot.wizardId.reset();
-
     out = std::move(scratch);
     return true;
 }
@@ -2824,7 +2859,7 @@ bool MidiConfigViewModel::BlacklistController(std::size_t controllerIx, MidiInst
     const MidiControllerSlot& existing = instrument_.controllers[controllerIx];
     if (!existing.input.IsConfigured() || !existing.output.IsConfigured()) {
         if (reason != nullptr) {
-            *reason = "blacklisting requires both input and output endpoint references";
+            *reason = "releasing requires both input and output endpoint references";
         }
         return false;
     }
@@ -2835,7 +2870,7 @@ bool MidiConfigViewModel::BlacklistController(std::size_t controllerIx, MidiInst
                     });
     if (existing.disposition != MidiControllerDisposition::Active || !resolved) {
         if (reason != nullptr) {
-            *reason = "only registry-supported active controllers can be blacklisted";
+            *reason = "only registry-supported active controllers can be released";
         }
         return false;
     }
@@ -2847,7 +2882,7 @@ bool MidiConfigViewModel::BlacklistController(std::size_t controllerIx, MidiInst
     blacklisted.config = {};
     if (!scratch.ReplaceController(controllerIx, std::move(blacklisted))) {
         if (reason != nullptr) {
-            *reason = "controller could not be blacklisted";
+            *reason = "controller could not be released";
         }
         return false;
     }
@@ -2865,13 +2900,50 @@ bool MidiConfigViewModel::RemoveFromBlacklist(std::size_t controllerIx, MidiInst
     }
     if (instrument_.controllers[controllerIx].disposition != MidiControllerDisposition::Blacklisted) {
         if (reason != nullptr) {
-            *reason = "only blacklisted controllers can be removed from blacklist";
+            *reason = "only released controllers can be reclaimed";
         }
         return false;
     }
 
     MidiInstrumentConfig scratch = instrument_;
     scratch.RemoveController(controllerIx);
+    out = std::move(scratch);
+    return true;
+}
+
+bool MidiConfigViewModel::RestoreController(std::size_t controllerIx, MidiInstrumentConfig& out,
+                                            std::string* reason) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        if (reason != nullptr) {
+            *reason = "controller does not exist";
+        }
+        return false;
+    }
+    const MidiControllerSlot& existing = instrument_.controllers[controllerIx];
+    const auto descriptorIt = existing.wizardId.has_value()
+        ? std::find_if(Layouts().begin(), Layouts().end(),
+                       [&](const ControllerWizardDescriptor& descriptor) {
+                           return descriptor.id == *existing.wizardId;
+                       })
+        : Layouts().end();
+    if (descriptorIt == Layouts().end()) {
+        if (reason != nullptr) {
+            *reason = "restoring requires a resolved preset";
+        }
+        return false;
+    }
+
+    MidiInstrumentConfig scratch = instrument_;
+    MidiControllerSlot restored = scratch.controllers[controllerIx];
+    if (!runtime_ui::ControllersLayout::InstallDescriptorProfile(Layouts(), *descriptorIt, restored, reason)) {
+        return false;
+    }
+    if (!scratch.ReplaceController(controllerIx, std::move(restored))) {
+        if (reason != nullptr) {
+            *reason = "controller could not be restored";
+        }
+        return false;
+    }
     out = std::move(scratch);
     return true;
 }
@@ -2931,7 +3003,6 @@ bool MidiConfigViewModel::DeleteRow(std::size_t controllerIx, MidiConfigSection 
         presentation.rows.insert(presentation.rows.begin() + static_cast<std::ptrdiff_t>(rowIx), rollback);
         return false;
     }
-    slot.wizardId.reset();
     out = std::move(scratch);
     return true;
 }
@@ -3153,12 +3224,10 @@ std::optional<std::pair<int, int>> NextFreeWrldBldrGridPair(
 
 // The slot's current Launchpad variant, read from the first launchpad
 // association's controller (default LaunchpadX when the slot has no
-// launchpad associations yet) -- the seed-site counterpart to
-// MidiConfigViewModel::LaunchpadVariantIndex() (same "first association
-// wins, default 0/LaunchpadX otherwise" rule), used by AddSingle/AddBlock's
-// launchpad branches below so a new row/block added to an already-
-// retargeted (e.g. Pro MK3) slot is seeded with THAT variant rather than a
-// hardcoded LaunchpadX (label-launchpad-brief.md Change 2).
+// launchpad associations yet). Used by AddSingle/AddBlock's launchpad
+// branches below so a new row/block added to an already-retargeted (e.g.
+// Pro MK3) slot is seeded with THAT variant rather than a hardcoded
+// LaunchpadX.
 LaunchpadController CurrentLaunchpadVariant(const std::vector<MidiControllerSystemMessageAssociation>& associations) {
     for (const MidiControllerSystemMessageAssociation& association : associations) {
         if (association.launchpadPosition.has_value()) {
@@ -3225,100 +3294,6 @@ std::optional<LaunchpadGridPosition> NextFreeLaunchpadGridPair(
         }
     }
     return std::nullopt;
-}
-
-std::optional<LaunchpadController> CurrentLaunchpadVariant(const SectionPresentation& presentation) {
-    for (const PresentationRow& row : presentation.rows) {
-        if (const auto* association = std::get_if<MidiControllerSystemMessageAssociation>(&row.data)) {
-            if (association->launchpadPosition.has_value()) {
-                return association->launchpadPosition->controller;
-            }
-        }
-        if (const auto* block = std::get_if<SystemBlock>(&row.block)) {
-            if (block->kind == MidiProfileKind::Launchpad) {
-                return block->launchpadController;
-            }
-        }
-        if (const auto* button = std::get_if<GridButton>(&row.data)) {
-            if (button->kind == MidiProfileKind::Launchpad) {
-                return button->launchpadController;
-            }
-        }
-        if (const auto* block = std::get_if<GridBlock>(&row.block)) {
-            if (block->kind == MidiProfileKind::Launchpad) {
-                return block->launchpadController;
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-bool RewritePresentationLaunchpadVariant(SectionPresentation& presentation, LaunchpadController newController,
-                                         std::string* reason) {
-    SectionPresentation next = presentation;
-    for (PresentationRow& row : next.rows) {
-        if (auto* association = std::get_if<MidiControllerSystemMessageAssociation>(&row.data)) {
-            if (!association->launchpadPosition.has_value()) {
-                continue;
-            }
-            LaunchpadGridPosition position = *association->launchpadPosition;
-            if (!LaunchpadShapeSupports(newController, position.x, position.y)) {
-                if (reason != nullptr) {
-                    std::ostringstream oss;
-                    oss << "position (" << position.x << "," << position.y
-                        << ") is not valid on this Launchpad variant";
-                    *reason = oss.str();
-                }
-                return false;
-            }
-            position.controller = newController;
-            association->launchpadPosition = position;
-            continue;
-        }
-
-        if (auto* block = std::get_if<SystemBlock>(&row.block)) {
-            if (block->kind != MidiProfileKind::Launchpad) {
-                continue;
-            }
-            SystemBlock candidate = *block;
-            candidate.launchpadController = newController;
-            std::vector<MidiControllerSystemMessageAssociation> expansion;
-            if (!ExpandSystemBlock(candidate, expansion, reason)) {
-                return false;
-            }
-            *block = candidate;
-            continue;
-        }
-
-        if (auto* button = std::get_if<GridButton>(&row.data)) {
-            if (button->kind != MidiProfileKind::Launchpad) {
-                continue;
-            }
-            GridButton candidate = *button;
-            candidate.launchpadController = newController;
-            GridMappingExpansion expansion;
-            if (!ExpandGridButton(candidate, expansion, reason)) {
-                return false;
-            }
-            *button = candidate;
-            continue;
-        }
-
-        if (auto* block = std::get_if<GridBlock>(&row.block)) {
-            if (block->kind != MidiProfileKind::Launchpad) {
-                continue;
-            }
-            GridBlock candidate = *block;
-            candidate.launchpadController = newController;
-            GridMappingExpansion expansion;
-            if (!ExpandGridBlock(candidate, expansion, reason)) {
-                return false;
-            }
-            *block = candidate;
-        }
-    }
-    presentation = std::move(next);
-    return true;
 }
 
 }  // namespace
@@ -3526,7 +3501,6 @@ bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection 
         presentation = rollback;
         return false;
     }
-    slot.wizardId.reset();
     out = std::move(scratch);
     return true;
 }
@@ -3731,7 +3705,6 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
         presentation = rollback;
         return false;
     }
-    slot.wizardId.reset();
     out = std::move(scratch);
     return true;
 }
@@ -3862,111 +3835,6 @@ std::vector<MidiMappingRowVM::Field> MidiConfigViewModel::GroupColumnFields(std:
         return GridButtonEditableFields(button);
     }
     return {};
-}
-
-int MidiConfigViewModel::LaunchpadVariantIndex(std::size_t controllerIx) const {
-    if (controllerIx >= instrument_.controllers.size()) {
-        return -1;
-    }
-    const MidiControllerSlot& slot = instrument_.controllers[controllerIx];
-    if (slot.kind != MidiProfileKind::Launchpad) {
-        return -1;
-    }
-    const PresentationKey key{slot.name, MidiConfigSection::SystemMessages};
-    const auto presentationIt = presentations_.find(key);
-    if (presentationIt != presentations_.end()) {
-        const std::optional<LaunchpadController> openVariant = CurrentLaunchpadVariant(presentationIt->second);
-        if (openVariant.has_value()) {
-            return static_cast<int>(*openVariant);
-        }
-    }
-    for (const MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
-        if (association.launchpadPosition.has_value()) {
-            return static_cast<int>(association.launchpadPosition->controller);
-        }
-    }
-    // No launchpad associations at all (an empty system section) -- default
-    // to index 0 (LaunchpadX), per this method's header doc comment.
-    return 0;
-}
-
-bool MidiConfigViewModel::SetLaunchpadVariant(std::size_t controllerIx, int variantIndex, MidiInstrumentConfig& out,
-                                              std::string* reason) const {
-    if (controllerIx >= instrument_.controllers.size()) {
-        if (reason != nullptr) {
-            *reason = "controller index out of range";
-        }
-        return false;
-    }
-    const MidiControllerSlot& current = instrument_.controllers[controllerIx];
-    if (current.kind != MidiProfileKind::Launchpad) {
-        if (reason != nullptr) {
-            *reason = "this controller is not a Launchpad";
-        }
-        return false;
-    }
-    if (variantIndex < 0 || static_cast<std::size_t>(variantIndex) >= LaunchpadVariantCatalog().size()) {
-        if (reason != nullptr) {
-            *reason = "variant index out of range";
-        }
-        return false;
-    }
-    const LaunchpadController newController = static_cast<LaunchpadController>(variantIndex);
-
-    MidiInstrumentConfig scratch = instrument_;
-    MidiControllerSlot& slot = scratch.controllers[controllerIx];
-    const PresentationKey key{current.name, MidiConfigSection::SystemMessages};
-    const auto presentationIt = presentations_.find(key);
-    if (presentationIt != presentations_.end()) {
-        SectionPresentation& presentation = presentationIt->second;
-        const SectionPresentation rollback = presentation;
-        if (!RewritePresentationLaunchpadVariant(presentation, newController, reason)) {
-            return false;
-        }
-        if (!FlushSectionPresentationToSlot(presentation, slot, MidiConfigSection::SystemMessages, reason)) {
-            presentation = rollback;
-            return false;
-        }
-        slot.wizardId.reset();
-        out = std::move(scratch);
-        return true;
-    }
-
-    // All-or-nothing: validate EVERY existing position
-    // against the new variant's shape before writing anything, so a shrink
-    // that would drop an edge button is refused wholesale rather than
-    // partially applied.
-    for (const MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
-        if (!association.launchpadPosition.has_value()) {
-            continue;
-        }
-        const LaunchpadGridPosition& position = *association.launchpadPosition;
-        if (!LaunchpadShapeSupports(newController, position.x, position.y)) {
-            if (reason != nullptr) {
-                std::ostringstream oss;
-                oss << "position (" << position.x << "," << position.y << ") is not valid on "
-                    << LaunchpadVariantCatalog()[static_cast<std::size_t>(variantIndex)];
-                *reason = oss.str();
-            }
-            return false;
-        }
-    }
-
-    for (MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
-        if (!association.launchpadPosition.has_value()) {
-            continue;
-        }
-        association.launchpadPosition->controller = newController;
-    }
-
-    NormalizeMidiProfileConfig(slot.config, slot.kind);
-    if (!SlotValidForKind(slot, reason)) {
-        return false;
-    }
-
-    slot.wizardId.reset();
-    out = std::move(scratch);
-    return true;
 }
 
 } // namespace synth

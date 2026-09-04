@@ -55,6 +55,16 @@ bool IsRenderedNode(const synth::ui::Node& node)
     return node.kind != synth::ui::NodeKind::Root && node.kind != synth::ui::NodeKind::ScrollArea;
 }
 
+// True for the two modal trees that replace the page outright -- the wizard
+// chooser and the wizard form -- identified by their own root node. Neither
+// one renders a controller row or the add row, so callers that check for
+// those must skip while either is showing.
+bool IsWizardModalTree(const synth::ui::NodeTree& tree)
+{
+    return FindNode(tree, synth::runtime_ui::NodeIds::kWizardForm) != nullptr ||
+           FindNode(tree, synth::runtime_ui::NodeIds::kWizardChooser) != nullptr;
+}
+
 std::string Describe(const synth::ui::Action& action)
 {
     return action.name + "(" + action.value + ")";
@@ -137,11 +147,10 @@ std::map<std::string, std::string> UncaptionedResiduals(const synth::ui::NodeTre
         const std::string row = "controller row " + std::to_string(ix);
         // The rename draft moved into the expanded editor and carries its own
         // visible caption ("Name") there, so it is not listed alongside the
-        // header's endpoint and variant selectors below.
+        // header's endpoint selectors below.
         for (const auto& [id, what] :
              {std::pair{synth::runtime_ui::NodeIds::ControllerInput(ix), "MIDI input selector"},
-              std::pair{synth::runtime_ui::NodeIds::ControllerOutput(ix), "MIDI output selector"},
-              std::pair{synth::runtime_ui::NodeIds::ControllerVariant(ix), "profile variant selector"}})
+              std::pair{synth::runtime_ui::NodeIds::ControllerOutput(ix), "MIDI output selector"}})
         {
             if (present(id))
             {
@@ -266,20 +275,23 @@ void VerifyTreeAndRenderer(const synth::ui::NodeTree& tree,
     VerifyNamedVisualCriteria(tree,
                               "step " + std::to_string(step) + " after " + actionDescription);
 
-    for (std::size_t ix = 0; ix < fixture.state.instrument.controllers.size(); ++ix)
+    if (!IsWizardModalTree(tree))
     {
-        Require(FindNode(tree, synth::ui::NodeId(synth::runtime_ui::NodeIds::ControllerRow(ix))) != nullptr,
-                "step " + std::to_string(step) + " missing controller row " + std::to_string(ix) + " after " +
-                    actionDescription);
-        Require(renderer.FindByNodeId(synth::runtime_ui::NodeIds::ControllerRow(ix)) != nullptr,
-                "step " + std::to_string(step) + " missing rendered controller row " + std::to_string(ix) +
-                    " after " + actionDescription);
-    }
+        for (std::size_t ix = 0; ix < fixture.state.instrument.controllers.size(); ++ix)
+        {
+            Require(FindNode(tree, synth::ui::NodeId(synth::runtime_ui::NodeIds::ControllerRow(ix))) != nullptr,
+                    "step " + std::to_string(step) + " missing controller row " + std::to_string(ix) + " after " +
+                        actionDescription);
+            Require(renderer.FindByNodeId(synth::runtime_ui::NodeIds::ControllerRow(ix)) != nullptr,
+                    "step " + std::to_string(step) + " missing rendered controller row " + std::to_string(ix) +
+                        " after " + actionDescription);
+        }
 
-    Require(FindNode(tree, synth::runtime_ui::NodeIds::kAddRow) != nullptr,
-            "step " + std::to_string(step) + " missing add row after " + actionDescription);
-    Require(renderer.FindByNodeId(synth::runtime_ui::NodeIds::kAddButton) != nullptr,
-            "step " + std::to_string(step) + " missing add button after " + actionDescription);
+        Require(FindNode(tree, synth::runtime_ui::NodeIds::kAddRow) != nullptr,
+                "step " + std::to_string(step) + " missing add row after " + actionDescription);
+        Require(renderer.FindByNodeId(synth::runtime_ui::NodeIds::kAddButton) != nullptr,
+                "step " + std::to_string(step) + " missing add button after " + actionDescription);
+    }
 
     const auto parents = BuildParentMap(tree);
     for (const synth::ui::Node& node : tree.nodes)
@@ -359,7 +371,6 @@ std::vector<synth::ui::Action> CollectActions(const synth::ui::NodeTree& tree, i
             }
             synth::ui::Action dispatched = action;
             if (action.name == synth::runtime_ui::Actions::kEndpointSelect ||
-                action.name == synth::runtime_ui::Actions::kVariantSelect ||
                 action.name == synth::runtime_ui::Actions::kMappingFieldCommit)
             {
                 dispatched.value = action.value + ":" + option.id;
@@ -1111,43 +1122,8 @@ void RunControllerWizardParitySimulation()
             "an accepted Submit reports the configured controller through the host status callback");
     Require(harness.Cache().Discovery().available.empty(),
             "the configured pair is no longer an available candidate");
-    Require(fixture.Exists(NodeIds::ControllerLayout(0)) &&
-                fixture.Exists(NodeIds::ControllerBlacklist(0)),
-            "a resolved wizard id offers the Layout combo and Blacklist");
-    Require(RequireCombo(fixture.Renderer(), NodeIds::ControllerLayout(0), "submitted record")
-                    .getText() == juce::String(kTwisterDisplayName),
-            "the Layout combo already reads the descriptor that Submit just installed");
-
-    // Choosing Custom clears the installed wizard id and changes nothing else.
-    fixture.SelectOption(NodeIds::ControllerLayout(0), 1, "layout combo selects Custom");
-    {
-        const synth::MidiControllerSlot& custom = RequireController(harness, 0, "custom record");
-        Require(!custom.wizardId.has_value(), "choosing Custom clears the wizard id");
-        Require(custom.kind == synth::MidiProfileKind::MfTwister &&
-                    custom.config.encoderInput.has_value() &&
-                    custom.config.encoderInput->turns.size() == 16,
-                "choosing Custom leaves kind and config untouched");
-    }
-
-    // Reselecting the descriptor through the Layout combo reinstalls its fresh
-    // default profile in one click and preserves record identity.
-    fixture.SelectOption(NodeIds::ControllerLayout(0), 0, "layout combo reselects Twister");
-    {
-        const synth::MidiControllerSlot& reconfigured =
-            RequireController(harness, 0, "layout-reselected record");
-        Require(harness.Instrument().controllers.size() == 1,
-                "choosing a layout keeps one record in the same position");
-        Require(reconfigured.name == kTwisterDisplayName &&
-                    reconfigured.wizardId.has_value() &&
-                    *reconfigured.wizardId == kTwisterWizardId &&
-                    reconfigured.input.identifier == "twister-in-1" &&
-                    reconfigured.output.identifier == "twister-out-1" &&
-                    reconfigured.config.encoderInput.has_value() &&
-                    reconfigured.config.encoderInput->turns.size() == 16,
-                "choosing a layout preserves name, endpoints, and wizard id while reinstalling its default profile");
-    }
-    Require(harness.Status() == std::string(kTwisterDisplayName) + " installed",
-            "choosing a layout reports the layout's display name through the host status callback");
+    Require(fixture.Exists(NodeIds::ControllerBlacklist(0)),
+            "a resolved wizard id offers Blacklist");
 
     // Blacklisting retains the profile as dormant seed data and the
     // row loses its live endpoint and mapping controls.
@@ -1165,7 +1141,7 @@ void RunControllerWizardParitySimulation()
                 !fixture.Exists(NodeIds::ControllerDisclosure(0)),
             "a blacklisted row exposes no live endpoint selectors or mapping disclosure");
     Require(RequireLabelText(fixture.Renderer(), NodeIds::ControllerBadge(0), "blacklist")
-                .find("Blacklisted") != std::string::npos,
+                .find("Released") != std::string::npos,
             "a blacklisted row shows its badge");
 
     // The dormant profile is observable through Configure seeding its stored slot.
@@ -1242,8 +1218,9 @@ void RunControllerWizardParitySimulation()
 
 // A manually added record carries no persisted wizard id, so the
 // registry-gated lifecycle actions are not offered even though its kind is the
-// same hardware kind the wizard installs. This is the negative control for
-// observing an installed wizard id through the Layout combo and Blacklist.
+// same hardware kind the wizard installs. This is the negative control for a
+// manual record's wizard id, checked directly below, with Blacklist and
+// Configure both withheld as a result.
 void RunManualRecordSimulation()
 {
     namespace NodeIds = synth::runtime_ui::NodeIds;
@@ -1271,48 +1248,8 @@ void RunManualRecordSimulation()
     Require(!fixture.Exists(NodeIds::ControllerBlacklist(0)) &&
                 !fixture.Exists(NodeIds::ControllerConfigure(0)),
             "a manual record is offered no registry-gated wizard action");
-    Require(RequireCombo(fixture.Renderer(), NodeIds::ControllerLayout(0), "manual record")
-                    .getText() == juce::String("Custom"),
-            "a manual record's Layout combo is present but reads Custom");
 
     std::cout << "ControllerWizardManualRecordSimulation passed\n";
-}
-
-// A hand edit through the low-level mapping editor clears the installed
-// wizard id, and reselecting the same layout through the Layout combo
-// replaces the hand-edited shape wholesale rather than merging it.
-void RunHandEditedRecordLayoutReselectionSimulation()
-{
-    namespace NodeIds = synth::runtime_ui::NodeIds;
-    constexpr synth::MidiConfigSection kSystemMessages = synth::MidiConfigSection::SystemMessages;
-
-    WizardParityFixture fixture;
-    auto& harness = fixture.Harness();
-    harness.AddTwisterPair(1);
-    fixture.Tick("hand-edited fixture");
-    fixture.Click(NodeIds::kWizardLaunch, "hand-edited base form");
-    fixture.Click(NodeIds::kWizardSubmit, "hand-edited base submit");
-    Require(RequireController(harness, 0, "generated record").config.systemMessages.size() == 6,
-            "the generated profile carries exactly six side associations");
-
-    // The Twister's six side buttons are a closed set, so dropping one through
-    // the low-level editor is how this page produces a mapping edit.
-    fixture.Click(NodeIds::ControllerDisclosure(0), "open low-level editor");
-    fixture.Click(NodeIds::SectionToggle(0, kSystemMessages), "open system messages");
-    fixture.Click(NodeIds::MappingDelete(0, kSystemMessages, 0), "drop one side association");
-    Require(RequireController(harness, 0, "hand-edited record").config.systemMessages.size() == 5 &&
-                !RequireController(harness, 0, "hand-edited record").wizardId.has_value(),
-            "the hand edit leaves five side associations and clears the wizard id");
-    Require(RequireCombo(fixture.Renderer(), NodeIds::ControllerLayout(0), "hand-edited record")
-                    .getText() == juce::String("Custom"),
-            "the Layout combo reads Custom once the installed layout no longer matches");
-
-    fixture.SelectOption(NodeIds::ControllerLayout(0), 0, "layout combo reselects Twister");
-    Require(RequireController(harness, 0, "replaced record").config.systemMessages.size() == 6 &&
-                RequireController(harness, 0, "replaced record").wizardId.has_value(),
-            "choosing the layout replaces the hand-edited profile with the complete generated shape");
-
-    std::cout << "ControllerWizardHandEditedRecordLayoutReselectionSimulation passed\n";
 }
 
 // A refused Submit keeps every entered value, commits nothing, and
@@ -1446,7 +1383,6 @@ int main()
     RunGridSimulation();
     RunControllerWizardParitySimulation();
     RunManualRecordSimulation();
-    RunHandEditedRecordLayoutReselectionSimulation();
     RunControllerWizardRefusalSimulation();
 
     // The caption criterion had real subjects across the whole run, and its

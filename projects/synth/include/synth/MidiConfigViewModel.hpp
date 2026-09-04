@@ -312,16 +312,6 @@ const char* FieldShortLabel(MidiMappingRowVM::Field field);
 // used elsewhere on this page.
 const std::vector<std::string>& BlockableMessageCatalog();
 
-// The fixed 3-entry catalog backing a Launchpad-kind controller row's
-// variant selector (label-launchpad-brief.md Change 2) -- one entry per
-// LaunchpadController value (MidiController.hpp), in that enum's declaration
-// order (0 = LaunchpadX, 1 = LaunchpadProMk3, 2 = LaunchpadMiniMk3).
-// MidiConfigViewModel::LaunchpadVariantIndex()'s return value and
-// SetLaunchpadVariant()'s `variantIndex` parameter both index into this
-// vector, matching the EncoderModeCatalog/BlockableMessageCatalog index
-// convention used elsewhere on this page.
-const std::vector<std::string>& LaunchpadVariantCatalog();
-
 struct MidiControllerRowVM {
     std::string name;
     MidiProfileKind kind = MidiProfileKind::Generic;
@@ -329,8 +319,15 @@ struct MidiControllerRowVM {
     // Registry resolution gates only portable lifecycle affordances. The
     // persisted opaque id remains valid even when this is false.
     bool hasResolvedWizard = false;
-    // The stored opaque wizard id, independent of registry resolution; the
-    // Layout combo reads this to find its current selection.
+    // Whether the slot's config is still exactly what its stored wizard id
+    // generates today. Mapping edits, adds, and deletes no longer clear
+    // wizardId, so this is how a row is told apart as still-pristine versus
+    // diverged from the preset that created it.
+    bool matchesWizardProfile = false;
+    // The stored opaque wizard id, independent of registry resolution; which
+    // preset (if any) created this row, kept through edits/deletes/adds so
+    // matchesWizardProfile above and the Restore/Release/Configure controls
+    // keep working on a row that has since diverged.
     std::optional<std::string> wizardId;
     bool hasCompleteEndpointPair = false;
     MidiEndpointStatus inputStatus = MidiEndpointStatus::Unconfigured;
@@ -428,8 +425,10 @@ public:
     void SetAnalogActionCatalog(std::vector<UISystemMessageChoice> choices);
     const std::vector<UISystemMessageChoice>& AnalogActionCatalog() const { return analogActionCatalog_; }
 
-    // The Layout combo's offered descriptors and the registry every wizard
-    // lookup resolves against. Defaults to MakeControllerWizardRegistry(
+    // The add row's Preset combo options, and the registry every wizard
+    // lookup resolves against: installing a preset, comparing a row's
+    // config against the preset that created it, and restoring a diverged
+    // row. Defaults to MakeControllerWizardRegistry(
     // MidiAppCatalog{}), i.e. the library's Twister-only registry, so every
     // existing construction path behaves as today; a host with an app
     // catalog calls SetLayouts(MakeControllerWizardRegistry(engine.MidiCatalog()))
@@ -512,6 +511,8 @@ public:
                              std::string* reason = nullptr) const;
     bool RemoveFromBlacklist(std::size_t controllerIx, MidiInstrumentConfig& out,
                              std::string* reason = nullptr) const;
+    bool RestoreController(std::size_t controllerIx, MidiInstrumentConfig& out,
+                           std::string* reason = nullptr) const;
 
     bool SetEndpointRef(std::size_t controllerIx, bool output, MidiEndpointRef ref,
                         MidiInstrumentConfig& out) const;
@@ -655,47 +656,6 @@ public:
     // EncoderStep/AnalogSceneBlend, or a group not appropriate to `section`).
     std::vector<MidiMappingRowVM::Field> GroupColumnFields(std::size_t controllerIx, MidiConfigSection section,
                                                            MidiMappingRowVM::RowGroup group) const;
-
-    // --- Launchpad controller-variant selector (label-launchpad-brief.md
-    // Change 2) -----------------------------------------------------------
-    //
-    // LaunchpadGridPosition::controller is stored PER grid position (every
-    // launchpad-kind system-message association's `launchpadPosition`), not
-    // once per slot -- but every position in a given controller slot is
-    // expected to agree (a physical Launchpad is one specific variant), so
-    // the slot-level "current variant" the renderer shows is read from the
-    // FIRST launchpad association's controller, and a change rewrites EVERY
-    // association's controller together (see SetLaunchpadVariant below).
-
-    // The slot's current Launchpad variant as a LaunchpadVariantCatalog()
-    // index, read from the first launchpad association's
-    // `launchpadPosition->controller` (default index 0 / LaunchpadX when the
-    // slot has no launchpad associations at all -- an empty Launchpad system
-    // section, or a section not yet expanded/read). Returns -1 for an
-    // out-of-range controllerIx or a controller whose kind is not
-    // MidiProfileKind::Launchpad.
-    int LaunchpadVariantIndex(std::size_t controllerIx) const;
-
-    // Rewrites EVERY launchpad association's `launchpadPosition->controller`
-    // in this slot's system messages to LaunchpadVariantCatalog()[variantIndex]
-    // -- e.g. switching X -> Pro MK3 widens the addressable grid; Pro MK3 ->
-    // X (or Mini MK3) can shrink it. All-or-nothing (block-commit
-    // convention, applied here to the whole slot): each existing position's
-    // (x, y) is validated against the NEW variant's shape via
-    // LaunchpadShapeSupports before anything is written; if any position
-    // would fall outside the new variant's grid, the whole rewrite is
-    // refused (`out` untouched) with a reason identifying an offending
-    // position (e.g. "position (x, y) is not valid on <variant name>"), so a
-    // shrink (e.g. Pro MK3 -> X) that would silently drop an edge button is
-    // never allowed to partially apply. On success, every position's
-    // controller is rewritten, NormalizeMidiProfileConfig runs, and
-    // `out` holds the fully edited instrument -- same "host commits `out`
-    // via EditInstrument, then Rebuild()s again" contract as every other
-    // mutating method on this class. Returns false (out untouched) for an
-    // out-of-range controllerIx, a non-Launchpad-kind controller, or an
-    // out-of-range variantIndex (< 0 or >= LaunchpadVariantCatalog().size()).
-    bool SetLaunchpadVariant(std::size_t controllerIx, int variantIndex, MidiInstrumentConfig& out,
-                            std::string* reason = nullptr) const;
 
     // Re-keys the per-row UI caches (expand state and section presentations)
     // from `from` to `to` after a controller is renamed. Both caches are

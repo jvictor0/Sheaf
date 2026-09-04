@@ -1435,6 +1435,49 @@ TEST_CASE(CreateMidiControllerProfileOmitsOpenSysExOutputWhenEmpty) {
     REQUIRE_TRUE(profile.outputs.empty());
 }
 
+TEST_CASE(CreateMidiControllerProfileWiresOpenSysExToConnectTimeOutput) {
+    // A row created from a preset carrying a connect-time message sends
+    // exactly that message when its output connects, and one created from a
+    // preset without such a message sends none. CreateMidiControllerProfile
+    // is the entry point a real profile build goes through, so this proves
+    // config.openSysEx actually reaches a constructed output processor
+    // rather than just the OpenSysExMidiOutProcessor built directly below.
+    synth::MessageInBus bus(nullptr, 8);
+
+    FakeMidiOutputSink sinkWithMessage;
+    synth::MidiSender senderWithMessage;
+    senderWithMessage.SetSink(0, &sinkWithMessage);
+    senderWithMessage.Start();
+
+    MidiControllerProfileConfig withMessage;
+    const std::vector<std::uint8_t> message = {0xF0, 0x7E, 0x00, 0xF7};
+    withMessage.openSysEx.push_back(message);
+    auto profileWithMessage = synth::CreateMidiControllerProfile(
+        withMessage, &bus, &senderWithMessage,
+        static_cast<synth::ParameterManager::UIState*>(nullptr));
+
+    REQUIRE_TRUE(profileWithMessage.outputs.size() == 1);
+    auto* openSysExOutput =
+        dynamic_cast<synth::OpenSysExMidiOutProcessor*>(profileWithMessage.outputs[0].get());
+    REQUIRE_TRUE(openSysExOutput != nullptr);
+    openSysExOutput->Process();
+    senderWithMessage.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sinkWithMessage.sent.size() == 1);
+    REQUIRE_TRUE(sinkWithMessage.sent[0].raw == message);
+
+    FakeMidiOutputSink sinkWithoutMessage;
+    synth::MidiSender senderWithoutMessage;
+    senderWithoutMessage.SetSink(0, &sinkWithoutMessage);
+    senderWithoutMessage.Start();
+
+    auto profileWithoutMessage = synth::CreateMidiControllerProfile(
+        MidiControllerProfileConfig{}, &bus, &senderWithoutMessage,
+        static_cast<synth::ParameterManager::UIState*>(nullptr));
+    REQUIRE_TRUE(profileWithoutMessage.outputs.empty());
+    senderWithoutMessage.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sinkWithoutMessage.sent.empty());
+}
+
 TEST_CASE(OpenSysExMidiOutProcessorSendsOnceThenWaitsForReset) {
     FakeMidiOutputSink sink;
     synth::MidiSender sender;

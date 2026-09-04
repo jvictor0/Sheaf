@@ -2705,7 +2705,7 @@ void Except(std::map<std::string, std::string>& into, std::string id, std::strin
     into.emplace(std::move(id), std::move(reason));
 }
 
-// 12 rows x {input, output, layout} on the header, the one Name draft row 0's
+// 12 rows x {input, output} on the header, the one Name draft row 0's
 // expanded editor adds, the add row's one Preset field, and the 13 mapping
 // cells row 0's expanded encoders section publishes. The rename draft moved
 // out of the header into the editor, so it no longer appears on all 12 rows
@@ -2757,7 +2757,7 @@ std::map<std::string, std::string> MappingCellExceptions(const synth::ui::NodeTr
     return exceptions;
 }
 
-constexpr std::size_t kFixtureControllerExpectedControls = 12 * 3 + 1 + 1 + 13;
+constexpr std::size_t kFixtureControllerExpectedControls = 12 * 2 + 1 + 1 + 13;
 
 std::map<std::string, std::string> ControllerCaptionExceptions(std::size_t controllers,
                                                                const synth::ui::NodeTree& tree)
@@ -3153,8 +3153,8 @@ static void TestControllersRowFitsWithinFroggersNarrowestHost()
 
     // Positive control: every requireFits() call below only proves the page
     // still fits AT 900 wide -- a gate that always passes proves nothing
-    // about itself. Build the same collapsed state 140px narrower than the
-    // header's own 740px minimum and confirm FitsWithinViolations actually
+    // about itself. Build the same collapsed state 124px narrower than the
+    // header's own 724px minimum and confirm FitsWithinViolations actually
     // reports something, then restore 900 before the real assertions run.
     {
         const synth::ui::Bounds narrowerThanMinimum{0.0f, 0.0f, 600.0f, 620.0f};
@@ -3165,7 +3165,7 @@ static void TestControllersRowFitsWithinFroggersNarrowestHost()
         std::fprintf(stderr, "FitsWithinViolations[positive control, 600px]: count=%zu\n",
                     narrowViolations.size());
         Require(!narrowViolations.empty(),
-                "positive control: built 140px narrower than the 740px header minimum, the "
+                "positive control: built 124px narrower than the 724px header minimum, the "
                 "fits-within gate must report at least one violation here -- zero would mean the "
                 "gate itself is dead, not that the page somehow fits");
         surface.SetContentBounds(froggersContentBounds);
@@ -3230,6 +3230,141 @@ static void TestControllersRowFitsWithinFroggersNarrowestHost()
     surface.DispatchAction(
         synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleSection, "0:encoders"));
     requireFits("Twister Encoders open");
+
+    // Restore, Release and Reclaim are new controller-row lifecycle controls;
+    // the row's Preset combo and (for Launchpad) its Variant combo are gone.
+    // Cover every row state each control's visibility depends on, plus the
+    // Launchpad row -- the one kind that lost two combos instead of one --
+    // collapsed and expanded. Each fixture is asserted present/absent in the
+    // tree before its requireFits() call, so a passing fits-check can't be
+    // trivially true for a control that was never rendered.
+    synth::MidiControllerSlot restoreDivergedRow;
+    restoreDivergedRow.name = "Restore Diverged Twister";
+    restoreDivergedRow.kind = synth::MidiProfileKind::MfTwister;
+    restoreDivergedRow.wizardId = "froggers.twister";
+    restoreDivergedRow.config = synth::MfTwisterDefaultProfileConfig(
+        synth::MfTwisterDefaultProfileOptions{.slotIx = 1});
+    restoreDivergedRow.input = {"restore-diverged-in", "Restore Diverged In"};
+    restoreDivergedRow.output = {"restore-diverged-out", "Restore Diverged Out"};
+    Require(instrument.AddController(std::move(restoreDivergedRow)),
+            "fixture adds the Restore-diverged row");
+    connection.controllers.push_back({});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree restoreDivergedTree = surface.BuildTree();
+    Require(FindNodeById(restoreDivergedTree, synth::runtime_ui::NodeIds::ControllerRestore(4)) !=
+                nullptr,
+            "Restore is present: resolved wizard id whose stored config no longer matches what "
+            "that preset generates");
+    requireFits("row showing Restore: resolved preset, config diverged");
+
+    synth::MidiControllerSlot restorePristineRow;
+    restorePristineRow.name = "Restore Pristine Twister";
+    restorePristineRow.kind = synth::MidiProfileKind::MfTwister;
+    restorePristineRow.wizardId = "froggers.twister";
+    restorePristineRow.config = synth::MfTwisterDefaultProfileConfig(
+        synth::MfTwisterDefaultProfileOptions{.slotIx = 0});
+    restorePristineRow.input = {"restore-pristine-in", "Restore Pristine In"};
+    restorePristineRow.output = {"restore-pristine-out", "Restore Pristine Out"};
+    Require(instrument.AddController(std::move(restorePristineRow)),
+            "fixture adds the Restore-pristine row");
+    connection.controllers.push_back({});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree restorePristineTree = surface.BuildTree();
+    Require(FindNodeById(restorePristineTree, synth::runtime_ui::NodeIds::ControllerRestore(5)) ==
+                nullptr,
+            "Restore is absent: resolved wizard id whose stored config still matches exactly "
+            "what that preset generates");
+    requireFits("row NOT showing Restore: resolved preset, config pristine");
+
+    synth::MidiControllerSlot releaseReadyRow;
+    releaseReadyRow.name = "Release Ready Generic";
+    releaseReadyRow.kind = synth::MidiProfileKind::Generic;
+    releaseReadyRow.wizardId = "froggers.generic";
+    releaseReadyRow.input = {"release-ready-in", "Release Ready In"};
+    releaseReadyRow.output = {"release-ready-out", "Release Ready Out"};
+    Require(instrument.AddController(std::move(releaseReadyRow)),
+            "fixture adds the Release-ready row");
+    connection.controllers.push_back({});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree releaseReadyTree = surface.BuildTree();
+    Require(FindNodeById(releaseReadyTree, synth::runtime_ui::NodeIds::ControllerBlacklist(6)) !=
+                nullptr,
+            "Release is present: resolved wizard id and both endpoints bound");
+    requireFits("row showing Release: resolved wizard id, both endpoints bound");
+
+    synth::MidiControllerSlot releaseNoDeviceRow;
+    releaseNoDeviceRow.name = "Release No Device Generic";
+    releaseNoDeviceRow.kind = synth::MidiProfileKind::Generic;
+    releaseNoDeviceRow.wizardId = "froggers.generic";
+    Require(instrument.AddController(std::move(releaseNoDeviceRow)),
+            "fixture adds the Release-no-device row");
+    connection.controllers.push_back({});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree releaseNoDeviceTree = surface.BuildTree();
+    Require(FindNodeById(releaseNoDeviceTree, synth::runtime_ui::NodeIds::ControllerBlacklist(7)) ==
+                nullptr,
+            "Release is absent: resolved wizard id but neither endpoint is bound");
+    requireFits("row NOT showing Release: no device bound");
+
+    synth::MidiControllerSlot releaseUnresolvedWizardRow;
+    releaseUnresolvedWizardRow.name = "Release Unresolved Wizard";
+    releaseUnresolvedWizardRow.kind = synth::MidiProfileKind::Generic;
+    releaseUnresolvedWizardRow.wizardId = "com.example.missing-wizard";
+    releaseUnresolvedWizardRow.input = {"release-unresolved-in", "Release Unresolved In"};
+    releaseUnresolvedWizardRow.output = {"release-unresolved-out", "Release Unresolved Out"};
+    Require(instrument.AddController(std::move(releaseUnresolvedWizardRow)),
+            "fixture adds the Release-unresolved-wizard row");
+    connection.controllers.push_back({});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree releaseUnresolvedWizardTree = surface.BuildTree();
+    Require(FindNodeById(releaseUnresolvedWizardTree,
+                        synth::runtime_ui::NodeIds::ControllerBlacklist(8)) == nullptr,
+            "Release is absent: both endpoints bound but the wizard id resolves to no known "
+            "descriptor");
+    requireFits("row NOT showing Release: wizard id does not resolve");
+
+    synth::MidiControllerSlot releasedRow;
+    releasedRow.name = "Released Twister";
+    releasedRow.kind = synth::MidiProfileKind::MfTwister;
+    releasedRow.disposition = synth::MidiControllerDisposition::Blacklisted;
+    releasedRow.wizardId = "froggers.twister";
+    releasedRow.input = {"released-in", "Released Device In"};
+    releasedRow.output = {"released-out", "Released Device Out"};
+    Require(instrument.AddController(std::move(releasedRow)), "fixture adds the Released row");
+    connection.controllers.push_back({});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree releasedTree = surface.BuildTree();
+    const synth::ui::Node* releasedBadge =
+        FindNodeById(releasedTree, synth::runtime_ui::NodeIds::ControllerBadge(9));
+    Require(releasedBadge != nullptr && releasedBadge->text == "Released",
+            "the released row shows its Released badge");
+    Require(FindNodeById(releasedTree, synth::runtime_ui::NodeIds::ControllerRemoveBlacklist(9)) !=
+                nullptr,
+            "the released row shows Reclaim");
+    Require(FindNodeById(releasedTree, synth::runtime_ui::NodeIds::ControllerConfigure(9)) !=
+                nullptr,
+            "the released row shows Configure because its wizard id resolves");
+    requireFits("released row: Released badge, Reclaim, Configure");
+
+    synth::MidiControllerSlot launchpadExtraRow;
+    launchpadExtraRow.name = "Launchpad Extra";
+    launchpadExtraRow.kind = synth::MidiProfileKind::Launchpad;
+    launchpadExtraRow.config = synth::LaunchpadDefaultProfileConfig();
+    Require(instrument.AddController(std::move(launchpadExtraRow)),
+            "fixture adds a second Launchpad row");
+    connection.controllers.push_back({});
+    surface.MarkDirty();
+    requireFits("Launchpad row collapsed");
+
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kToggleConfig, "10"));
+    requireFits("Launchpad row expanded");
 
     const synth::ui::Node* messageCombo = FindNodeById(
         systemRowTree, synth::runtime_ui::NodeIds::MappingField(

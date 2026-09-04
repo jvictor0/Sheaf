@@ -990,11 +990,6 @@ void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
             "browser Rename immediately reports a real runtime-configuration save");
     requirePersisted(3, "browser Rename persists the renamed controller record");
 
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerLayout(2), ":0");
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "choosing a layout in the browser immediately reports a real runtime-configuration save");
-    requirePersisted(3, "choosing a layout in the browser persists the replacement profile");
-
     dispatchNode(synth::runtime_ui::NodeIds::ControllerBlacklist(2));
     Require(fixture.runtime.ConsumePersistenceDirty(),
             "browser Blacklist immediately reports a real runtime-configuration save");

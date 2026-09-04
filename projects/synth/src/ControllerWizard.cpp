@@ -884,7 +884,7 @@ private:
     ActionHandler actionHandler_;
 };
 
-// The wizard behind an app default's Layout combo entry: it does not derive
+// The wizard behind an app default's add-row preset entry: it does not derive
 // its result from any form input, only from the default's own config, so it
 // implements ControllerWizard directly rather than through
 // TypedControllerWizard.
