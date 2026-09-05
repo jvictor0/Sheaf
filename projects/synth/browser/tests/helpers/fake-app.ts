@@ -45,6 +45,13 @@ export type AudioInputFixture = {
   failNativeConnect?: boolean;
 };
 
+// The one device `enumerateDevices` reports below, so a test can select it by
+// name through the real Audio page combo the same way an operator would --
+// capture no longer starts merely because the application declared input
+// channels (audio.ts's `startFromUserActivation`).
+export const AUDIO_INPUT_FIXTURE_DEVICE_LABEL = "Fixture Microphone";
+export const AUDIO_INPUT_FIXTURE_DEVICE_ID = "fixture-audio-input";
+
 export type InstallRealFakeAppOptions = {
   audioInput?: AudioInputFixture;
 };
@@ -82,7 +89,7 @@ export async function builtFakeCatalogApp(app: FixtureApp = FIXTURE_APPS.standar
     category: "Instrument",
     buildId,
     browser: {
-      abiVersion: 4,
+      abiVersion: 6,
       uiProtocolVersion: 2,
       runtimeConfigVersion: 1,
       entry: `${packageRoot}/${app.appId}.js`,
@@ -103,7 +110,7 @@ export async function installRealFakeApp(
     return route.fulfill({ status: 200, contentType: "application/javascript", body: "" });
   });
   await page.goto("http://127.0.0.1:4174/public/index.html");
-  await page.evaluate(async ({ application, options }) => {
+  await page.evaluate(async ({ application, options, audioInputFixtureDeviceLabel, audioInputFixtureDeviceId }) => {
     const audioInputFixture = options.audioInput;
     const controllerWizardMidi = (window as any).__controllerWizardMidi ??= {
       access: { inputs: new Map(), outputs: new Map(), onstatechange: null },
@@ -156,6 +163,12 @@ export async function installRealFakeApp(
       Object.defineProperty(navigator, "mediaDevices", {
         configurable: true,
         value: {
+          // One presentable input device, so a test can drive the real
+          // operator-selection gesture (the Audio page's input combo)
+          // instead of relying on capture starting by itself.
+          async enumerateDevices() {
+            return [{ deviceId: audioInputFixtureDeviceId, label: audioInputFixtureDeviceLabel, kind: "audioinput" }];
+          },
           async getUserMedia(requested: unknown) {
             resources.getUserMediaCalls += 1;
             resources.getUserMediaConstraints.push(requested);
@@ -319,7 +332,7 @@ export async function installRealFakeApp(
         clearAudioInputSourceNow: (statusCode: number) => {
           runtime.clearAudioInputSourceSync(statusCode);
         },
-        consumeAudioInputRetry: () => enqueue(() => runtime.consumeAudioInputRetry()),
+        consumePendingAudioRequest: () => enqueue(() => runtime.consumePendingAudioRequest()),
         onStatus: (handler: (response: any) => void) => { statusHandlers.add(handler); },
         terminate: async () => { await request({ type: "destroy" }); },
       };
@@ -429,7 +442,7 @@ export async function installRealFakeApp(
       },
     };
     (window as any).__task4Fake = { observations, resources, runtime: observingClient, audioInput };
-  }, { application, options });
+  }, { application, options, audioInputFixtureDeviceLabel: AUDIO_INPUT_FIXTURE_DEVICE_LABEL, audioInputFixtureDeviceId: AUDIO_INPUT_FIXTURE_DEVICE_ID });
   await page.getByRole("button", { name: new RegExp(`launch ${app.displayName}`, "i") }).click();
   // Shared fixture contract: every app in `fake-browser-apps.json` renders this
   // root node when its real Wasm runtime is live, regardless of the app-specific

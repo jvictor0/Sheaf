@@ -754,6 +754,57 @@ test("uses the current surface scale for each accepted drag increment", async ({
   expect(Number(actions[0].value.slice("axis:".length))).toBeCloseTo(0.02, 10);
 });
 
+// A host page (e.g. a stacked-mobile layout) may put its OWN transform on an
+// ancestor between the surface root and a drag node -- distinct from
+// whatever `fitSurface` last computed as `surfaceScale`. Before
+// `effectiveScaleFor`'s introduction, drag delta was divided by
+// `surfaceScale` alone, which never sees that extra transform: with the
+// surface root left at `scale(1)` (host width == design width, so
+// surfaceScale computes to 1) and an ancestor transform of `scale(2)`
+// layered on top with no further `fitSurface` call, the OLD formula would
+// have used a stale divisor of 1 and produced a delta twice the correct
+// size. This is the durable regression net for `effectiveScaleFor`
+// (ui.ts): the drag element's OWN rect (which reflects the ancestor
+// transform) divided by its wire width, not the root-only scalar.
+test("keeps drag sensitivity synced to a transform applied by the host to an ancestor other than the surface root", async ({ page }) => {
+  const dragFrame = makeCommandBuffer([
+    { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 100], children: ["drag"] },
+    { id: "drag", kind: NodeKind.Draw, bounds: [10, 10, 40, 40], pointerDragAction: { name: "generic.drag", value: "axis:0" } },
+  ]);
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  const result = await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    const host = document.querySelector<HTMLElement>("#synth-root")!;
+    host.style.width = "200px";
+    const actions: Array<{ name: string; value: string }> = [];
+    const backend = new BrowserUiBackend(host, (action: { name: string; value: string }) => actions.push(action));
+    backend.renderFrame(new Uint8Array(bytes).buffer);
+    const drag = document.querySelector<HTMLElement>('[data-synth-node-id="drag"]')!;
+    // Simulate a host-applied per-block/ancestor transform (the surface
+    // root, `drag`'s parent here) that `fitSurface` never re-derives
+    // `surfaceScale` from -- exactly the shape of a shell-side per-block
+    // container transform layered on top of (or replacing) the root's own
+    // fitSurface scale.
+    drag.parentElement!.style.transformOrigin = "0 0";
+    drag.parentElement!.style.transform = "scale(2)";
+    drag.setPointerCapture = () => {};
+    drag.releasePointerCapture = () => {};
+    drag.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 11, clientX: 10, clientY: 20 }));
+    drag.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 11, clientX: 14, clientY: 18 }));
+    drag.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 11, clientX: 14, clientY: 18 }));
+    return actions;
+  }, Array.from(new Uint8Array(dragFrame)));
+
+  expect(result).toHaveLength(1);
+  expect(result[0].name).toBe("generic.drag");
+  // Correct (transform-robust) value: effective scale is 2 (root's own
+  // scale(1) x the ancestor's scale(2)), so delta = ((4/2) - (-2/2)) * 0.0025.
+  // The pre-fix formula (dividing by the stale surfaceScale=1) would have
+  // produced 0.015 instead -- verified by reverting effectiveScaleFor's
+  // introduction and re-running this exact test during development.
+  expect(Number(result[0].value.slice("axis:".length))).toBeCloseTo(0.0075, 10);
+});
+
 test("preserves focused edits while a stale frame is rendered", async ({ page }) => {
   await page.goto("http://127.0.0.1:4173/public/index.html");
   await page.evaluate(async (bytes) => {
@@ -2038,4 +2089,283 @@ test("rejects a corrupt presence flag instead of inventing a colour", () => {
   const corrupt = encodeRoot();
   corrupt[colourPresence] = 2;
   expect(() => decodeCommandBuffer(corrupt.buffer)).toThrow(/invalid presence flag/);
+});
+
+// ---------------------------------------------------------------------------
+// sru-59: Slider value readout, every backend. Mirrors the JUCE backend's
+// TextBoxBelow readout (PortableJuceBackend.hpp:1160-1178) with a browser
+// `<output>` sibling of the `<input type="range">` (ui.ts's Slider branches
+// in createElement/updateControl). Covers design.md's seven listed
+// scenarios, PLUS the pinned-format byte-parity table and the step===0
+// (preflight defect-2) case that tasks.md calls out separately.
+// ---------------------------------------------------------------------------
+
+// Reused across the initial-value/update/drag-seam tests below (reuse over
+// re-creation): a fractional step so the two-decimal formatting is visible,
+// matching the `value: 0.5, minValue: 0, maxValue: 1, step: 0.01` slider
+// shape already established elsewhere in this file (e.g. line 902, 1512).
+const fractionalSliderFrame = makeCommandBuffer([
+  { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 40], children: ["slider"] },
+  { id: "slider", kind: NodeKind.Slider, bounds: [0, 0, 160, 20], value: 0.5, minValue: 0, maxValue: 1, step: 0.01 },
+]);
+
+test("shows a readout element for a Slider node", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(frame)));
+  await expect(page.locator('[data-synth-node-id="slider"] output')).toBeAttached();
+});
+
+test("shows the formatted initial value", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(fractionalSliderFrame)));
+  await expect(page.locator('[data-synth-node-id="slider"] output')).toHaveText("0.50");
+});
+
+test("follows a wire value update", async ({ page }) => {
+  const updatedFrame = makeCommandBuffer([
+    { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 40], children: ["slider"] },
+    { id: "slider", kind: NodeKind.Slider, bounds: [0, 0, 160, 20], value: 0.75, minValue: 0, maxValue: 1, step: 0.01 },
+  ]);
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    const browserWindow = window as unknown as { backend: InstanceType<typeof BrowserUiBackend> };
+    browserWindow.backend = new BrowserUiBackend(document.querySelector("#synth-root")!);
+    browserWindow.backend.renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(fractionalSliderFrame)));
+  await expect(page.locator('[data-synth-node-id="slider"] output')).toHaveText("0.50");
+  await page.evaluate(async (bytes) => {
+    (window as unknown as { backend: { renderFrame(buffer: ArrayBuffer): void } }).backend.renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(updatedFrame)));
+  await expect(page.locator('[data-synth-node-id="slider"] output')).toHaveText("0.75");
+});
+
+test("follows a simulated drag input event between frames", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(fractionalSliderFrame)));
+  await expect(page.locator('[data-synth-node-id="slider"] output')).toHaveText("0.50");
+  // No renderFrame call between the drag and this assertion: the readout can
+  // only have updated through the `input` event seam (ui.ts's Slider create
+  // branch), not through `updateControl`, which only runs on the next frame
+  // -- exactly the seam design.md's Risks section requires (a drag must not
+  // freeze the readout between frames).
+  // A direct value assignment + dispatched `input` event, not `.fill()`:
+  // `step` crosses the wire as a float32 (protocol.ts's `Reader.float()`),
+  // so the DOM input's own `step` attribute is `0.01`'s nearest float32
+  // ("0.009999999776482582"), which Playwright's `fill()` validates 0.75
+  // against and rejects as a "Malformed value" -- a wire-precision artifact
+  // of the fixture, unrelated to the seam this test exists to prove. Direct
+  // assignment mirrors "suppresses actions from disabled native controls"
+  // above, which drives the same input the same way.
+  await page.locator('[data-synth-node-id="slider"] input').evaluate((input: HTMLInputElement) => {
+    input.value = "0.75";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(page.locator('[data-synth-node-id="slider"] output')).toHaveText("0.75");
+});
+
+test("formats an integer step without decimals and a fractional step with them", async ({ page }) => {
+  const mixedStepFrame = makeCommandBuffer([
+    { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 80], children: ["whole", "fractional"] },
+    { id: "whole", kind: NodeKind.Slider, bounds: [0, 0, 160, 20], value: 120, minValue: 20, maxValue: 300, step: 1 },
+    { id: "fractional", kind: NodeKind.Slider, bounds: [0, 24, 160, 20], value: 0.5, minValue: 0, maxValue: 1, step: 0.01 },
+  ]);
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(mixedStepFrame)));
+  await expect(page.locator('[data-synth-node-id="whole"] output')).toHaveText("120");
+  await expect(page.locator('[data-synth-node-id="fractional"] output')).toHaveText("0.50");
+});
+
+test("keeps showing its value while disabled", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(disabledFrame)));
+  await expect(page.locator('[data-synth-node-id="slider"] input')).toBeDisabled();
+  await expect(page.locator('[data-synth-node-id="slider"] output')).toHaveText("3");
+});
+
+test("does not intercept pointer events meant for the input", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(frame)));
+  const output = page.locator('[data-synth-node-id="slider"] output');
+  expect(await output.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe("none");
+  const outputBox = (await output.boundingBox())!;
+  expect(outputBox.width, "readout hit-test width").toBeGreaterThan(0);
+
+  // The readout owns a strip at the BOTTOM of the node box and the track is
+  // shortened above it (sru-59 layout, mirroring JUCE's TextBoxBelow) -- so
+  // the readout no longer sits over the track at all. Two things still have
+  // to hold, and this test asserts both:
+  //   1. a press anywhere on the TRACK resolves to the input, and
+  //   2. `pointer-events: none` genuinely lets a press inside the readout's
+  //      own box fall THROUGH it -- it must never be the hit target itself,
+  //      which is what would silently swallow drags if the strip were ever
+  //      overlapped or grown.
+  // (Before the layout fix this test hit-tested the readout's centre and
+  // expected INPUT, because the readout was overlaid ON the track -- an
+  // assertion about a layout that produced unreadable digits across the
+  // filled track and under the thumb.)
+  const input = page.locator('[data-synth-node-id="slider"] input');
+  const inputBox = (await input.boundingBox())!;
+  expect(inputBox.height, "track keeps usable height above the readout").toBeGreaterThan(0);
+  expect(
+    Math.round(outputBox.y),
+    "readout starts at or below the track's bottom edge (no overlap)",
+  ).toBeGreaterThanOrEqual(Math.round(inputBox.y + inputBox.height) - 1);
+
+  const trackPoint = { x: inputBox.x + inputBox.width / 2, y: inputBox.y + inputBox.height / 2 };
+  expect(
+    await page.evaluate((p) => document.elementFromPoint(p.x, p.y)?.tagName, trackPoint),
+    "a press on the track resolves to the input",
+  ).toBe("INPUT");
+
+  const readoutPoint = { x: outputBox.x + outputBox.width / 2, y: outputBox.y + outputBox.height / 2 };
+  expect(
+    await page.evaluate((p) => document.elementFromPoint(p.x, p.y)?.tagName, readoutPoint),
+    "the readout is never itself the hit target",
+  ).not.toBe("OUTPUT");
+});
+
+// Byte-parity table (design.md, tasks.md 1.2): each expected string is the
+// traced JUCE mechanism's OWN output for the identical binary double, not a
+// hand-picked expectation. Verified by compiling a literal port of
+// `juce_Slider.cpp:145-162` (updateRange's decimal-count loop) and
+// `juce_String.cpp:472-503` (StackArrayStream::writeDouble, behind
+// getTextFromValue's `String(val, N)` at juce_Slider.cpp:1655) standalone
+// and running it against these exact rows.
+//
+// Row "0.5/step 1" is the one row where design.md's first-cut N=0 formula --
+// `String(Math.round(value))` -- diverges from JUCE: it collapses 0.5 to
+// "1" (and -0.5 to "0", losing the sign and the value entirely), because
+// JUCE's own mechanism only switches to fixed-point formatting for N > 0
+// (`if (numDecPlaces > 0) { fixed; precision(N); }` in writeDouble); for
+// N === 0 the stream keeps iostream's own default (non-fixed) formatting
+// instead of rounding to an integer, so an off-step value still shows its
+// fraction. `formatSliderValue` in ui.ts uses `String(value)` for N === 0
+// instead of `Math.round`, which is the JUCE-authority adjustment
+// design.md's own contingency clause calls for -- this table is the record
+// of that divergence and the fix it forced.
+const byteParityRows: Array<[label: string, value: number, minValue: number, maxValue: number, step: number, expected: string]> = [
+  ["toFixed rounding boundary 2.675/step 0.01", 2.675, 0, 10, 0.01, "2.67"],
+  ["half-integer tie 0.5/step 1 (JUCE-authority adjustment)", 0.5, 0, 10, 1, "0.5"],
+  ["negative half-integer tie -0.5/step 1", -0.5, -10, 10, 1, "-0.5"],
+  ["negative value -4.2/step 0.1", -4.2, -10, 10, 0.1, "-4.2"],
+  ["range min endpoint 0/step 0.01", 0, 0, 1, 0.01, "0.00"],
+  ["range max endpoint 1/step 0.01", 1, 0, 1, 0.01, "1.00"],
+  ["negative range min endpoint -1/step 0.01", -1, -1, 1, 0.01, "-1.00"],
+  ["whole-number value 3/step 1 (no divergence)", 3, 0, 10, 1, "3"],
+];
+
+test("formats byte-parity rounding boundaries against the traced JUCE mechanism", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async () => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    (window as unknown as { backend: InstanceType<typeof BrowserUiBackend> }).backend =
+      new BrowserUiBackend(document.querySelector("#synth-root")!);
+  });
+  for (const [label, value, minValue, maxValue, step, expected] of byteParityRows) {
+    const rowFrame = makeCommandBuffer([
+      { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 40], children: ["slider"] },
+      { id: "slider", kind: NodeKind.Slider, bounds: [0, 0, 160, 20], value, minValue, maxValue, step },
+    ]);
+    await page.evaluate(async (bytes) => {
+      (window as unknown as { backend: { renderFrame(buffer: ArrayBuffer): void } }).backend.renderFrame(new Uint8Array(bytes).buffer);
+    }, Array.from(new Uint8Array(rowFrame)));
+    await expect(page.locator('[data-synth-node-id="slider"] output'), label).toHaveText(expected);
+  }
+});
+
+// preflight defect-2 fix: the general trailing-zero loop, run literally on a
+// scaled value of 0 (from step 0), would collapse to N=0. JUCE's own
+// updateRange() instead guards the loop with
+// `if (! approximatelyEqual (interval, 0.0))` and leaves numDecimalPlaces at
+// its untouched default of 7 when the guard is false. No current producer
+// sends step 0 (braid-4 and the miniapp both send 0.001f) but the algorithm
+// must be total, per design.md.
+test("formats a continuous (step 0) slider at JUCE's default 7 decimal places", async ({ page }) => {
+  const continuousFrame = makeCommandBuffer([
+    { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 40], children: ["slider"] },
+    { id: "slider", kind: NodeKind.Slider, bounds: [0, 0, 160, 20], value: 0.5, minValue: 0, maxValue: 1, step: 0 },
+  ]);
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(continuousFrame)));
+  await expect(page.locator('[data-synth-node-id="slider"] output')).toHaveText("0.5000000");
+});
+
+// Postflight (2026-08-19): the readout strip's first cut was a hardcoded 14px
+// carved out of the node's own box, which on a node at-or-below that height
+// spilled past the wire-set bounds (breaking sru-59's "renders within the
+// node's bounds") and drove `calc(100% - 14px)` to a 0-height, silently
+// undraggable track. No fixture exercised it -- every slider here was 20px or
+// taller. These two pin both sides of the adaptive floor.
+test("keeps the readout inside the bounds and the track usable on a short slider node", async ({ page }) => {
+  const shortFrame = makeCommandBuffer([
+    { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 40], children: ["slider"] },
+    { id: "slider", kind: NodeKind.Slider, bounds: [0, 0, 160, 12], value: 5, minValue: 0, maxValue: 10, step: 1 },
+  ]);
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(shortFrame)));
+  const node = page.locator('[data-synth-node-id="slider"]');
+  const input = page.locator('[data-synth-node-id="slider"] input');
+  const output = page.locator('[data-synth-node-id="slider"] output');
+  // 12px * 0.4 = 4px, under the 8px legibility floor -> no strip at all.
+  expect(await output.evaluate((element) => getComputedStyle(element).display)).toBe("none");
+  const nodeBox = (await node.boundingBox())!;
+  const inputBox = (await input.boundingBox())!;
+  expect(inputBox.height, "track keeps the whole box when the strip is dropped").toBeGreaterThan(0);
+  expect(Math.round(inputBox.height), "track fills the node").toBe(Math.round(nodeBox.height));
+  const centre = { x: inputBox.x + inputBox.width / 2, y: inputBox.y + inputBox.height / 2 };
+  expect(
+    await page.evaluate((p) => document.elementFromPoint(p.x, p.y)?.tagName, centre),
+    "a short slider is still draggable",
+  ).toBe("INPUT");
+});
+
+test("shrinks the readout strip rather than overflowing a mid-height slider node", async ({ page }) => {
+  const midFrame = makeCommandBuffer([
+    { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 60], children: ["slider"] },
+    { id: "slider", kind: NodeKind.Slider, bounds: [0, 0, 160, 24], value: 5, minValue: 0, maxValue: 10, step: 1 },
+  ]);
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  await page.evaluate(async (bytes) => {
+    const { BrowserUiBackend } = await import("../dist/src/" + "ui.js");
+    new BrowserUiBackend(document.querySelector("#synth-root")!).renderFrame(new Uint8Array(bytes).buffer);
+  }, Array.from(new Uint8Array(midFrame)));
+  const node = page.locator('[data-synth-node-id="slider"]');
+  const input = page.locator('[data-synth-node-id="slider"] input');
+  const output = page.locator('[data-synth-node-id="slider"] output');
+  const nodeBox = (await node.boundingBox())!;
+  const inputBox = (await input.boundingBox())!;
+  const outputBox = (await output.boundingBox())!;
+  // 24px * 0.4 = 9px strip (under the 14px cap, over the 8px floor).
+  expect(Math.round(outputBox.height), "strip scales with the node").toBe(9);
+  expect(await output.evaluate((element) => getComputedStyle(element).display)).not.toBe("none");
+  expect(
+    Math.round(outputBox.y + outputBox.height),
+    "readout stays inside the node's own bounds",
+  ).toBeLessThanOrEqual(Math.round(nodeBox.y + nodeBox.height) + 1);
+  expect(inputBox.height, "track keeps the majority of the box").toBeGreaterThan(nodeBox.height / 2);
 });
