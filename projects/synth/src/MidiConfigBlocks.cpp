@@ -213,36 +213,28 @@ std::size_t RectangleCellCount(int startX, int endX, int startY, int endY) {
     return width * height;
 }
 
-// D3: expansion mirrors the edit rules (ApplyMappingEdit refuses channel
+// Expansion mirrors the edit rules (ApplyMappingEdit refuses channel
 // outside 0-15 for every kind that carries a MIDI channel).
 bool ChannelValid(std::uint8_t channel) {
     return channel <= 15;
 }
 
-// Finding 3: a block's start argument/position/index plus its cell count
-// must stay within a sane domain -- otherwise the per-cell `start + index`
-// arithmetic in the Expand* loops below can wrap std::size_t (SIZE_MAX ->
-// 0), silently producing a small index instead of failing. Reuses the same
-// 2^53 "largest exactly-representable double integer" cap the view model's
-// IsNonNegativeInteger applies to every numeric field edit (see
-// MidiConfigViewModel.cpp) -- any block field wide enough to reach this cap
-// could not have been entered through the numeric field editor anyway, so
-// this is not a tighter restriction in practice, just an explicit guard at
-// the library boundary for blocks constructed directly (as tests, or a
-// future non-UI caller, might).
-constexpr std::size_t kMaxBlockDomain = 9007199254740992ULL;  // 2^53
-
-// True when `start + count` would exceed kMaxBlockDomain OR wrap std::size_t
-// -- the single check that makes every per-cell `start + index` in the
-// Expand* loops below well-defined and within the documented domain cap.
+// True when `start + count` would wrap std::size_t -- the single check that
+// makes every per-cell `start + index` in the Expand* loops below
+// well-defined. The domain is std::size_t's own range, tested without
+// computing `start + count`, the same way ExpandGridBlock tests its cell
+// count and IsWrapSafeSuccessor tests its successor.
+//
+// The 2^53 "largest exactly-representable double integer" bound belongs to
+// the numeric field editor's double domain, where IsNonNegativeInteger
+// applies it (MidiConfigViewModel.cpp) clamped to std::size_t's max. It is
+// not restated here: a std::size_t cannot hold 2^53 on a 32-bit target, so
+// stating it in this type would bound the guard by 0 there.
 bool StartPlusCountExceedsDomain(std::size_t start, std::size_t count) {
-    if (start > kMaxBlockDomain || count > kMaxBlockDomain) {
-        return true;
-    }
-    return kMaxBlockDomain - start < count;
+    return start > std::numeric_limits<std::size_t>::max() - count;
 }
 
-// Finding 3: `cur == prev + 1` computed as written wraps std::size_t
+// `cur == prev + 1` computed as written wraps std::size_t
 // (SIZE_MAX -> 0) when prev == SIZE_MAX, which would make an unrelated
 // `cur == 0` cell look like a consecutive successor. Reconstruction must
 // treat that as a run break, never a match -- so guard the overflow
@@ -402,14 +394,14 @@ bool ExpandSystemBlock(const SystemBlock& block, std::vector<MidiControllerSyste
         SetReason(reason, "twister system messages never block (single side buttons only)");
         return false;
     }
-    // Finding 2: expansion mirrors the edit rules -- refuse channel > 15
+    // Expansion mirrors the edit rules -- refuse channel > 15
     // all-or-nothing. Launchpad's form carries no channel field at all, so
     // this only applies to WrldBldr and Generic.
     if (block.kind != MidiProfileKind::Launchpad && !ChannelValid(block.channel)) {
         SetReason(reason, "system block channel must be an integer 0-15");
         return false;
     }
-    // Finding 3: startArg + cellIndex can wrap std::size_t across the whole
+    // startArg + cellIndex can wrap std::size_t across the whole
     // cell range -- refuse up front rather than risk a wrapped arg on some
     // interior cell.
     if (StartPlusCountExceedsDomain(block.startArg, block.CellCount())) {
@@ -458,7 +450,7 @@ bool ExpandSystemBlock(const SystemBlock& block, std::vector<MidiControllerSyste
                                            .type = block.controlType};
                     result.push_back(std::move(association));
                 } else {
-                    // Finding 4: shape-checked against and stamped with the
+                    // Shape-checked against and stamped with the
                     // block's own launchpadController variant -- previously
                     // hardcoded to LaunchpadX regardless of the block's
                     // actual variant, so e.g. ProMk3-only edge coordinates
@@ -1034,7 +1026,7 @@ bool ContinuesCandidateRun(const MidiControllerSystemMessageAssociation& prev,
                            const MidiControllerSystemMessageAssociation& cur, BlockableMessage message) {
     const std::size_t prevArg = BlockableArg(prev, message);
     const std::size_t curArg = BlockableArg(cur, message);
-    // Finding 3: guard against `prevArg + 1` wrapping std::size_t (this
+    // Guard against `prevArg + 1` wrapping std::size_t (this
     // path is unreachable through ReconstructSystemBlocks's own defensive
     // sort, which always places a SIZE_MAX arg last, but the guard keeps
     // this shared helper correct independent of caller sort order).
@@ -1166,7 +1158,7 @@ void FitRectangles(const std::vector<MidiControllerSystemMessageAssociation>& so
     auto channelOf = [&](std::size_t ix) -> std::uint8_t {
         return sorted[ix].control.has_value() ? sorted[ix].control->channel : 0;
     };
-    // Finding 4: Launchpad cells also carry a controller variant
+    // Launchpad cells also carry a controller variant
     // (LaunchpadGridPosition::controller); a run/rectangle requires it
     // constant throughout, same as x/y/channel -- mixed variants stay
     // individual. Meaningless (always LaunchpadX, ignored) for WrldBldr.

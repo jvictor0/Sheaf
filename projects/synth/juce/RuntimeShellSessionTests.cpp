@@ -1169,7 +1169,7 @@ int main() {
 
     // RuntimeMainComponent::BuildTree() unconditionally re-offers whatever
     // liveContentExtent_ it currently holds to an ExtentAwareSurface app on
-    // *every* call (RuntimeMainComponent.hpp:134-137), including the
+    // *every* call (RuntimeMainComponent.hpp:169), including the
     // RefreshFromSurface() call resized() already made before this fix -- so
     // extentOffers alone climbs regardless of whether MainPane wires the new
     // JUCE bounds through. The value offered is the only thing that can
@@ -1189,7 +1189,7 @@ int main() {
     // the sidebar (96) = 704, not the raw 800 -- otherwise an extent-aware
     // app would resolve at the full pane width and BuildTree() would place
     // the sidebar at x 800, past the 800-wide pane's own right edge
-    // (RuntimeMainComponent.hpp:156, sidebar x == resolved app root width).
+    // (RuntimeMainComponent.hpp:199, sidebar x == resolved app root width).
     // Height is unaffected: the sidebar sits beside the content, not above
     // or below it.
     Require(wiringSurface->extent.width == 704.0f && wiringSurface->extent.height == 600.0f,

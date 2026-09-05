@@ -1778,6 +1778,76 @@ void TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence()
             "Restore disappears once the row matches its preset again");
 }
 
+// The Encoders section's Turn and Push group headers lay their column labels
+// and Add/Block buttons out in one Row sharing ControllersLayout::
+// kEditorColumnGap (ControllersPageUI.hpp's emitGroupHeader), the same gap
+// the mapping rows below use between fields. Pin the gap by geometry, not by
+// control count, so a regression that collapsed it back to the old literal
+// 0.0f (welding the last column to the Add button) fails here.
+void TestEncoderGroupHeaderSeparatesLastColumnFromAddButton()
+{
+    using RowGroup = synth::MidiMappingRowVM::RowGroup;
+
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.SetContentBounds({0.0f, 0.0f, 1000.0f, 800.0f});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // Controller 2 ("blank") is MakeGenericSlot()'s untouched default: no
+    // encoderInput at all, so SectionRows() below is empty and both group
+    // headers come from AddableGroups()' header-only affordance rather than
+    // from any actual mapping row.
+    constexpr std::size_t controllerIx = 2;
+    surface.ViewModel().ToggleConfig(controllerIx);
+    surface.ViewModel().ToggleSection(controllerIx, synth::MidiConfigSection::Encoders);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    Require(surface.ViewModel().SectionRows(controllerIx, synth::MidiConfigSection::Encoders).empty(),
+            "blank generic controller starts with no encoder mapping rows");
+
+    const std::vector<synth::MidiMappingRowVM::Field> turnFields = surface.ViewModel().GroupColumnFields(
+        controllerIx, synth::MidiConfigSection::Encoders, RowGroup::EncoderTurn);
+    const std::vector<synth::MidiMappingRowVM::Field> pushFields = surface.ViewModel().GroupColumnFields(
+        controllerIx, synth::MidiConfigSection::Encoders, RowGroup::EncoderPush);
+    Require(turnFields.size() > 1, "Turn header shows more than one column label");
+    Require(pushFields.size() > 1, "Push header shows more than one column label");
+
+    const synth::ui::NodeTree tree = surface.BuildTree();
+
+    auto requireHeaderGaps = [&](std::size_t headerIx, std::size_t lastFieldIx, const char* presenceLabel,
+                                 const char* columnGapLabel, const char* addGapLabel) {
+        const synth::ui::Node* lastColumn = FindNodeById(
+            tree, synth::runtime_ui::NodeIds::GroupColumnLabel(
+                      controllerIx, synth::MidiConfigSection::Encoders, headerIx, lastFieldIx));
+        const synth::ui::Node* addSingle = FindNodeById(
+            tree, synth::runtime_ui::NodeIds::GroupAddSingle(
+                      controllerIx, synth::MidiConfigSection::Encoders, headerIx));
+        const synth::ui::Node* addBlock = FindNodeById(
+            tree, synth::runtime_ui::NodeIds::GroupAddBlock(
+                      controllerIx, synth::MidiConfigSection::Encoders, headerIx));
+        Require(lastColumn != nullptr && addSingle != nullptr && addBlock != nullptr, presenceLabel);
+
+        Require(addSingle->bounds.x - (lastColumn->bounds.x + lastColumn->bounds.width) ==
+                    synth::runtime_ui::ControllersLayout::kEditorColumnGap,
+                columnGapLabel);
+        Require(addBlock->bounds.x - (addSingle->bounds.x + addSingle->bounds.width) ==
+                    synth::runtime_ui::ControllersLayout::kEditorColumnGap,
+                addGapLabel);
+    };
+
+    requireHeaderGaps(0, turnFields.size() - 1,
+                      "Turn header's last column, add_single, and add_block nodes all render",
+                      "Turn header: last column to add_single keeps kEditorColumnGap",
+                      "Turn header: add_single to add_block keeps kEditorColumnGap");
+    requireHeaderGaps(1, pushFields.size() - 1,
+                      "Push header's last column, add_single, and add_block nodes all render",
+                      "Push header: last column to add_single keeps kEditorColumnGap",
+                      "Push header: add_single to add_block keeps kEditorColumnGap");
+}
+
 }  // namespace
 
 int main()
@@ -1803,6 +1873,7 @@ int main()
     TestConfigureStaysAvailableOnAReleasedEditedRow();
     TestRelabellingIsCosmeticForReleasedRecords();
     TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence();
+    TestEncoderGroupHeaderSeparatesLastColumnFromAddButton();
 
     TestHarness harness;
     synth::runtime_ui::ControllersPageSurface surface = harness.MakeSurface();

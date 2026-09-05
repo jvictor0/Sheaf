@@ -474,6 +474,10 @@ inline constexpr float kControllerHeaderHeight = 2.0f * kControllerHeaderLineHei
 inline constexpr float kSectionHeaderHeight = 28.0f;
 inline constexpr float kMappingRowHeight = 30.0f;
 inline constexpr float kGroupHeaderHeight = 42.0f;
+// Separates the mapping editor's columns from each other and from the Add and
+// Block buttons that follow them. The group header and the mapping rows below
+// it draw the same gap, so a header label stays over the field it names.
+inline constexpr float kEditorColumnGap = 4.0f;
 inline constexpr float kAddRowHeight = 40.0f;
 inline constexpr float kBaseEditorWidth = 90.0f;
 inline constexpr float kDeleteButtonWidth = 22.0f;
@@ -589,7 +593,7 @@ inline int FieldEditorWidth(MidiMappingRowVM::Field field)
         case Field::GridXMax:
         case Field::GridYMin:
         case Field::GridYMax:
-            return 58;
+            return 66;
         case Field::GestureIx:
             return 72;
         case Field::SceneBlend:
@@ -2844,11 +2848,18 @@ private:
             }
 
             const std::vector<MidiMappingRowVM> rows = vm.SectionRows(controllerIx, section);
+            // The fields plus the gaps drawn between them, which is what the
+            // rows below actually occupy.
             auto fieldsWidth = [](const std::vector<MidiMappingRowVM::Field>& fields) {
                 float width = 0.0f;
                 for (MidiMappingRowVM::Field field : fields)
                 {
                     width += static_cast<float>(ControllersLayout::FieldEditorWidth(field));
+                }
+                if (!fields.empty())
+                {
+                    width += static_cast<float>(fields.size() - 1) *
+                             ControllersLayout::kEditorColumnGap;
                 }
                 return width;
             };
@@ -2861,12 +2872,13 @@ private:
                     headerControlsWidth += ControllersLayout::kAddButtonWidth;
                     if (vm.GroupSupportsBlocks(controllerIx, section, row.group))
                     {
-                        headerControlsWidth += ControllersLayout::kAddButtonWidth;
+                        headerControlsWidth += ControllersLayout::kEditorColumnGap +
+                                               ControllersLayout::kAddButtonWidth;
                     }
                 }
                 desiredSectionWidth = std::max(
                     desiredSectionWidth,
-                    fieldsWidth(row.editableFields) +
+                    fieldsWidth(row.editableFields) + ControllersLayout::kEditorColumnGap +
                         std::max(headerControlsWidth,
                                  row.deletable ? ControllersLayout::kDeleteButtonWidth : 0.0f));
             }
@@ -2875,6 +2887,7 @@ private:
                 desiredSectionWidth = std::max(
                     desiredSectionWidth,
                     fieldsWidth(vm.GroupColumnFields(controllerIx, section, group)) +
+                        ControllersLayout::kEditorColumnGap * 2.0f +
                         ControllersLayout::kAddButtonWidth * 2.0f + 16.0f);
             }
             const float sectionWidth = desiredSectionWidth + 16.0f;
@@ -2906,7 +2919,7 @@ private:
                         body.Row(headerId,
                                  rowLayout(ControllersLayout::kGroupHeaderHeight,
                                            sectionWidth,
-                                           0.0f),
+                                           ControllersLayout::kEditorColumnGap),
                                  [&](ui::Builder& header) {
                                      for (std::size_t fieldIx = 0; fieldIx < fields.size(); ++fieldIx)
                                      {
@@ -2955,7 +2968,7 @@ private:
                     body.Row(NodeIds::MappingRow(controllerIx, section, mappingRowIx),
                              rowLayout(ControllersLayout::kMappingRowHeight,
                                        sectionWidth,
-                                       0.0f),
+                                       ControllersLayout::kEditorColumnGap),
                              [&](ui::Builder& row) {
                                  for (MidiMappingRowVM::Field field : rowVmRow.editableFields)
                                  {

@@ -298,8 +298,8 @@ public:
 
     // Task 8.1 (sprs-13): the live content extent the shell will offer the
     // app surface immediately before its next BuildTree(), generalizing the
-    // SetContentBounds convention (RuntimePages.hpp:1379/:1426/:1491,
-    // ControllersPageUI.hpp:932) from individual runtime pages to the whole
+    // SetContentBounds convention (RuntimePages.hpp:1581/:1702/:1749/:1814,
+    // ControllersPageUI.hpp:1074) from individual runtime pages to the whole
     // app-surface seam. Callers (the JUCE renderer via its live bounds, the
     // browser host, or a test) call this whenever the live extent changes;
     // BuildTree() always offers whatever is currently stored here. A surface

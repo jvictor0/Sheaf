@@ -3462,7 +3462,7 @@ bool ProfileConfigValidForKind(MidiProfileKind kind, const MidiControllerProfile
                 return Fail(reason, "this controller kind requires a control address for system-message entries");
             }
             if (kind == MidiProfileKind::MfTwister) {
-                // Finding 5: the physical MF Twister side buttons are a
+                // The physical MF Twister side buttons are a
                 // fixed hardware shape -- channel 3, cc 8..13 (6 logical
                 // buttons, control->cc = 8 + button per D1) -- not an
                 // arbitrary chan/cc pair. An association outside that shape

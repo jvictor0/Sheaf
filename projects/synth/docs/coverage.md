@@ -275,8 +275,7 @@ There is no per-descendant offset loop and no auto-flow anywhere in the path.
   geometry and portable encoder arc commands.
 - [`miniapp-smoke.spec.ts`](../browser/tests/miniapp-smoke.spec.ts):
   `real miniapp shared shell scales as one non-overlapping narrow surface`
-  verifies all seven encoder canvases retain nontrivial pixels, and the desktop
-  and narrow smoke tests write the reviewed runtime-shell screenshots.
+  verifies all seven encoder canvases retain nontrivial pixels.
 
 ### `sprs-6` (modified) - One Resolved Browser Coordinate System
 

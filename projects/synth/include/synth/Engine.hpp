@@ -599,7 +599,7 @@ public:
                                                        std::memory_order_acq_rel, std::memory_order_relaxed)) {
             // Null-check both buffers exactly as ProcessBlock's publish
             // site does (design 1.1 trace obligation: mirror
-            // Engine.hpp:424/:427) — Initialize() may not have run yet, so
+            // Engine.hpp:433/:436) — Initialize() may not have run yet, so
             // uiState_/gridUIState_ can still be nullptr here.
             if (uiState_ != nullptr) {
                 manager_.PopulateUIState(*uiState_);

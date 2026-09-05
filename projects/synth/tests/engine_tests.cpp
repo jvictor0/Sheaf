@@ -1493,9 +1493,9 @@ TEST_CASE(engine_pump_populates_ui_state_at_throttle_cadence) {
 // frame), the four-assertion transition test at the claim primitive's own
 // seam, and null-safety. The "browser-level: freshly installed app ..."
 // scenario needs no engine-level test of its own and no browser worker code
-// change: browser/src/main.ts:311-316 already calls MessageThreadTick (via
-// the "message-tick" request -> BrowserRuntime.hpp:701) unconditionally on
-// every frame, including the very first (browser/src/main.ts:222, before the
+// change: browser/src/main.ts:355-356 already calls MessageThreadTick (via
+// the "message-tick" request -> BrowserRuntime.hpp:717) unconditionally on
+// every frame, including the very first (browser/src/main.ts:355-356, before the
 // frame timer even starts and before any user activation), so the fix here
 // is exercised by the existing browser frame loop with no seam changes
 // needed there (task 1.1 trace obligation).
@@ -1622,7 +1622,7 @@ TEST_CASE(engine_message_thread_tick_before_initialize_does_not_crash_or_populat
     synth::Engine<EngineTestApp> engine([] { return std::uint64_t{0}; });
     // No Initialize() call: uiState_/gridUIState_ are both still nullptr, so
     // the message-thread claim path must null-check exactly as the
-    // audio-thread publish site already does (Engine.hpp:415/:418 -- see
+    // audio-thread publish site already does (Engine.hpp:433/:436 -- see
     // MessageThreadTick's mirrored checks).
     REQUIRE_TRUE(engine.Context().uiState == nullptr);
     REQUIRE_TRUE(engine.UiStatePublisherIsQuiescentForTest());

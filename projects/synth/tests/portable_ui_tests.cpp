@@ -1678,7 +1678,7 @@ static void TestAudioPageAppendsSuppliedSectionBeneathDeviceRowsWithinRemainingA
         handedBounds = bounds;
         // ui::Subtree, built the Rootless()/BuildSubtree() way --
         // the same idiom BuildPatchBrowserSubtree/BuildPatchVersionsSubtree
-        // use (RuntimePages.hpp:954-1001, 1006-1019) -- not a Root+Build()
+        // use (RuntimePages.hpp:1126, 1178) -- not a Root+Build()
         // NodeTree, so the app's own layout declarations reach the splice.
         synth::ui::Builder appBuilder;
         appBuilder.Rootless();

@@ -136,7 +136,7 @@ public:
     // survives. A ROOTLESS subtree attaches its FOREST ROOTS — the nodes not
     // named in any sibling's `children` — to the open scope; that is the shape
     // Tasks 12 and 13 produce. Grafting without attaching leaves the nodes
-    // parentless, and PortableJuceBackend.hpp:664-676 throws when more than one
+    // parentless, and PortableJuceBackend.hpp:696-699 throws when more than one
     // node has no parent.
     Builder& Splice(Subtree subtree) {
         assert(!scopeStack_.empty() && "Builder::Root must be called before splicing");

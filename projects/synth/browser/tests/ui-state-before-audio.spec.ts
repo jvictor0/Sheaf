@@ -6,9 +6,9 @@ import { makeCommandBuffer, NodeKind } from "./fixtures/command-buffer.js";
 // requires: "Browser-level: freshly installed app, no activation, no action
 // -> first frames carry encoder draw commands/labels." The implementation
 // (projects/synth/include/synth/Engine.hpp) was left without this test: the
-// implementer traced that browser/src/main.ts's renderFrame() (:311-316)
+// implementer traced that browser/src/main.ts's renderFrame() (:355-356)
 // already calls "message-tick" before "build-ui-frame" unconditionally,
-// including for the very first frame (main.ts:222, before the frame timer
+// including for the very first frame (main.ts:355-356, before the frame timer
 // starts and before any user activation), so no browser-side CODE change was
 // needed to observe the fix. That trace is correct, but it is a description
 // of today's main.ts, not a test: it proves the bug is fixed, not that a
