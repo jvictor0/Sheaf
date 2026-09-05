@@ -3,8 +3,8 @@
 // MidiConfigViewModel.hpp — JUCE-free view model for the Controllers page.
 //
 // This header (and its .cpp) contain ALL tree/edit logic for the Controllers
-// page; the upcoming JUCE page is a thin renderer over this model (Plan 4
-// Task 1). Nothing here includes JUCE, so it is headlessly testable via
+// page; the JUCE page is a thin renderer over this model. Nothing here
+// includes JUCE, so it is headlessly testable via
 // tests/viewmodel_tests.cpp.
 //
 // Edits operate through the open presentation when one exists. A section
@@ -19,28 +19,31 @@
 #include "synth/MidiController.hpp"
 #include "synth/MidiReconcile.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 namespace synth {
 
-// 256-slot ring buffer tracking a rolling maximum. Message-thread only (no
-// atomics) -- callers write once per UI timer tick and read back for display
-// (e.g. the sidebar's deadline readout, sru-2). Once 256 values have been
-// written, each new Write() overwrites the oldest slot, so the max "forgets"
-// spikes older than the last 256 writes.
-struct RollingMax256 {
-    static constexpr std::size_t kCapacity = 256;
+struct MidiAppCatalog;
+struct ControllerWizardDescriptor;
+
+// Ring buffer tracking a rolling maximum over its last `capacity` writes.
+// Message-thread only (no atomics) -- callers write once per UI timer tick
+// and read back for display (e.g. the sidebar's deadline readout).
+// Once `capacity` values have been written, each new Write() overwrites the
+// oldest slot, so the max "forgets" spikes older than the window.
+struct RollingMax {
+    explicit RollingMax(std::size_t capacity) : values_(capacity < 1 ? 1 : capacity) {}
 
     void Write(float v) {
         values_[next_] = v;
-        next_ = (next_ + 1) % kCapacity;
-        if (filled_ < kCapacity) {
+        next_ = (next_ + 1) % values_.size();
+        if (filled_ < values_.size()) {
             ++filled_;
         }
     }
@@ -58,14 +61,25 @@ struct RollingMax256 {
     }
 
 private:
-    std::array<float, kCapacity> values_{};
+    std::vector<float> values_;
     std::size_t next_ = 0;
     std::size_t filled_ = 0;
 };
 
+// The deadline readout's rolling window: about one second of UI frames --
+// long enough that even a single-frame spike stays on screen for many
+// redraws after it happens, short enough that it is gone well before a
+// reader could mistake a startup transient for the current load. UI frame
+// rate is per application (`RuntimeConfig::uiFrameHz`), so the window is
+// sized from that rate rather than a fixed frame count.
+inline std::size_t DeadlineWindowCapacity(int uiFrameHz) {
+    const int hz = uiFrameHz > 0 ? uiFrameHz : 30;
+    return static_cast<std::size_t>(hz);
+}
+
 // One editable row rendered inside a section's mapping list.
 //
-// Presentation (midi-config-blocks change, task group 2 / design.md D5): a
+// Presentation (midi-config-blocks change): a
 // row is one of three kinds (see `kind` below) --
 //   Individual  -- one config element (an encoder turn/push mapping, an
 //                  analog gesture mapping, or a system-message association).
@@ -78,7 +92,7 @@ private:
 //                  before, never deletable, never part of a block.
 // `deletable` is the renderer's single source of truth for whether to show a
 // delete ("x") affordance -- true for Individual and Block rows, false for
-// ConfigLevel (sru-11's "config-level rows are not deletable").
+// ConfigLevel: config-level rows are not deletable.
 struct MidiMappingRowVM {
     enum class Field {
         Channel,
@@ -95,14 +109,19 @@ struct MidiMappingRowVM {
         WrldBldrY,
         GestureIx,
         SceneBlend,
-        // Twister side-button system rows only (sru-8/D1): the logical side
+        // Analog app-action row's target combo: index into
+        // AnalogActionCatalog() (mirrors MessageKind's index-into-catalog
+        // contract, but against the analog-only catalog rather than
+        // MessageCatalog()).
+        AppAction,
+        // Twister side-button system rows only: the logical side
         // button 0..5, persisted as control->cc = 8 + button on the fixed
         // channel 3 (display-only, not independently editable). Kept
         // distinct from Field::Cc (which means "raw CC 0-127" everywhere
         // else) so its 0..5 validation domain and "Btn" label can't be
         // confused with a generic Cc editor.
         Button,
-        // --- Block-row fields (kind == Block only; task group 2 / D3/D6) ---
+        // --- Block-row fields (kind == Block only) ---
         // A block row's editableFields is drawn from this subset, per its
         // form (EncoderBlock/AnalogBlock/SystemBlock 1-D generic/2-D
         // wrldbldr-launchpad):
@@ -161,6 +180,7 @@ struct MidiMappingRowVM {
         EncoderMode,
         EncoderStep,
         AnalogGesture,
+        AnalogAppAction,
         AnalogSceneBlend,
         System,
         Grid,
@@ -203,25 +223,61 @@ enum class UISystemMessage {
     SetSceneBlend,
     NextParamBank,
     PrevParamBank,
+    AppAction,
+    HoldDrill,
 };
 
 struct UISystemMessageChoice {
     std::string label;
     UISystemMessage message = UISystemMessage::Clock;
+    std::string appAction;
+    std::string appActionValue;
+    std::size_t appActionIx = 0;
 };
 
 const std::vector<UISystemMessageChoice>& UISystemMessageCatalog();
 
-// Finds the catalog entry for a message value.  Forms use this instead of
-// duplicating the Controllers page's display labels.
-const UISystemMessageChoice* FindUISystemMessageChoice(UISystemMessage message);
+// Finds the catalog entry for a message value, searching `catalog` (the
+// static library list by default -- forms fixed to the library vocabulary,
+// such as the MF Twister wizard, never pass a different one). For
+// UISystemMessage::AppAction, `appAction`/`appActionValue` narrow the match
+// to the one entry with that action and value (row identity for an
+// app-action choice is the pair, never the bare kind); for every other kind
+// they are ignored. Forms use this instead of duplicating the Controllers
+// page's display labels.
+const UISystemMessageChoice* FindUISystemMessageChoice(
+    UISystemMessage message, const std::vector<UISystemMessageChoice>& catalog = UISystemMessageCatalog(),
+    std::string_view appAction = {}, std::string_view appActionValue = {});
 
 // Builds the press/release/feedback association used by the Controllers
-// page for a catalog message.  `argument` follows the existing low-level
+// page for a catalog choice. `argument` follows the existing low-level
 // mapping policy: Next/Previous Bank store it in slotIx, while Bank Select,
-// Gesture Select, and Scene Select use their respective argument fields.
+// Gesture Select, and Scene Select use their respective argument fields --
+// ignored for AppAction, whose press carries `choice.appActionIx` instead
+// and whose release is always absent (an app action has no hold state at
+// this layer).
 MidiControllerSystemMessageAssociation MakeUISystemMessageAssociation(
-    UISystemMessage message, std::size_t argument = 0);
+    const UISystemMessageChoice& choice, std::size_t argument = 0);
+
+// Builds the offered message list for an app's catalog: an empty catalog
+// (no libraryKinds, no actions) returns a copy of UISystemMessageCatalog()
+// unchanged, so an app with no MidiCatalog() sees exactly today's list.
+// Otherwise returns one library choice per catalog.libraryKinds entry
+// (taken from UISystemMessageCatalog() by kind; HoldDrill has no static
+// catalog entry, so it is produced here directly), followed by one
+// app-action choice per catalog.actions entry (message = AppAction,
+// appAction/appActionValue/appActionIx from that action, label from the
+// action's own label).
+std::vector<UISystemMessageChoice> MakeUISystemMessageChoices(const MidiAppCatalog& catalog);
+
+// Builds the offered target list for an analog app-action row's combo: one
+// choice per catalog.actions entry whose analogRange is set (a plain,
+// non-analog action never appears here -- an analog control's app-action
+// row can only target an action that takes a continuous value), label from
+// the action's own label, message always UISystemMessage::AppAction,
+// appAction/appActionValue/appActionIx from that action and its index in
+// catalog.actions.
+std::vector<UISystemMessageChoice> MakeAnalogAppActionChoices(const MidiAppCatalog& catalog);
 
 // True for every field the renderer formats as a plain integer (no decimal
 // places -- Channel, Cc, SlotIx, Position, GestureIx, LaunchpadX/Y,
@@ -256,16 +312,6 @@ const char* FieldShortLabel(MidiMappingRowVM::Field field);
 // used elsewhere on this page.
 const std::vector<std::string>& BlockableMessageCatalog();
 
-// The fixed 3-entry catalog backing a Launchpad-kind controller row's
-// variant selector (label-launchpad-brief.md Change 2) -- one entry per
-// LaunchpadController value (MidiController.hpp), in that enum's declaration
-// order (0 = LaunchpadX, 1 = LaunchpadProMk3, 2 = LaunchpadMiniMk3).
-// MidiConfigViewModel::LaunchpadVariantIndex()'s return value and
-// SetLaunchpadVariant()'s `variantIndex` parameter both index into this
-// vector, matching the EncoderModeCatalog/BlockableMessageCatalog index
-// convention used elsewhere on this page.
-const std::vector<std::string>& LaunchpadVariantCatalog();
-
 struct MidiControllerRowVM {
     std::string name;
     MidiProfileKind kind = MidiProfileKind::Generic;
@@ -273,13 +319,23 @@ struct MidiControllerRowVM {
     // Registry resolution gates only portable lifecycle affordances. The
     // persisted opaque id remains valid even when this is false.
     bool hasResolvedWizard = false;
+    // Whether the slot's config is still exactly what its stored wizard id
+    // generates today. Mapping edits, adds, and deletes no longer clear
+    // wizardId, so this is how a row is told apart as still-pristine versus
+    // diverged from the preset that created it.
+    bool matchesWizardProfile = false;
+    // The stored opaque wizard id, independent of registry resolution; which
+    // preset (if any) created this row, kept through edits/deletes/adds so
+    // matchesWizardProfile above and the Restore/Release/Configure controls
+    // keep working on a row that has since diverged.
+    std::optional<std::string> wizardId;
     bool hasCompleteEndpointPair = false;
     MidiEndpointStatus inputStatus = MidiEndpointStatus::Unconfigured;
     MidiEndpointStatus outputStatus = MidiEndpointStatus::Unconfigured;
     std::string inputDeviceLabel;   // present device name; stored ref + " (offline)"; or "(none)"
     std::string outputDeviceLabel;
     // Stored endpoint references, independent of connection status. A
-    // Blacklisted record's endpoints stay deliberately Unconfigured, so sru-4's
+    // Blacklisted record's endpoints stay deliberately Unconfigured, so
     // "show their stored endpoint labels" cannot be served by the
     // status-derived labels above, and endpoint pickers need the exact stored
     // identifier to stay unambiguous across duplicate same-name devices.
@@ -289,7 +345,7 @@ struct MidiControllerRowVM {
     std::vector<MidiConfigSection> sections;  // kind-filtered via KindSupport, each starts collapsed
 };
 
-// --- Open section presentation (task group 2 / design.md D5) ---------------
+// --- Open section presentation ---------------
 //
 // Internal to MidiConfigViewModel -- exposed at namespace (not class) scope,
 // in a `detail` sub-namespace, purely so the .cpp's free helper functions
@@ -318,7 +374,7 @@ struct AnalogSceneBlendRow {
 
 using PresentationRowData =
     std::variant<std::monostate, EncoderMidiMapping, AnalogMidiMapping, MidiControllerSystemMessageAssociation,
-                 GridButton, EncoderModeRow, EncoderStepRow, AnalogSceneBlendRow>;
+                 GridButton, EncoderModeRow, EncoderStepRow, AnalogSceneBlendRow, AnalogAppActionMapping>;
 
 struct PresentationRow {
     MidiMappingRowVM::Kind kind = MidiMappingRowVM::Kind::Individual;
@@ -341,7 +397,7 @@ struct SectionPresentation {
 }  // namespace detail
 
 // JUCE-free view model driving the Controllers page. Rebuild() is a pure
-// data transform from the Plan 1 model (MidiInstrumentConfig) and the
+// data transform from the persisted model (MidiInstrumentConfig) and the
 // runtime's per-controller connection state (MidiConnectionState) into the
 // row tree above. Expand/collapse state is kept keyed by controller NAME (in
 // a std::map, so it is stable regardless of controller reordering) and
@@ -352,6 +408,33 @@ public:
     void Rebuild(const MidiInstrumentConfig& instrument, const MidiConnectionState& connection);
 
     const std::vector<MidiControllerRowVM>& Controllers() const { return controllers_; }
+
+    // The offered message list for the message-kind combo and its row-index
+    // lookup. Defaults to a copy of UISystemMessageCatalog() so every
+    // existing construction path behaves as today; a host with an app
+    // catalog calls SetMessageCatalog(MakeUISystemMessageChoices(...)) once
+    // at construction.
+    void SetMessageCatalog(std::vector<UISystemMessageChoice> choices);
+    const std::vector<UISystemMessageChoice>& MessageCatalog() const { return messageCatalog_; }
+
+    // The offered target list for an analog app-action row's combo (Field::
+    // AppAction) and its row-index lookup. Defaults to empty, matching an app
+    // with no analog-range actions; a host with an app catalog calls
+    // SetAnalogActionCatalog(MakeAnalogAppActionChoices(...)) once at
+    // construction, beside SetMessageCatalog.
+    void SetAnalogActionCatalog(std::vector<UISystemMessageChoice> choices);
+    const std::vector<UISystemMessageChoice>& AnalogActionCatalog() const { return analogActionCatalog_; }
+
+    // The add row's Preset combo options, and the registry every wizard
+    // lookup resolves against: installing a preset, comparing a row's
+    // config against the preset that created it, and restoring a diverged
+    // row. Defaults to MakeControllerWizardRegistry(
+    // MidiAppCatalog{}), i.e. the library's Twister-only registry, so every
+    // existing construction path behaves as today; a host with an app
+    // catalog calls SetLayouts(MakeControllerWizardRegistry(engine.MidiCatalog()))
+    // once at construction, beside SetMessageCatalog.
+    void SetLayouts(std::vector<ControllerWizardDescriptor> layouts);
+    const std::vector<ControllerWizardDescriptor>& Layouts() const;
 
     void ToggleConfig(std::size_t controllerIx);
     void ToggleSection(std::size_t controllerIx, MidiConfigSection section);
@@ -428,15 +511,17 @@ public:
                              std::string* reason = nullptr) const;
     bool RemoveFromBlacklist(std::size_t controllerIx, MidiInstrumentConfig& out,
                              std::string* reason = nullptr) const;
+    bool RestoreController(std::size_t controllerIx, MidiInstrumentConfig& out,
+                           std::string* reason = nullptr) const;
 
     bool SetEndpointRef(std::size_t controllerIx, bool output, MidiEndpointRef ref,
                         MidiInstrumentConfig& out) const;
 
-    // --- Presentation: add/delete (task group 2 / design.md D5, sru-11) ----
+    // --- Presentation: add/delete ------------------------------------
     //
     // Every mutating presentation method below shares ApplyMappingEdit's
     // contract: `out` is populated (and normalized via
-    // NormalizeMidiProfileConfig, sru-9) only on success; on failure `out` is
+    // NormalizeMidiProfileConfig) only on success; on failure `out` is
     // untouched and `reason` (if non-null) explains why. Successful calls
     // also leave the open presentation in the edited shape; the host commits
     // `out` and calls Rebuild() again, and that Rebuild() preserves already
@@ -446,7 +531,7 @@ public:
 
     // True iff the row at (controllerIx, section, rowIx) may be deleted --
     // Individual and Block rows (MidiMappingRowVM::Kind), never ConfigLevel
-    // (encoder mode/turn step/scene blend, sru-11's "config-level rows are
+    // (encoder mode/turn step/scene blend: "config-level rows are
     // not deletable"). Mirrors (and is the single source of truth behind)
     // each SectionRows() row's own cached `deletable` field -- exposed
     // separately so the renderer can query it without re-deriving the whole
@@ -457,7 +542,7 @@ public:
     // Deletes the row at (controllerIx, section, rowIx): for an Individual
     // row, removes that one config element (encoder mapping / analog gesture
     // mapping / system-message association); for a Block row, removes every
-    // config element the block covers in the SAME commit (sru-11's "a block
+    // config element the block covers in the SAME commit ("a block
     // delete removes all its cells in one commit"). Refused (false, `out`
     // untouched) for a ConfigLevel row, an out-of-range (controllerIx,
     // rowIx), or a resulting section that fails validation.
@@ -465,13 +550,15 @@ public:
                    std::string* reason = nullptr) const;
 
     // Appends one new Individual row to `group` with kind-appropriate
-    // "next-free" defaults (sru-11's "+": the lowest address/argument not
+    // "next-free" defaults ("+": the lowest address/argument not
     // already used by that group -- see the .cpp's NextFree* helpers for the
     // exact per-group rule) and commits it. `group` must be one of the row
     // groups SectionRows() can produce for `section` on this controller's
-    // kind (EncoderTurn/EncoderPush for Encoders; AnalogGesture for Analogs;
-    // System for SystemMessages -- EncoderMode/EncoderStep/AnalogSceneBlend
-    // are config-level, never addable, and refused here) -- refused
+    // kind (EncoderTurn/EncoderPush for Encoders; AnalogGesture/
+    // AnalogAppAction for Analogs -- AnalogAppAction refused when
+    // AnalogActionCatalog() is empty; System for SystemMessages --
+    // EncoderMode/EncoderStep/AnalogSceneBlend are config-level, never
+    // addable, and refused here) -- refused
     // otherwise. The section need not be expanded first; this call also
     // works against a section whose presentation has not yet been built
     // (SectionRows() lazily builds on first read either way, per this
@@ -482,10 +569,11 @@ public:
     // Appends one new Block row to `group`, seeded from the next free
     // address/argument range (same "next free" rule AddSingle uses, sized to
     // a small default run -- see the .cpp), committing its expansion in one
-    // shot (sru-11's "+B": "append a block, committed as its expansion").
+    // shot ("+B": "append a block, committed as its expansion").
     // Only legal where blocks apply (EncoderTurn/EncoderPush/AnalogGesture,
     // and System for a kind/message combination that supports blocking --
-    // never MfTwister, D4 point 3); refused with a reason otherwise
+    // never MfTwister, and never AnalogAppAction, which is
+    // individual-only); refused with a reason otherwise
     // (including "no room for a default block" if no >=2-wide free range
     // exists in the group's domain).
     bool AddBlock(std::size_t controllerIx, MidiConfigSection section, MidiMappingRowVM::RowGroup group,
@@ -496,9 +584,9 @@ public:
     // combination AddSingle's own dispatch recognizes at all (encoder turn/
     // push, analog gesture, or system), independent of any per-controller
     // runtime state (missing encoder/analog input, no free address, etc.,
-    // which AddSingle still checks and can still refuse for). Design D6
-    // ("renderer stays thin; all decisions from the view model"), reviewer
-    // finding 2: this is the single source of truth the renderer queries to
+    // which AddSingle still checks and can still refuse for).
+    // Keeps the renderer thin: all decisions come from the view model, and
+    // this is the single source of truth the renderer queries to
     // decide whether to paint a "+" affordance at all, so that decision can
     // never drift from AddSingle's actual dispatch the way a page-local
     // reimplementation could. `controllerIx` is accepted (and validated) for
@@ -511,11 +599,11 @@ public:
 
     // Whether AddBlock(controllerIx, section, group, ...) could possibly
     // succeed for this (controllerIx, section, group) -- the AddBlock
-    // counterpart to GroupSupportsAdd() above (reviewer finding 2). False
+    // counterpart to GroupSupportsAdd() above. False
     // for every group GroupSupportsAdd() itself refuses (a group with no
     // individual-row affordance has no block affordance either), and also
     // false for the System group on a MidiProfileKind::MfTwister controller
-    // (D4 point 3, "twister system messages never block" -- mirrors
+    // ("twister system messages never block" -- mirrors
     // AddBlock's own MfTwister refusal). Unlike GroupSupportsAdd(), this
     // DOES depend on controllerIx (to read the controller's kind), so an
     // out-of-range controllerIx returns false here for a real reason, not
@@ -525,16 +613,17 @@ public:
 
     // The addable row groups for (controllerIx, section), in RowGroup's
     // canonical declaration order (EncoderTurn < EncoderPush < EncoderMode <
-    // EncoderStep < AnalogGesture < AnalogSceneBlend < System -- the same
-    // order SectionRows()/InsertionIndexForGroup use, matching section
-    // display order): every group for which GroupSupportsAdd(controllerIx,
-    // section, group) is true. Today that is exactly {EncoderTurn,
-    // EncoderPush} for Encoders, {AnalogGesture} for Analogs, and {System}
-    // for SystemMessages -- config-level groups (EncoderMode/EncoderStep/
-    // AnalogSceneBlend) never appear here, same as GroupSupportsAdd's own
-    // refusal for them.
+    // EncoderStep < AnalogGesture < AnalogAppAction < AnalogSceneBlend <
+    // System -- the same order SectionRows()/InsertionIndexForGroup use,
+    // matching section display order): every group for which
+    // GroupSupportsAdd(controllerIx, section, group) is true. Today that is
+    // exactly {EncoderTurn, EncoderPush} for Encoders, {AnalogGesture} (plus
+    // {AnalogAppAction} when AnalogActionCatalog() is non-empty) for
+    // Analogs, and {System} for SystemMessages -- config-level groups
+    // (EncoderMode/EncoderStep/AnalogSceneBlend) never appear here, same as
+    // GroupSupportsAdd's own refusal for them.
     //
-    // sru-11 "empty group still offers add": SectionRows()' row-walk in
+    // "empty group still offers add": SectionRows()' row-walk in
     // ControllersPage.hpp's SectionBody only emits a RowGroupHeader (and
     // therefore a "+"/"+B" affordance) for a group that has at least one
     // ROW -- so a group with zero existing mappings (or a whole empty
@@ -554,10 +643,10 @@ public:
     // (AddableGroups above) renders the right columns even though no row
     // exists yet to read them off of. Single source of truth shared with
     // BuildSectionRows()'s own per-group field tables (encoders: Channel,
-    // Cc, SlotIx, Position; analog gesture: Channel, Cc, GestureIx; system:
-    // SystemRowEditableFields(kind), i.e. SystemAddressSchema(kind)'s fields
-    // plus MessageKind/MessageArg) so the two can
-    // never drift apart.
+    // Cc, SlotIx, Position; analog gesture: Channel, Cc, GestureIx; analog
+    // app action: Channel, Cc, AppAction; system: SystemRowEditableFields(kind),
+    // i.e. SystemAddressSchema(kind)'s fields plus MessageKind/MessageArg) so
+    // the two can never drift apart.
     // `group` need not be addable (AddableGroups/GroupSupportsAdd) -- this
     // answers "what would this group's columns be," independent of whether
     // adding into it is currently legal; callers needing the addable subset
@@ -568,46 +657,15 @@ public:
     std::vector<MidiMappingRowVM::Field> GroupColumnFields(std::size_t controllerIx, MidiConfigSection section,
                                                            MidiMappingRowVM::RowGroup group) const;
 
-    // --- Launchpad controller-variant selector (label-launchpad-brief.md
-    // Change 2) -----------------------------------------------------------
-    //
-    // LaunchpadGridPosition::controller is stored PER grid position (every
-    // launchpad-kind system-message association's `launchpadPosition`), not
-    // once per slot -- but every position in a given controller slot is
-    // expected to agree (a physical Launchpad is one specific variant), so
-    // the slot-level "current variant" the renderer shows is read from the
-    // FIRST launchpad association's controller, and a change rewrites EVERY
-    // association's controller together (see SetLaunchpadVariant below).
-
-    // The slot's current Launchpad variant as a LaunchpadVariantCatalog()
-    // index, read from the first launchpad association's
-    // `launchpadPosition->controller` (default index 0 / LaunchpadX when the
-    // slot has no launchpad associations at all -- an empty Launchpad system
-    // section, or a section not yet expanded/read). Returns -1 for an
-    // out-of-range controllerIx or a controller whose kind is not
-    // MidiProfileKind::Launchpad.
-    int LaunchpadVariantIndex(std::size_t controllerIx) const;
-
-    // Rewrites EVERY launchpad association's `launchpadPosition->controller`
-    // in this slot's system messages to LaunchpadVariantCatalog()[variantIndex]
-    // -- e.g. switching X -> Pro MK3 widens the addressable grid; Pro MK3 ->
-    // X (or Mini MK3) can shrink it. All-or-nothing (sru-10's block-commit
-    // convention, applied here to the whole slot): each existing position's
-    // (x, y) is validated against the NEW variant's shape via
-    // LaunchpadShapeSupports before anything is written; if any position
-    // would fall outside the new variant's grid, the whole rewrite is
-    // refused (`out` untouched) with a reason identifying an offending
-    // position (e.g. "position (x, y) is not valid on <variant name>"), so a
-    // shrink (e.g. Pro MK3 -> X) that would silently drop an edge button is
-    // never allowed to partially apply. On success, every position's
-    // controller is rewritten, NormalizeMidiProfileConfig runs (sru-9), and
-    // `out` holds the fully edited instrument -- same "host commits `out`
-    // via EditInstrument, then Rebuild()s again" contract as every other
-    // mutating method on this class. Returns false (out untouched) for an
-    // out-of-range controllerIx, a non-Launchpad-kind controller, or an
-    // out-of-range variantIndex (< 0 or >= LaunchpadVariantCatalog().size()).
-    bool SetLaunchpadVariant(std::size_t controllerIx, int variantIndex, MidiInstrumentConfig& out,
-                            std::string* reason = nullptr) const;
+    // Re-keys the per-row UI caches (expand state and section presentations)
+    // from `from` to `to` after a controller is renamed. Both caches are
+    // keyed by controller name because that is the only stable-enough handle
+    // Rebuild() has across a rebuild; without this call a rename would look,
+    // to those name-keyed maps, exactly like `from` disappearing and `to`
+    // appearing fresh, so the row's expand/section state would be silently
+    // discarded by Rebuild()'s own orphan sweeps. Calling this before the
+    // next Rebuild() keeps that state attached to the renamed row instead.
+    void NoteControllerRenamed(const std::string& from, const std::string& to);
 
 private:
     struct ExpandState {
@@ -629,6 +687,11 @@ private:
     MidiInstrumentConfig instrument_;
     MidiConnectionState connection_;
     std::vector<MidiControllerRowVM> controllers_;
+    std::vector<UISystemMessageChoice> messageCatalog_ = UISystemMessageCatalog();
+    std::vector<UISystemMessageChoice> analogActionCatalog_;
+    // Empty means "use the default registry"; Layouts() resolves that
+    // default lazily so this header need not depend on ControllerWizard.hpp.
+    std::vector<ControllerWizardDescriptor> layouts_;
     std::map<std::string, ExpandState> expandState_;
     // `mutable`: SectionRows() is const (matching its pre-existing contract
     // used throughout the renderer/tests) but must lazily build a missing

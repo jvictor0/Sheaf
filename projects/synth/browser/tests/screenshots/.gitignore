@@ -1,6 +1,5 @@
 # sru-48 as amended: appearance is agreed once with a human and never pinned, so
-# iteration-loop captures are working artifacts and are never committed. The two
-# runtime-shell images above predate that amendment and are referenced by name.
+# iteration-loop captures are working artifacts and are never committed.
 # Task 18 re-added a whole loop's worth by accident; this makes that impossible
 # rather than relying on the next person noticing.
 task17-*.png

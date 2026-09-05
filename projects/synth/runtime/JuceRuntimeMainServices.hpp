@@ -74,6 +74,10 @@ public:
         };
         callbacks.setStatus = [](std::string) {};
         callbacks.onBack = std::move(onBack);
+        callbacks.messageCatalog = synth::MakeUISystemMessageChoices(runtime_.GetEngine().MidiCatalog());
+        callbacks.analogActionCatalog = synth::MakeAnalogAppActionChoices(runtime_.GetEngine().MidiCatalog());
+        callbacks.layouts = synth::MakeControllerWizardRegistry(runtime_.GetEngine().MidiCatalog());
+        wizardDiscoveryCache_.SetRegistry(callbacks.layouts);
         return callbacks;
     }
 
@@ -106,16 +110,20 @@ public:
                 }
             }
 
-            snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(outputNames);
-            snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(inputNames);
+            snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+                outputNames,
+                {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+            snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+                inputNames,
+                {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
             audioSyncPending_ = false;
         }
 
         const synth::AudioDeviceState state = runtime_.GetEngine().AudioDeviceSnapshot();
         snapshot.selectedOutputId = synth::runtime_ui::Layout::SelectedDeviceOptionId(
-            state.outputDeviceName, snapshot.outputOptions);
+            state.outputDeviceName, snapshot.outputOptions, synth::runtime_ui::kSystemDefaultOptionId);
         snapshot.selectedInputId = synth::runtime_ui::Layout::SelectedDeviceOptionId(
-            state.inputDeviceName, snapshot.inputOptions);
+            state.inputDeviceName, snapshot.inputOptions, synth::runtime_ui::kNoInputOptionId);
 
         if (juce::AudioIODevice* device = deviceManager.getCurrentAudioDevice(); device != nullptr)
         {

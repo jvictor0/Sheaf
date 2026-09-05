@@ -53,6 +53,13 @@ struct Color {
     static const Color Grey;
 };
 
+// The app-wide surface background painted by the window root fill and the
+// encoder cell fill. The browser site's CSS carries the same colour as
+// `#121416` in browser/public/synth-browser.css (pinned by
+// browser/tests/static-site.spec.ts), which cannot read this constant --
+// change both together.
+inline constexpr Color kSurfaceBackground = Color::Rgb(18, 20, 22);
+
 struct HsvColor {
     float hueTurns = 0.0f;
     float saturation = 0.0f;

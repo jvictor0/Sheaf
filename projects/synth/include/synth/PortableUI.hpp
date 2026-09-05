@@ -289,6 +289,23 @@ public:
     virtual void DispatchAction(const Action& action) = 0;
 };
 
+// Optional capability (sprs-13): a Surface that resolves its BuildTree()
+// output against a caller-supplied live content extent rather than a
+// compiled-in size. Base Surface stays extent-free -- accessors like
+// SynthApplication::PortableSurface() are constrained to return exactly
+// `Surface&`, erasing the concrete type, so a compile-time trait on that
+// accessor's result can never see anything beyond the base interface. A
+// runtime check against this separate, polymorphic interface is the
+// detection idiom that still works through that erasure: the shell
+// dynamic_casts the Surface& it already holds, and a surface that doesn't
+// additionally derive from ExtentAwareSurface simply resolves BuildTree()
+// at its own compiled-in size (composition unchanged).
+class ExtentAwareSurface {
+public:
+    virtual ~ExtentAwareSurface() = default;
+    virtual void SetContentExtent(Bounds extent) = 0;
+};
+
 inline DrawCommand DrawCommand::Fill(Color color) {
     DrawCommand command;
     command.kind = Kind::Fill;
