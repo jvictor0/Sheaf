@@ -7,9 +7,8 @@ site's spec explicitly required labels before Play).
 ## ADDED Requirements
 
 ### Requirement: sru-48 — UI frames reflect parameter state without the audio pump
-WHEN a UI frame is built before audio has ever started, or while the
-audio pump is quiescent, THE frame SHALL reflect current parameter
-state — names, values, and draw commands — identical in content to a
+THE frame SHALL reflect current parameter state WHEN it is built before audio has ever started, or while the audio pump is quiescent —
+names, values, and draw commands — identical in content to a
 frame built after the audio pump has published, and the population
 path SHALL preserve a single writer for the UI-state buffers at every
 instant (message-thread population only while the audio pump is
