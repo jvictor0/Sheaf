@@ -19,7 +19,6 @@
 #include "synth/MidiController.hpp"
 #include "synth/MidiReconcile.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -29,18 +28,18 @@
 
 namespace synth {
 
-// 256-slot ring buffer tracking a rolling maximum. Message-thread only (no
-// atomics) -- callers write once per UI timer tick and read back for display
-// (e.g. the sidebar's deadline readout, sru-2). Once 256 values have been
-// written, each new Write() overwrites the oldest slot, so the max "forgets"
-// spikes older than the last 256 writes.
-struct RollingMax256 {
-    static constexpr std::size_t kCapacity = 256;
+// Ring buffer tracking a rolling maximum over its last `capacity` writes.
+// Message-thread only (no atomics) -- callers write once per UI timer tick
+// and read back for display (e.g. the sidebar's deadline readout, sru-2).
+// Once `capacity` values have been written, each new Write() overwrites the
+// oldest slot, so the max "forgets" spikes older than the window.
+struct RollingMax {
+    explicit RollingMax(std::size_t capacity) : values_(capacity < 1 ? 1 : capacity) {}
 
     void Write(float v) {
         values_[next_] = v;
-        next_ = (next_ + 1) % kCapacity;
-        if (filled_ < kCapacity) {
+        next_ = (next_ + 1) % values_.size();
+        if (filled_ < values_.size()) {
             ++filled_;
         }
     }
@@ -58,10 +57,21 @@ struct RollingMax256 {
     }
 
 private:
-    std::array<float, kCapacity> values_{};
+    std::vector<float> values_;
     std::size_t next_ = 0;
     std::size_t filled_ = 0;
 };
+
+// The deadline readout's rolling window: about one second of UI frames --
+// long enough that even a single-frame spike stays on screen for many
+// redraws after it happens, short enough that it is gone well before a
+// reader could mistake a startup transient for the current load. UI frame
+// rate is per application (`RuntimeConfig::uiFrameHz`), so the window is
+// sized from that rate rather than a fixed frame count.
+inline std::size_t DeadlineWindowCapacity(int uiFrameHz) {
+    const int hz = uiFrameHz > 0 ? uiFrameHz : 30;
+    return static_cast<std::size_t>(hz);
+}
 
 // One editable row rendered inside a section's mapping list.
 //

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { findBrowserRoot } from "./helpers/browser-root.mjs";
 
 test("browser scaffold test runner is active", () => {
@@ -113,13 +114,13 @@ test("emscripten exports pre-creation browser contract version functions", async
   }
 });
 
-test("emscripten exports browser ABI v4 audio input functions", async () => {
+test("emscripten exports browser ABI v6 audio input functions", async () => {
   const makefile = await readBuilder();
   for (const name of [
     "_synth_browser_audio_input_channels",
     "_synth_browser_set_audio_input_source",
     "_synth_browser_clear_audio_input_source",
-    "_synth_browser_consume_audio_input_retry",
+    "_synth_browser_consume_pending_audio_request",
   ]) {
     assert.match(makefile, new RegExp(`\\"${name}\\"`));
   }
@@ -168,3 +169,60 @@ async function readBuilder() {
 async function readBrowserMakefile() {
   return await readFile(path.join(await findBrowserRoot(), "Makefile"), "utf8");
 }
+
+// static-server.mjs is loaded from two depths: `src/`, where Playwright
+// launches it, and `dist/src/`, the compiled copy frogg3rs's serve-site.mjs
+// imports for contentTypeForPath. A path resolved from one depth is wrong at
+// the other, and the wrong one reached for dist/dist/src/protocol.js. That
+// resolved on a machine carrying a stale nested dist and 404'd on a clean
+// checkout, so it passed every local run and took the published site down.
+// Both copies are loaded here, against the same tree the site is built from.
+test("the compiled static server loads the way the site's own tooling loads it", async () => {
+  const browserRoot = await findBrowserRoot();
+  for (const relativePath of ["src/static-server.mjs", "dist/src/static-server.mjs"]) {
+    const module = await import(pathToFileURL(path.join(browserRoot, relativePath)).href);
+    assert.equal(
+      typeof module.contentTypeForPath,
+      "function",
+      `${relativePath} did not load; a path it resolves is wrong at that depth`,
+    );
+  }
+});
+
+// tsc compiling its own output produces dist/dist, which is gitignored, so it
+// exists only where someone has built before and never on a fresh checkout.
+// While it is there it satisfies exactly the wrong lookups, which is what let
+// the failure above stay invisible locally.
+test("the build has not compiled its own output into a nested dist", async () => {
+  const browserRoot = await findBrowserRoot();
+  await assert.rejects(
+    access(path.join(browserRoot, "dist", "dist")),
+    "dist/dist exists: tsc has taken its own output as input, and it will answer lookups no clean checkout can",
+  );
+});
+
+// The site packager copies dist/src/*.js into the browser runtime and drops
+// .mjs, which it treats as Node-only tooling. That invariant is sound and
+// invisible: a browser-fetched module importing a .mjs still typechecks,
+// still runs under Node, and only fails once the page tries to load it --
+// as 48 e2e timeouts rather than an error naming the file. So the import
+// graph the browser actually fetches is walked here instead.
+test("no browser-fetched module imports a Node-only .mjs", async () => {
+  const browserRoot = await findBrowserRoot();
+  const { browserRuntimeModules } = await import(
+    pathToFileURL(path.join(browserRoot, "dist", "src", "publish-site.mjs")).href
+  );
+  const offenders = [];
+  for (const moduleName of browserRuntimeModules) {
+    if (!moduleName.endsWith(".js")) continue;
+    const source = await readFile(path.join(browserRoot, "dist", "src", moduleName), "utf8");
+    for (const [, specifier] of source.matchAll(/from\s+"([^"]+)"/g)) {
+      if (specifier.endsWith(".mjs")) offenders.push(`${moduleName} -> ${specifier}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "these ship to the browser but import a module the packager does not copy",
+  );
+});

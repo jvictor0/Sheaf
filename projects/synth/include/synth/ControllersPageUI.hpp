@@ -435,6 +435,33 @@ inline constexpr const char* kControllerRemoveBlacklist = "runtime.controllers.c
 inline constexpr const char* kControllerConfigure = "runtime.controllers.controller.configure";
 inline constexpr const char* kControllerReconfigure = "runtime.controllers.controller.reconfigure";
 
+// The fixed part of what the Controllers page emits. The per-controller and
+// wizard-step actions above are not listed: they are matched by prefix, because
+// their names carry a controller index the page composes at build time and no
+// fixed set can hold them.
+inline constexpr std::string_view kControllersActions[] = {
+    kBack,
+    kToggleConfig,
+    kToggleSection,
+    kEndpointSelect,
+    kVariantSelect,
+    kMappingFieldCommit,
+    kDeleteRow,
+    kAddSingle,
+    kAddBlock,
+    kAddNameDraft,
+    kAddKindDraft,
+    kAddController,
+    kAvailableConfigure,
+    kAvailableIgnore,
+    kWizardOpen,
+    kWizardChoose,
+    kWizardBack,
+    kWizardCancel,
+    kWizardSubmit,
+    kWizardIgnore,
+};
+
 }  // namespace Actions
 
 namespace ControllersLayout {
