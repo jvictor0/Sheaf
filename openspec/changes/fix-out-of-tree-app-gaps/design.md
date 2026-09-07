@@ -32,7 +32,7 @@ once, globally, instead).
 
 ## sru-59 (#2 item 1) — labeled deadline meter
 
-- `FormatDeadlineText` (`RuntimePages.hpp:294`) prefixes `CPU ` in the
+- `FormatDeadlineText` (`RuntimePages.hpp:294`) prefixes `DSP ` in the
   rendered string; the `StatusText` emission site (`:669`) is unchanged.
 - Prefix over caption row: the meter lives in dense sidebar chrome where a
   second node changes layout; four characters answer the actual confusion.

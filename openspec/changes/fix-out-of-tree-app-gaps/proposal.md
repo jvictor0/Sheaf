@@ -54,7 +54,7 @@ backend changes behavior unless it opts in:
   - `sprs-17` (#8): an app may register one additional sidebar page (id,
     title, tree builder) alongside Audio/Controllers/Sync/File.
 - **synth-runtime-ui** (`sru-59`…`sru-61`):
-  - `sru-59` (#2): the deadline meter is labeled (`CPU ` prefix).
+  - `sru-59` (#2): the deadline meter is labeled (`DSP ` prefix).
   - `sru-60` (#3): `ControlStyle` gains caption placement Before (default) /
     After.
   - `sru-61` (#6): the UI-boundary check completes under macOS bash 3.2.57

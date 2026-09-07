@@ -877,7 +877,7 @@ test("real miniapp WASM runs DSP from the runtime-owned AudioWorklet callback", 
           const started = await runtime.startAudioWorklet();
           if (started.type !== "ok") throw new Error(started.error ?? `unexpected audio response ${started.type}`);
           const deadline = performance.now() + 5_000;
-          let latest = { blocks: 0, peakMicrounits: 0, deadlineMicrounits: 0, deadlineText: "CPU 0%" };
+          let latest = { blocks: 0, peakMicrounits: 0, deadlineMicrounits: 0, deadlineText: "DSP 0%" };
           while (performance.now() < deadline) {
             latest = await request({ type: "audio-worklet-stats" }, "audio-worklet-stats");
             await request({ type: "message-tick", timestampMicros: Math.round(performance.now() * 1000) }, "ok");
@@ -885,7 +885,7 @@ test("real miniapp WASM runs DSP from the runtime-owned AudioWorklet callback", 
             const frame = decodeCommandBuffer(Uint8Array.from(frameResponse.frame).buffer);
             const deadlineNode = frame.nodes.find((node: any) => node.id === "runtime.sidebar.deadline");
             latest.deadlineText = deadlineNode?.text ?? "";
-            if (latest.blocks >= 4 && latest.peakMicrounits > 0 && latest.deadlineMicrounits > 0 && latest.deadlineText !== "CPU 0%") break;
+            if (latest.blocks >= 4 && latest.peakMicrounits > 0 && latest.deadlineMicrounits > 0 && latest.deadlineText !== "DSP 0%") break;
             await new Promise((pollResolve) => setTimeout(pollResolve, 25));
           }
           await request({ type: "destroy" }, "destroyed");
@@ -904,7 +904,7 @@ test("real miniapp WASM runs DSP from the runtime-owned AudioWorklet callback", 
   expect(stats.blocks).toBeGreaterThanOrEqual(4);
   expect(stats.peakMicrounits).toBeGreaterThan(0);
   expect(stats.deadlineMicrounits).toBeGreaterThan(0);
-  expect(stats.deadlineText).not.toBe("CPU 0%");
+  expect(stats.deadlineText).not.toBe("DSP 0%");
 });
 
 test("runtime-owned AudioWorklet applies browser-time encoder actions promptly", async ({ page }) => {

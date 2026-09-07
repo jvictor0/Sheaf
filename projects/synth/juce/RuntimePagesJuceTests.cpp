@@ -84,7 +84,7 @@ int main()
     sidebarSurface.SetDeadlinePercent(9.0f);
     sidebarRenderer.RefreshFromSurface();
     const synth::ui::NodeTree refreshedSidebar = sidebarSurface.BuildTree();
-    Require(FindNodeById(refreshedSidebar, synth::runtime_ui::NodeIds::kSidebarDeadline)->text == "CPU 9%",
+    Require(FindNodeById(refreshedSidebar, synth::runtime_ui::NodeIds::kSidebarDeadline)->text == "DSP 9%",
             "sidebar deadline refresh updates semantic node");
 
     // sru-2 / sru-33: the Controllers warning marker is a portable node the

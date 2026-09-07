@@ -848,7 +848,7 @@ void TestRefreshUpdatesRuntimePageModelsAndRollingDeadline()
     const synth::ui::Node* deadline = FindNodeById(
         fixture.component.BuildTree(), synth::runtime_ui::NodeIds::kSidebarDeadline);
     Require(deadline != nullptr, "deadline node exists after refresh");
-    Require(deadline->text == "CPU 12%", "sidebar displays rolling deadline maximum");
+    Require(deadline->text == "DSP 12%", "sidebar displays rolling deadline maximum");
 }
 
 void TestSidebarWarningReflectsControllersDiscoverySnapshot()

@@ -48,7 +48,7 @@ column (`Layout::kSidebarWidth`) it has today.
 - Affected code: as above; no backend-specific change (both JUCE and
   browser hosts read the same formatted string off the same node).
 - Backward compatibility: the readout still shows the running maximum,
-  still labeled `CPU `; only the hold duration and the decimal
+  still labeled `DSP `; only the hold duration and the decimal
   precision change. A single-frame spike is still on screen for many
   redraws after it happens (about a second at the runtime's default
   30 Hz), so it stays readable by eye.

@@ -25,7 +25,7 @@
 - `FormatDeadlineText` (`RuntimePages.hpp`) drops from `%.1f` to
   `%.0f`. A held maximum has no tenth-of-a-percent accuracy, and
   dropping the decimal is what lets three digits fit the 96px sidebar
-  column (`Layout::kSidebarWidth`). The label stays `CPU ` (`sru-59`);
+  column (`Layout::kSidebarWidth`). The label stays `DSP ` (`sru-59`);
   only the number's precision changes.
 
 ## Testing
@@ -49,4 +49,4 @@
   half to even) was moved off it rather than asserting the rounded
   result of a boundary value.
 - `browser/tests/audio-flow.spec.ts`: the `"CPU 0.0%"` sentinel becomes
-  `"CPU 0%"` at all three occurrences.
+  `"DSP 0%"` at all three occurrences.

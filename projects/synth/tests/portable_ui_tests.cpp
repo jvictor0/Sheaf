@@ -3592,7 +3592,7 @@ static void TestSidebarDeadlineNodeTextIsWholePercent()
     const synth::ui::NodeTree tree = synth::runtime_ui::BuildSidebarTree(snapshot);
     const synth::ui::Node* deadline = FindNodeById(tree, synth::runtime_ui::NodeIds::kSidebarDeadline);
     Require(deadline != nullptr, "sidebar deadline node exists");
-    Require(deadline->text == "CPU 12%",
+    Require(deadline->text == "DSP 12%",
             "the sidebar's own tree carries the whole-percent text, not a tenth");
 }
 
@@ -4380,7 +4380,7 @@ int main()
     Require(FindNodeById(sidebarTree, synth::runtime_ui::NodeIds::kSidebarDeadline) != nullptr,
             "sidebar deadline node");
     const synth::ui::Node* deadlineNode = FindNodeById(sidebarTree, synth::runtime_ui::NodeIds::kSidebarDeadline);
-    Require(deadlineNode->text == "CPU 12%", "deadline readout text");
+    Require(deadlineNode->text == "DSP 12%", "deadline readout text");
     // Re-pinned, not loosened, when the sidebar moved onto the library (7.1):
     // the Controllers entry is now a row so its warning badge can be an
     // out-of-flow overlay in the row's own space, so the root's second child is
@@ -4596,7 +4596,7 @@ int main()
     synth::runtime_ui::SidebarSurface sidebarSurface;
     sidebarSurface.SetDeadlinePercent(3.0f);
     const synth::ui::NodeTree sidebarBuilt = sidebarSurface.BuildTree();
-    Require(FindNodeById(sidebarBuilt, synth::runtime_ui::NodeIds::kSidebarDeadline)->text == "CPU 3%",
+    Require(FindNodeById(sidebarBuilt, synth::runtime_ui::NodeIds::kSidebarDeadline)->text == "DSP 3%",
             "sidebar surface deadline refresh");
 
     synth::runtime_ui::AudioPageSurface audioSurface;

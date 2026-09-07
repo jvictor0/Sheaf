@@ -26,7 +26,7 @@ omni-rule: implementation/review on the lightest capable model.
 
 ## 2. sru-59 — label the deadline meter (#2 item 1)
 
-- [x] 2.1 `CPU ` prefix in `FormatDeadlineText` (`RuntimePages.hpp:294`);
+- [x] 2.1 `DSP ` prefix in `FormatDeadlineText` (`RuntimePages.hpp:294`);
       update any test pinning the rendered string.
 
 ## 3. sar-34 — plist/executable guard (#3 item 1)

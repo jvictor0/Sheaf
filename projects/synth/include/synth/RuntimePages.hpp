@@ -434,7 +434,7 @@ inline ui::Bounds SidebarRootBounds(bool hasRegisteredPage = false)
 inline std::string FormatDeadlineText(float percent)
 {
     char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "CPU %.0f%%", static_cast<double>(percent));
+    std::snprintf(buffer, sizeof(buffer), "DSP %.0f%%", static_cast<double>(percent));
     return buffer;
 }
 
@@ -814,7 +814,7 @@ inline ui::NodeTree BuildSidebarTree(const SidebarSnapshot& snapshot)
                    sidebarRow());
     // sprs-17: the app-registered page's button, placed after File and
     // before the deadline readout -- a page button among page buttons,
-    // ahead of the CPU status line that closes the column regardless of
+    // ahead of the DSP status line that closes the column regardless of
     // page count. Absent when no page is registered, so the sidebar is
     // otherwise byte-identical to before this field existed.
     if (snapshot.registeredPageTitle.has_value())

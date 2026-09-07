@@ -5,12 +5,12 @@
 ### Requirement: sru-59 — Chrome: deadline meter is labeled
 
 THE runtime sidebar's deadline meter SHALL render its percentage with a
-`CPU ` label so the figure is identifiable without prior knowledge.
+`DSP ` label so the figure is identifiable without prior knowledge.
 
 #### Scenario: labeled rendering
 
 - **WHEN** the sidebar renders the deadline meter at any value
-- **THEN** the rendered text carries the `CPU ` prefix before the percentage
+- **THEN** the rendered text carries the `DSP ` prefix before the percentage
 
 ### Requirement: sru-60 — Components: caption placement before or after
 
