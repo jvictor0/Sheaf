@@ -195,6 +195,6 @@ Builds run under `nice`, `-j2`.
 
 ## 7. Deliver
 
-- [ ] 7.1 Commit on this branch, push to the fork, open the next pull
+- [x] 7.1 Commit on this branch, push to the fork, open the next pull
       request against upstream `main`.
-- [ ] 7.2 After the pull request, frogg3rs moves its submodule pin.
+- [x] 7.2 After the pull request, frogg3rs moves its submodule pin.
