@@ -36,6 +36,7 @@ const EXPORTED_FUNCTIONS = [
   "_synth_browser_submit_audio_devices",
   "_synth_browser_dequeue_midi_action", "_synth_browser_deliver_midi",
   "_synth_browser_dequeue_midi_output", "_synth_browser_midi_diagnostics",
+  "_synth_browser_dequeue_file_export",
   "_synth_browser_destroy",
 ];
 

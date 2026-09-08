@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -123,6 +124,15 @@ public:
         ++dispatchCount;
         lastAction = action.name;
         lastValue = action.value;
+        if (action.name == "valid.export")
+        {
+            pendingExports.push_back(synth::FileExport{
+                .fileName = "probe.txt",
+                .mediaType = "text/plain",
+                .bytes = std::vector<std::uint8_t>{'h', 'e', 'l', 'l', 'o'},
+                .note = "",
+            });
+        }
         if (handler_)
         {
             handler_(action);
@@ -132,6 +142,7 @@ public:
     int dispatchCount = 0;
     std::string lastAction;
     std::string lastValue;
+    std::deque<synth::FileExport> pendingExports;
 
 private:
     ActionHandler handler_;
@@ -238,6 +249,17 @@ public:
         preparedBlockSize = blockSize;
     }
     synth::ui::Surface& PortableSurface() { return surface; }
+
+    std::optional<synth::FileExport> TakePendingFileExport()
+    {
+        if (surface.pendingExports.empty())
+        {
+            return std::nullopt;
+        }
+        synth::FileExport fileExport = std::move(surface.pendingExports.front());
+        surface.pendingExports.pop_front();
+        return fileExport;
+    }
 
     ContractSurface surface;
     synth::ParameterId probeId = 0;
@@ -1259,6 +1281,7 @@ public:
     int SubmitMidiEndpoints(const synth_browser::MidiEndpointDescriptor*, std::uint32_t) override { return 0; }
     int SubmitAudioDevices(const synth_browser::AudioDeviceDescriptor*, std::uint32_t) override { return 0; }
     int DequeueMidiAction(synth_browser::MidiActionDescriptor*) override { return 0; }
+    int DequeueFileExport(synth_browser::FileExportDescriptor*) override { return 0; }
     int DeliverMidi(std::uint32_t, const std::uint8_t*, std::uint32_t, std::uint64_t) override { return 0; }
     const std::uint8_t* DequeueMidiOutput(synth_browser::MidiOutputDescriptor*) override { return nullptr; }
     int MidiDiagnostics(synth_browser::MidiDiagnosticsDescriptor*) override { return 0; }
@@ -2195,6 +2218,32 @@ void TestMidiDiagnosticsDescriptorAndTimestampEpochOffsetContract()
             "runtime retains the signed document-to-worker epoch offset before startup");
 }
 
+void TestBrowserRuntimeDequeuesQueuedFileExportsInOrder()
+{
+    RuntimeFixture fixture;
+
+    Require(!fixture.runtime.DequeueFileExport().has_value(),
+            "no file export is queued right after start");
+
+    fixture.runtime.DispatchAction("valid.export", "");
+    fixture.runtime.DispatchAction("valid.export", "");
+    fixture.runtime.MessageTick(2);
+
+    const std::optional<synth::FileExport> first = fixture.runtime.DequeueFileExport();
+    Require(first.has_value(), "the first queued export is dequeued");
+    Require(first->fileName == "probe.txt", "the dequeued export carries its file name");
+    Require(first->mediaType == "text/plain", "the dequeued export carries its media type");
+    Require(first->bytes == std::vector<std::uint8_t>({'h', 'e', 'l', 'l', 'o'}),
+            "the dequeued export carries its bytes");
+
+    const std::optional<synth::FileExport> second = fixture.runtime.DequeueFileExport();
+    Require(second.has_value(), "the second queued export is dequeued");
+    Require(second->fileName == "probe.txt", "the second dequeued export carries its file name");
+
+    Require(!fixture.runtime.DequeueFileExport().has_value(),
+            "the queue is empty once both exports have been dequeued");
+}
+
 }  // namespace
 
 int main()
@@ -2243,5 +2292,6 @@ int main()
     TestAudioWorkletDeadlineMeterAveragesQuantizedTimerSamples();
     TestMidiOutputDescriptorHasStableWasmLayout();
     TestMidiDiagnosticsDescriptorAndTimestampEpochOffsetContract();
+    TestBrowserRuntimeDequeuesQueuedFileExportsInOrder();
     return 0;
 }

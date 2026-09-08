@@ -1848,6 +1848,72 @@ void TestEncoderGroupHeaderSeparatesLastColumnFromAddButton()
                       "Push header: add_single to add_block keeps kEditorColumnGap");
 }
 
+void TestSystemMessageShiftFieldRendersAndCommits()
+{
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.SetContentBounds({0.0f, 0.0f, 1000.0f, 800.0f});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // Controller 2 ("blank") is MakeGenericSlot()'s untouched default -- no
+    // system messages at all, so AddSingle seeds the row this test edits.
+    constexpr std::size_t controllerIx = 2;
+    surface.ViewModel().ToggleConfig(controllerIx);
+    surface.ViewModel().ToggleSection(controllerIx, synth::MidiConfigSection::SystemMessages);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddSingle,
+                                                        "2:system_messages:system"));
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    const std::vector<synth::MidiMappingRowVM> rows =
+        surface.ViewModel().SectionRows(controllerIx, synth::MidiConfigSection::SystemMessages);
+    Require(!rows.empty(), "add single creates a system row");
+    Require(std::find(rows[0].editableFields.begin(), rows[0].editableFields.end(),
+                      synth::MidiMappingRowVM::Field::ShiftAction) != rows[0].editableFields.end(),
+            "fresh system row exposes the Shift field");
+
+    const synth::ui::NodeTree tree = surface.BuildTree();
+    const synth::ui::Node* shiftCombo = FindNodeById(
+        tree, synth::runtime_ui::NodeIds::MappingField(controllerIx, synth::MidiConfigSection::SystemMessages, 0,
+                                                        synth::MidiMappingRowVM::Field::ShiftAction));
+    Require(shiftCombo != nullptr, "system row's Shift combo renders");
+    Require(shiftCombo->kind == synth::ui::NodeKind::ComboBox, "Shift field renders as a combo box");
+    Require(shiftCombo->options.size() == surface.ViewModel().ShiftCatalog().size(),
+            "Shift combo offers every ShiftCatalog() choice");
+    Require(shiftCombo->selectedOption == "0", "a fresh row's Shift combo starts at (none)");
+
+    const std::vector<synth::UISystemMessageChoice>& shiftCatalog = surface.ViewModel().ShiftCatalog();
+    Require(shiftCatalog.size() > 1, "fixture's ShiftCatalog offers at least one real choice besides (none)");
+    constexpr int kShiftChoiceIx = 1;
+
+    const std::string commitValue =
+        std::to_string(controllerIx) + ":system_messages:0:" +
+        std::to_string(static_cast<int>(synth::MidiMappingRowVM::Field::ShiftAction)) + ":" +
+        std::to_string(kShiftChoiceIx);
+    const int commitsBefore = harness.commits;
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kMappingFieldCommit, commitValue));
+    Require(harness.commits == commitsBefore + 1, "Shift field commit persists through the normal commit path");
+
+    const synth::MidiControllerSystemMessageAssociation& committed =
+        harness.instrument.controllers[controllerIx].config.systemMessages[0];
+    Require(committed.shiftedPress.has_value(), "committed association carries a shifted press");
+
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::Node* shiftComboAfter = FindNodeById(
+        surface.BuildTree(), synth::runtime_ui::NodeIds::MappingField(
+                                 controllerIx, synth::MidiConfigSection::SystemMessages, 0,
+                                 synth::MidiMappingRowVM::Field::ShiftAction));
+    Require(shiftComboAfter != nullptr && shiftComboAfter->selectedOption == std::to_string(kShiftChoiceIx),
+            "Shift combo reflects the committed choice after rebuild");
+}
+
 }  // namespace
 
 int main()
@@ -1874,6 +1940,7 @@ int main()
     TestRelabellingIsCosmeticForReleasedRecords();
     TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence();
     TestEncoderGroupHeaderSeparatesLastColumnFromAddButton();
+    TestSystemMessageShiftFieldRendersAndCommits();
 
     TestHarness harness;
     synth::runtime_ui::ControllersPageSurface surface = harness.MakeSurface();

@@ -177,6 +177,28 @@ MidiControllerProfileConfig MakeHoldDrillProfileConfig(synth::EncoderMode mode) 
     return config;
 }
 
+// A Shift button (cc 30) plus two app-action buttons: cc 21 carries a
+// shifted press (a different app action), cc 22 has none and always does
+// its ordinary job.
+MidiControllerProfileConfig MakeShiftProfileConfig() {
+    MidiControllerProfileConfig config;
+    config.systemMessages.push_back({
+        .control = MidiControlAddress{.channel = 0, .cc = 30},
+        .press = synth::MessageIn::Shift(0, true),
+        .release = synth::MessageIn::Shift(0, false),
+    });
+    MidiControllerSystemMessageAssociation withShiftedPress;
+    withShiftedPress.control = MidiControlAddress{.channel = 0, .cc = 21};
+    withShiftedPress.press = synth::MessageIn::AppAction(0, 1, 0.0f);
+    withShiftedPress.shiftedPress = synth::MessageIn::AppAction(0, 2, 0.0f);
+    config.systemMessages.push_back(withShiftedPress);
+    MidiControllerSystemMessageAssociation withoutShiftedPress;
+    withoutShiftedPress.control = MidiControlAddress{.channel = 0, .cc = 22};
+    withoutShiftedPress.press = synth::MessageIn::AppAction(0, 3, 0.0f);
+    config.systemMessages.push_back(withoutShiftedPress);
+    return config;
+}
+
 TEST_CASE(KindNameRoundTrip) {
     REQUIRE_TRUE(std::string(synth::MidiProfileKindName(MidiProfileKind::WrldBldr)) == "wrldbldr");
     REQUIRE_TRUE(std::string(synth::MidiProfileKindName(MidiProfileKind::MfTwister)) == "twister");
@@ -556,6 +578,82 @@ TEST_CASE(HoldDrillResetsDrilledFlagsOnEachNewHold) {
     REQUIRE_TRUE(bus.Pop(second, std::numeric_limits<std::uint64_t>::max()));
     REQUIRE_TRUE(second.type == synth::MessageIn::Type::ParamPush);
     REQUIRE_TRUE(second.position == 4);
+    REQUIRE_TRUE(bus.Size() == 0);
+}
+
+TEST_CASE(ShiftHeldSwapsPressForShiftedPressAndReleaseClearsIt) {
+    synth::MessageInBus bus(nullptr, 16);
+    auto config = MakeShiftProfileConfig();
+    auto chain = synth::CreateMidiControllerProfile(
+        config, &bus, nullptr, static_cast<synth::ParameterManager::UIState*>(nullptr), [] { return 505; });
+    REQUIRE_TRUE(chain.shift != nullptr);
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 30, 127));  // shift on: pushes nothing
+    REQUIRE_TRUE(bus.Size() == 0);
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 21, 127));  // has a shifted press: pushes it instead
+    REQUIRE_TRUE(bus.Size() == 1);
+    synth::MessageIn shifted;
+    REQUIRE_TRUE(bus.Pop(shifted, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(shifted.type == synth::MessageIn::Type::AppAction);
+    REQUIRE_TRUE(shifted.appActionIx == 2);
+    REQUIRE_TRUE(bus.Size() == 0);
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 22, 127));  // no shifted press: ordinary job
+    REQUIRE_TRUE(bus.Size() == 1);
+    synth::MessageIn unaffected;
+    REQUIRE_TRUE(bus.Pop(unaffected, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(unaffected.type == synth::MessageIn::Type::AppAction);
+    REQUIRE_TRUE(unaffected.appActionIx == 3);
+    REQUIRE_TRUE(bus.Size() == 0);
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 30, 0));  // shift off: pushes nothing
+    REQUIRE_TRUE(bus.Size() == 0);
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 21, 127));  // ordinary press again
+    REQUIRE_TRUE(bus.Size() == 1);
+    synth::MessageIn ordinary;
+    REQUIRE_TRUE(bus.Pop(ordinary, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(ordinary.type == synth::MessageIn::Type::AppAction);
+    REQUIRE_TRUE(ordinary.appActionIx == 1);
+    REQUIRE_TRUE(bus.Size() == 0);
+}
+
+TEST_CASE(ShiftAndHoldDrillAreIndependent) {
+    synth::MessageInBus bus(nullptr, 16);
+    auto config = MakeHoldDrillProfileConfig(synth::EncoderMode::Signed7Bit);
+    config.systemMessages.push_back({
+        .control = MidiControlAddress{.channel = 0, .cc = 30},
+        .press = synth::MessageIn::Shift(0, true),
+        .release = synth::MessageIn::Shift(0, false),
+    });
+    MidiControllerSystemMessageAssociation shiftedButton;
+    shiftedButton.control = MidiControlAddress{.channel = 0, .cc = 21};
+    shiftedButton.press = synth::MessageIn::AppAction(0, 1, 0.0f);
+    shiftedButton.shiftedPress = synth::MessageIn::AppAction(0, 2, 0.0f);
+    config.systemMessages.push_back(shiftedButton);
+
+    auto chain = synth::CreateMidiControllerProfile(
+        config, &bus, nullptr, static_cast<synth::ParameterManager::UIState*>(nullptr), [] { return 506; });
+    REQUIRE_TRUE(chain.holdDrill != nullptr);
+    REQUIRE_TRUE(chain.shift != nullptr);
+
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 20, 127));  // hold drill on
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 30, 127));  // shift on
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // drills the knob once
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 1, 70));    // already drilled this hold: nothing
+    chain.input->Process(synth::BasicMidi::CC(0, 0, 21, 127));  // shifted press while both are held
+
+    REQUIRE_TRUE(bus.Size() == 2);
+    synth::MessageIn drilled;
+    REQUIRE_TRUE(bus.Pop(drilled, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(drilled.type == synth::MessageIn::Type::ParamPush);
+    REQUIRE_TRUE(drilled.position == 4);
+
+    synth::MessageIn shiftedPush;
+    REQUIRE_TRUE(bus.Pop(shiftedPush, std::numeric_limits<std::uint64_t>::max()));
+    REQUIRE_TRUE(shiftedPush.type == synth::MessageIn::Type::AppAction);
+    REQUIRE_TRUE(shiftedPush.appActionIx == 2);
     REQUIRE_TRUE(bus.Size() == 0);
 }
 
@@ -1548,6 +1646,61 @@ TEST_CASE(AssociationJsonOmitsAppActionKeysForNonAppActionPress) {
     const synth::JSON json = synth::ToJSON(arena, association);
     REQUIRE_TRUE(!JsonObjectHasKey(json, "appAction"));
     REQUIRE_TRUE(!JsonObjectHasKey(json, "appActionValue"));
+}
+
+TEST_CASE(AssociationJsonRoundTripsShiftedPressAndTreatsAbsentAsNone) {
+    // A shifted AppAction press round-trips its name/value pair; the
+    // resolved index is never written, so it reads back as the default.
+    MidiControllerSystemMessageAssociation withShift;
+    withShift.control = MidiControlAddress{.channel = 4, .cc = 20};
+    withShift.press = synth::MessageIn::AppAction(0, 7, 0.0f);
+    withShift.appAction = "app.test";
+    withShift.appActionValue = "3";
+    withShift.feedback = withShift.press;
+    withShift.shiftedPress = synth::MessageIn::AppAction(0, 9, 0.0f);
+    withShift.shiftedAppAction = "app.shifted";
+    withShift.shiftedAppActionValue = "5";
+
+    synth::JsonArena arena(1024 * 1024);
+    const synth::JSON json = synth::ToJSON(arena, withShift);
+    REQUIRE_TRUE(JsonObjectHasKey(json, "shiftedPress"));
+    REQUIRE_TRUE(JsonObjectHasKey(json, "shiftedAppAction"));
+    REQUIRE_TRUE(JsonObjectHasKey(json, "shiftedAppActionValue"));
+
+    MidiControllerSystemMessageAssociation loaded;
+    REQUIRE_TRUE(synth::FromJSON(json, loaded));
+    REQUIRE_TRUE(loaded.shiftedAppAction == "app.shifted");
+    REQUIRE_TRUE(loaded.shiftedAppActionValue == "5");
+    REQUIRE_TRUE(loaded.shiftedPress.has_value());
+    REQUIRE_TRUE(loaded.shiftedPress->type == synth::MessageIn::Type::AppAction);
+    REQUIRE_TRUE(loaded.shiftedPress->appActionIx == 0);
+
+    // A document written before shiftedPress existed has no such key at
+    // all; FromJSON must still succeed and leave it empty.
+    synth::JsonArena strippedArena(1024 * 1024);
+    synth::JSON stripped = strippedArena.Object();
+    stripped.SetNew("press", synth::ToJSON(strippedArena, synth::MessageIn::AppAction(0, 1, 0.0f)));
+    stripped.SetNew("feedback", synth::ToJSON(strippedArena, synth::MessageIn::AppAction(0, 1, 0.0f)));
+    REQUIRE_TRUE(!JsonObjectHasKey(stripped, "shiftedPress"));
+
+    MidiControllerSystemMessageAssociation loadedStripped;
+    REQUIRE_TRUE(synth::FromJSON(stripped, loadedStripped));
+    REQUIRE_TRUE(!loadedStripped.shiftedPress.has_value());
+
+    // A shifted press that is not AppAction has nothing to look up by name,
+    // so no shiftedAppAction/shiftedAppActionValue keys are written for it.
+    MidiControllerSystemMessageAssociation nonAppShift;
+    nonAppShift.press = synth::MessageIn::AppAction(0, 1, 0.0f);
+    nonAppShift.appAction = "app.test";
+    nonAppShift.appActionValue = "1";
+    nonAppShift.feedback = nonAppShift.press;
+    nonAppShift.shiftedPress = synth::MessageIn::SetReset(0, true);
+
+    synth::JsonArena nonAppArena(1024 * 1024);
+    const synth::JSON nonAppJson = synth::ToJSON(nonAppArena, nonAppShift);
+    REQUIRE_TRUE(JsonObjectHasKey(nonAppJson, "shiftedPress"));
+    REQUIRE_TRUE(!JsonObjectHasKey(nonAppJson, "shiftedAppAction"));
+    REQUIRE_TRUE(!JsonObjectHasKey(nonAppJson, "shiftedAppActionValue"));
 }
 
 TEST_CASE(AnalogMidiInConfigJsonRoundTripsAppActions) {

@@ -127,13 +127,14 @@ export function createWorkerRuntimeClient(workerUrl = new URL("./worker.js", imp
   let queue: Promise<void> = Promise.resolve();
 
   worker.addEventListener("message", (event: MessageEvent<RuntimeResponse>) => {
-    if (event.data.type === "page-status") statusHandlers.forEach((handler) => handler(event.data));
+    if (event.data.type === "page-status" || event.data.type === "file-export")
+      statusHandlers.forEach((handler) => handler(event.data));
   });
 
   const request = (command: RuntimeCommand): Promise<RuntimeResponse> => {
     const run = () => new Promise<RuntimeResponse>((resolve) => {
       const receive = (event: MessageEvent<RuntimeResponse>) => {
-        if (event.data.type === "page-status") return;
+        if (event.data.type === "page-status" || event.data.type === "file-export") return;
         worker.removeEventListener("message", receive);
         resolve(event.data);
       };
@@ -180,7 +181,10 @@ export class SynthBrowserApp {
       void this.startUserActivation();
     });
     this.midi = new BrowserMidiManager(new BrowserMidiWorkerRuntime((command) => this.runtime.request(command)));
-    this.runtime.onStatus?.((status) => this.renderStatus(status));
+    this.runtime.onStatus?.((status) => {
+      if (status.type === "file-export") this.offerDownload(status);
+      else this.renderStatus(status);
+    });
   }
 
   async start(): Promise<void> {
@@ -361,6 +365,22 @@ export class SynthBrowserApp {
 
   private async expectOk(response: RuntimeResponse): Promise<void> {
     if (response.type === "error") throw new Error(response.error);
+  }
+
+  // Hands the app's exported file to the browser's own save flow: an
+  // anchor click triggers the download, and the object URL is revoked on
+  // the next macrotask -- revoking it before the click's download starts
+  // can cancel the download in Chromium.
+  private offerDownload({ fileName, mediaType, bytes }: { fileName: string; mediaType: string; bytes: ArrayBuffer }): void {
+    const url = URL.createObjectURL(new Blob([bytes], { type: mediaType }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   private renderStatus(response: RuntimeResponse): void {

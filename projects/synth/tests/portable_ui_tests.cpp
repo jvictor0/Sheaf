@@ -3071,7 +3071,8 @@ static void TestControllersRowFitsWithinFroggersNarrowestHost()
                              synth::UISystemMessage::ParamSetAbsolute,
                              synth::UISystemMessage::ParamPush,
                              synth::UISystemMessage::SetSceneBlend,
-                             synth::UISystemMessage::HoldDrill};
+                             synth::UISystemMessage::HoldDrill,
+                             synth::UISystemMessage::Shift};
     const char* const kPlainActionLabels[] = {"Play", "Stop", "Freeze", "Record", "Randomize All",
                                               "Randomize Page", "Reset All", "Reset Page",
                                               "Bank Previous", "Bank Next"};
@@ -3374,7 +3375,8 @@ static void TestControllersRowFitsWithinFroggersNarrowestHost()
     Require(messageCombo->kind == synth::ui::NodeKind::ComboBox,
             "the Generic system row's Message field renders as a combo box");
     Require(messageCombo->options.size() == 24,
-            "the Generic system row's Message combo offers the app catalog's 24 choices");
+            "the Generic system row's Message combo offers 24 choices: six kept kinds and eighteen "
+            "button actions");
 }
 
 // `TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface` and its

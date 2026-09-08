@@ -560,6 +560,7 @@ inline int FieldEditorWidth(MidiMappingRowVM::Field field)
     {
         case Field::MessageKind:
         case Field::AppAction:
+        case Field::ShiftAction:
             return 150;
         case Field::MessageArg:
             return 74;
@@ -2665,6 +2666,26 @@ private:
             ui::ControlStyle fieldStyle =
                 fieldControl(fieldWidth, ControllersLayout::kMappingRowHeight);
             ui::ControlStyle toggleStyle = button(fieldWidth, ControllersLayout::kMappingRowHeight);
+            // Shared by every "pick one of a fixed catalog by index" combo
+            // below (MessageKind/AppAction/EncoderMode/ShiftAction): same
+            // node id, same commit action, same style -- only the offered
+            // options and the currently-selected index differ per field, and
+            // each caller computes those two through whichever accessor
+            // fits its field (a dedicated index accessor, or RowFieldValue).
+            // A negative selectedIndex (not found / row has no value yet)
+            // selects "0".
+            const auto emitIndexCombo = [&](std::vector<ui::ControlOption> options, int selectedIndex) {
+                mappingRow.ComboBox(NodeIds::MappingField(controllerIx, section, mappingRowIx, field),
+                                    std::move(options),
+                                    selectedIndex >= 0 ? std::to_string(selectedIndex) : "0",
+                                    ui::Action::WithValue(
+                                        Actions::kMappingFieldCommit,
+                                        std::to_string(controllerIx) + ":" +
+                                            ControllersLayout::SectionToken(section) + ":" +
+                                            std::to_string(mappingRowIx) + ":" +
+                                            ControllersLayout::FieldToken(field)),
+                                    fieldStyle);
+            };
             if (field == MidiMappingRowVM::Field::MessageKind)
             {
                 std::vector<ui::ControlOption> options;
@@ -2673,17 +2694,7 @@ private:
                 {
                     options.push_back({std::to_string(ix), catalog[static_cast<std::size_t>(ix)].label});
                 }
-                const int current = vm.UISystemMessageIndex(controllerIx, section, mappingRowIx);
-                mappingRow.ComboBox(NodeIds::MappingField(controllerIx, section, mappingRowIx, field),
-                                    std::move(options),
-                                    current >= 0 ? std::to_string(current) : "0",
-                                    ui::Action::WithValue(
-                                        Actions::kMappingFieldCommit,
-                                        std::to_string(controllerIx) + ":" +
-                                            ControllersLayout::SectionToken(section) + ":" +
-                                            std::to_string(mappingRowIx) + ":" +
-                                            ControllersLayout::FieldToken(field)),
-                                    fieldStyle);
+                emitIndexCombo(std::move(options), vm.UISystemMessageIndex(controllerIx, section, mappingRowIx));
                 return;
             }
             if (field == MidiMappingRowVM::Field::AppAction)
@@ -2695,21 +2706,11 @@ private:
                     options.push_back({std::to_string(ix), catalog[static_cast<std::size_t>(ix)].label});
                 }
                 double current = 0.0;
-                std::string selected = "0";
-                if (vm.RowFieldValue(controllerIx, section, mappingRowIx, field, current))
-                {
-                    selected = std::to_string(static_cast<int>(current));
-                }
-                mappingRow.ComboBox(NodeIds::MappingField(controllerIx, section, mappingRowIx, field),
-                                    std::move(options),
-                                    selected,
-                                    ui::Action::WithValue(
-                                        Actions::kMappingFieldCommit,
-                                        std::to_string(controllerIx) + ":" +
-                                            ControllersLayout::SectionToken(section) + ":" +
-                                            std::to_string(mappingRowIx) + ":" +
-                                            ControllersLayout::FieldToken(field)),
-                                    fieldStyle);
+                const int selected =
+                    vm.RowFieldValue(controllerIx, section, mappingRowIx, field, current)
+                        ? static_cast<int>(current)
+                        : -1;
+                emitIndexCombo(std::move(options), selected);
                 return;
             }
             if (field == MidiMappingRowVM::Field::EncoderMode)
@@ -2721,21 +2722,22 @@ private:
                     options.push_back({std::to_string(ix), catalog[static_cast<std::size_t>(ix)]});
                 }
                 double current = 0.0;
-                std::string selected = "0";
-                if (vm.RowFieldValue(controllerIx, section, mappingRowIx, field, current))
+                const int selected =
+                    vm.RowFieldValue(controllerIx, section, mappingRowIx, field, current)
+                        ? static_cast<int>(current)
+                        : -1;
+                emitIndexCombo(std::move(options), selected);
+                return;
+            }
+            if (field == MidiMappingRowVM::Field::ShiftAction)
+            {
+                std::vector<ui::ControlOption> options;
+                const auto& catalog = vm.ShiftCatalog();
+                for (int ix = 0; ix < static_cast<int>(catalog.size()); ++ix)
                 {
-                    selected = std::to_string(static_cast<int>(current));
+                    options.push_back({std::to_string(ix), catalog[static_cast<std::size_t>(ix)].label});
                 }
-                mappingRow.ComboBox(NodeIds::MappingField(controllerIx, section, mappingRowIx, field),
-                                    std::move(options),
-                                    selected,
-                                    ui::Action::WithValue(
-                                        Actions::kMappingFieldCommit,
-                                        std::to_string(controllerIx) + ":" +
-                                            ControllersLayout::SectionToken(section) + ":" +
-                                            std::to_string(mappingRowIx) + ":" +
-                                            ControllersLayout::FieldToken(field)),
-                                    fieldStyle);
+                emitIndexCombo(std::move(options), vm.ShiftChoiceIndex(controllerIx, section, mappingRowIx));
                 return;
             }
             if (field == MidiMappingRowVM::Field::AddressType)

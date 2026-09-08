@@ -179,6 +179,12 @@ extern "C" int synth_browser_dequeue_midi_action(synth_browser_runtime* runtime,
     return RuntimeFor(runtime) == nullptr ? -1 : RuntimeFor(runtime)->DequeueMidiAction(action);
 }
 
+extern "C" int synth_browser_dequeue_file_export(synth_browser_runtime* runtime,
+                                                   synth_browser::FileExportDescriptor* descriptor)
+{
+    return RuntimeFor(runtime) == nullptr ? -1 : RuntimeFor(runtime)->DequeueFileExport(descriptor);
+}
+
 extern "C" int synth_browser_deliver_midi(synth_browser_runtime* runtime, std::uint32_t controllerIx,
                                             const std::uint8_t* bytes, std::uint32_t size,
                                             std::uint64_t timestampMicros)

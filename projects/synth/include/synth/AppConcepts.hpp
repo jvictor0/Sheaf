@@ -4,9 +4,12 @@
 #include "synth/PortableUI.hpp"
 #include "synth/PortableUIBuilders.hpp"
 #include <concepts>
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace synth {
 
@@ -78,6 +81,26 @@ concept HasRestoreStartupState = requires(T app) {
 template <typename T>
 concept HasMidiCatalog = requires(const T app) {
     { app.MidiCatalog() } -> std::same_as<MidiAppCatalog>;
+};
+
+// A file an app hands to its host: name, media type, bytes and a note the
+// host may show beside the saved file. Produced on the message thread and
+// never touched by the audio thread.
+struct FileExport {
+    std::string fileName;
+    std::string mediaType;
+    std::vector<std::uint8_t> bytes;
+    std::string note;
+};
+
+// Optional file-export hook: an app that declares it queues exports and
+// the engine takes each one once per message-thread tick and hands it to
+// the handler the host installed (Engine::SetFileExportHandler). Detected
+// at compile time, same as the hooks above; an app without it sees
+// nothing.
+template <typename T>
+concept HasFileExports = requires(T app) {
+    { app.TakePendingFileExport() } -> std::same_as<std::optional<FileExport>>;
 };
 
 // Optional UI capability (sprs-17): an app may register exactly one

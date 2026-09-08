@@ -48,6 +48,7 @@ std::optional<std::size_t> PrimaryMessageArg(const MessageIn& message) {
         case MessageIn::Type::ParamSetAbsoluteOnBank:
         case MessageIn::Type::AppAction:
         case MessageIn::Type::HoldDrill:
+        case MessageIn::Type::Shift:
             return std::nullopt;
     }
     return std::nullopt;
@@ -90,6 +91,7 @@ bool SetPrimaryMessageArg(MessageIn& message, std::size_t arg) {
         case MessageIn::Type::ParamSetAbsoluteOnBank:
         case MessageIn::Type::AppAction:
         case MessageIn::Type::HoldDrill:
+        case MessageIn::Type::Shift:
             return false;
     }
     return false;
@@ -121,6 +123,7 @@ bool UISystemMessageHasArg(UISystemMessage message) {
         case UISystemMessage::SetSceneBlend:
         case UISystemMessage::AppAction:
         case UISystemMessage::HoldDrill:
+        case UISystemMessage::Shift:
             return false;
     }
     return false;
@@ -187,6 +190,8 @@ UISystemMessage UISystemMessageForAssociation(const MidiControllerSystemMessageA
             return UISystemMessage::AppAction;
         case MessageIn::Type::HoldDrill:
             return UISystemMessage::HoldDrill;
+        case MessageIn::Type::Shift:
+            return UISystemMessage::Shift;
     }
     return UISystemMessage::Clock;
 }
@@ -240,6 +245,8 @@ MessageIn PressForUISystemMessage(UISystemMessage message, const MidiControllerS
             return MessageIn::AppAction(0, previous.press.appActionIx, 0.0f);
         case UISystemMessage::HoldDrill:
             return MessageIn::HoldDrill(0, true);
+        case UISystemMessage::Shift:
+            return MessageIn::Shift(0, true);
     }
     return MessageIn::Clock(0);
 }
@@ -275,6 +282,8 @@ std::optional<MessageIn> ReleaseForUISystemMessage(UISystemMessage message, cons
             return std::nullopt;
         case UISystemMessage::HoldDrill:
             return MessageIn::HoldDrill(0, false);
+        case UISystemMessage::Shift:
+            return MessageIn::Shift(0, false);
     }
     return std::nullopt;
 }
@@ -340,6 +349,7 @@ bool FieldIsInteger(MidiMappingRowVM::Field field) {
         case Field::MessageKind:
         case Field::BlockMessageType:
         case Field::AppAction:
+        case Field::ShiftAction:
             return false;
     }
     return false;
@@ -432,6 +442,8 @@ const char* FieldShortLabel(MidiMappingRowVM::Field field) {
             return "Y Min";
         case Field::GridYMax:
             return "Y Max";
+        case Field::ShiftAction:
+            return "Shift";
     }
     return "";
 }
@@ -508,12 +520,19 @@ std::vector<UISystemMessageChoice> MakeUISystemMessageChoices(const MidiAppCatal
             choices.push_back(UISystemMessageChoice{.label = "Hold Drill", .message = UISystemMessage::HoldDrill});
             continue;
         }
+        if (kind == UISystemMessage::Shift) {
+            choices.push_back(UISystemMessageChoice{.label = "Shift", .message = UISystemMessage::Shift});
+            continue;
+        }
         if (const UISystemMessageChoice* found = FindUISystemMessageChoice(kind)) {
             choices.push_back(*found);
         }
     }
     for (std::size_t ix = 0; ix < catalog.actions.size(); ++ix) {
         const MidiAppAction& action = catalog.actions[ix];
+        if (action.analogRange.has_value()) {
+            continue;
+        }
         choices.push_back(UISystemMessageChoice{.label = action.label,
                                                  .message = UISystemMessage::AppAction,
                                                  .appAction = action.action,
@@ -539,8 +558,24 @@ std::vector<UISystemMessageChoice> MakeAnalogAppActionChoices(const MidiAppCatal
     return choices;
 }
 
+std::vector<UISystemMessageChoice> DeriveShiftCatalog(const std::vector<UISystemMessageChoice>& messageCatalog) {
+    std::vector<UISystemMessageChoice> catalog;
+    catalog.push_back(UISystemMessageChoice{.label = "(none)", .message = UISystemMessage::Clock});
+    for (const UISystemMessageChoice& choice : messageCatalog) {
+        if (UISystemMessageHasArg(choice.message)) {
+            continue;
+        }
+        if (choice.message == UISystemMessage::Shift || choice.message == UISystemMessage::HoldDrill) {
+            continue;
+        }
+        catalog.push_back(choice);
+    }
+    return catalog;
+}
+
 void MidiConfigViewModel::SetMessageCatalog(std::vector<UISystemMessageChoice> choices) {
     messageCatalog_ = std::move(choices);
+    shiftCatalog_ = DeriveShiftCatalog(messageCatalog_);
 }
 
 void MidiConfigViewModel::SetAnalogActionCatalog(std::vector<UISystemMessageChoice> choices) {
@@ -725,6 +760,9 @@ std::string DescribeMessage(const MessageIn& message) {
             break;
         case MessageIn::Type::HoldDrill:
             oss << (message.boolValue ? "hold drill on" : "hold drill off");
+            break;
+        case MessageIn::Type::Shift:
+            oss << (message.boolValue ? "shift on" : "shift off");
             break;
     }
     return oss.str();
@@ -1061,8 +1099,12 @@ std::vector<Field> SystemRowEditableFields(MidiProfileKind kind,
         }
     }
     fields.push_back(Field::MessageKind);
-    if (UISystemMessageHasArg(UISystemMessageForAssociation(association))) {
+    const UISystemMessage message = UISystemMessageForAssociation(association);
+    if (UISystemMessageHasArg(message)) {
         fields.push_back(Field::MessageArg);
+    }
+    if (message != UISystemMessage::Shift && message != UISystemMessage::HoldDrill) {
+        fields.push_back(Field::ShiftAction);
     }
     return fields;
 }
@@ -1595,7 +1637,7 @@ bool MidiConfigViewModel::RowFieldValue(std::size_t controllerIx, MidiConfigSect
     if (std::find(editable.begin(), editable.end(), field) == editable.end()) {
         return false;
     }
-    if (field == Field::MessageKind || field == Field::BlockMessageType) {
+    if (field == Field::MessageKind || field == Field::BlockMessageType || field == Field::ShiftAction) {
         return false;
     }
 
@@ -1851,6 +1893,52 @@ int MidiConfigViewModel::UISystemMessageIndex(std::size_t controllerIx, MidiConf
         return -1;
     }
     return static_cast<int>(choice - catalog.data());
+}
+
+int MidiConfigViewModel::ShiftChoiceIndex(std::size_t controllerIx, MidiConfigSection section,
+                                          std::size_t rowIx) const {
+    if (section != MidiConfigSection::SystemMessages) {
+        return -1;
+    }
+    if (controllerIx >= instrument_.controllers.size()) {
+        return -1;
+    }
+    const SectionPresentation& presentation = PresentationFor(controllerIx, section);
+    if (rowIx >= presentation.rows.size() || presentation.rows[rowIx].kind != RowKind::Individual) {
+        return -1;
+    }
+    const auto* association =
+        std::get_if<MidiControllerSystemMessageAssociation>(&presentation.rows[rowIx].data);
+    if (association == nullptr) {
+        return -1;
+    }
+    if (!association->shiftedPress.has_value()) {
+        return 0;
+    }
+
+    // Mirrors UISystemMessageForAssociation's own press->kind mapping,
+    // applied to the shifted press instead of the row's ordinary one.
+    MidiControllerSystemMessageAssociation shiftedAsAssociation;
+    shiftedAsAssociation.press = *association->shiftedPress;
+    const UISystemMessage message = UISystemMessageForAssociation(shiftedAsAssociation);
+    const auto& catalog = ShiftCatalog();
+    // Index 0 is the "(none)" placeholder, not a real catalog choice -- its
+    // own `message` happens to be Clock, which also appears legitimately
+    // later in the catalog, so the search starts at 1 to never mistake a
+    // genuine Clock shift for "no shift."
+    for (std::size_t ix = 1; ix < catalog.size(); ++ix) {
+        const UISystemMessageChoice& choice = catalog[ix];
+        if (choice.message != message) {
+            continue;
+        }
+        if (message == UISystemMessage::AppAction &&
+            (choice.appAction != association->shiftedAppAction ||
+             choice.appActionValue != association->shiftedAppActionValue)) {
+            continue;
+        }
+        return static_cast<int>(ix);
+    }
+    return -1;
 }
 
 int MidiConfigViewModel::BlockMessageTypeIndex(std::size_t controllerIx, MidiConfigSection section,
@@ -2721,6 +2809,36 @@ bool MidiConfigViewModel::ApplyMappingEdit(std::size_t controllerIx, MidiConfigS
                     if (!SetUISystemMessageArg(*association, arg)) {
                         validationError = "message has no integer argument";
                         break;
+                    }
+                    fieldValid = true;
+                    break;
+                }
+                case Field::ShiftAction: {
+                    if (!IsNonNegativeInteger(value)) {
+                        validationError = "shift action must be a non-negative integer catalog index";
+                        break;
+                    }
+                    const auto& catalog = ShiftCatalog();
+                    const auto choiceIx = static_cast<std::size_t>(value);
+                    if (choiceIx >= catalog.size()) {
+                        validationError = "shift action index out of range";
+                        break;
+                    }
+                    if (choiceIx == 0) {
+                        association->shiftedPress.reset();
+                        association->shiftedAppAction.clear();
+                        association->shiftedAppActionValue.clear();
+                    } else {
+                        const UISystemMessageChoice& choice = catalog[choiceIx];
+                        association->shiftedPress = PressForUISystemMessage(choice.message, *association);
+                        if (choice.message == UISystemMessage::AppAction) {
+                            association->shiftedPress->appActionIx = choice.appActionIx;
+                            association->shiftedAppAction = choice.appAction;
+                            association->shiftedAppActionValue = choice.appActionValue;
+                        } else {
+                            association->shiftedAppAction.clear();
+                            association->shiftedAppActionValue.clear();
+                        }
                     }
                     fieldValid = true;
                     break;

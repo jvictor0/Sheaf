@@ -166,6 +166,9 @@ struct MidiMappingRowVM {
         GridXMax,
         GridYMin,
         GridYMax,
+        // System row only: the row's shifted job, an index into
+        // ShiftCatalog() (0 = none).
+        ShiftAction,
     };
 
     // Groups rows into contiguous runs of the same on-screen schema, so the
@@ -225,6 +228,7 @@ enum class UISystemMessage {
     PrevParamBank,
     AppAction,
     HoldDrill,
+    Shift,
 };
 
 struct UISystemMessageChoice {
@@ -263,11 +267,13 @@ MidiControllerSystemMessageAssociation MakeUISystemMessageAssociation(
 // (no libraryKinds, no actions) returns a copy of UISystemMessageCatalog()
 // unchanged, so an app with no MidiCatalog() sees exactly today's list.
 // Otherwise returns one library choice per catalog.libraryKinds entry
-// (taken from UISystemMessageCatalog() by kind; HoldDrill has no static
-// catalog entry, so it is produced here directly), followed by one
-// app-action choice per catalog.actions entry (message = AppAction,
-// appAction/appActionValue/appActionIx from that action, label from the
-// action's own label).
+// (taken from UISystemMessageCatalog() by kind; HoldDrill and Shift have no
+// static catalog entry, so they are produced here directly), followed by one
+// app-action choice per catalog.actions entry whose analogRange is NOT set
+// (an analog-ranged action belongs only to MakeAnalogAppActionChoices below --
+// it takes a continuous value, so it is never offered as a plain row target)
+// (message = AppAction, appAction/appActionValue/appActionIx from that
+// action, label from the action's own label).
 std::vector<UISystemMessageChoice> MakeUISystemMessageChoices(const MidiAppCatalog& catalog);
 
 // Builds the offered target list for an analog app-action row's combo: one
@@ -278,6 +284,18 @@ std::vector<UISystemMessageChoice> MakeUISystemMessageChoices(const MidiAppCatal
 // appAction/appActionValue/appActionIx from that action and its index in
 // catalog.actions.
 std::vector<UISystemMessageChoice> MakeAnalogAppActionChoices(const MidiAppCatalog& catalog);
+
+// Builds the offered target list for a system row's Shift field (Field::
+// ShiftAction): entry 0 is a "(none)" placeholder (only its position in the
+// vector matters -- ShiftChoiceIndex()/ApplyMappingEdit's ShiftAction case
+// both treat index 0 as "this row has no shifted job" regardless of what
+// that entry's own fields hold), followed by every entry of `messageCatalog`
+// whose kind takes no argument (UISystemMessageHasArg false), excluding
+// Shift and HoldDrill (a shifted job can never itself be "hold this button
+// to shift" or "drill while held"). Called with MessageCatalog() so the
+// Shift combo always offers a subset of what the row's own Message combo
+// offers.
+std::vector<UISystemMessageChoice> DeriveShiftCatalog(const std::vector<UISystemMessageChoice>& messageCatalog);
 
 // True for every field the renderer formats as a plain integer (no decimal
 // places -- Channel, Cc, SlotIx, Position, GestureIx, LaunchpadX/Y,
@@ -425,6 +443,14 @@ public:
     void SetAnalogActionCatalog(std::vector<UISystemMessageChoice> choices);
     const std::vector<UISystemMessageChoice>& AnalogActionCatalog() const { return analogActionCatalog_; }
 
+    // The offered target list for a system row's Shift field (Field::
+    // ShiftAction) and its row-index lookup (ShiftChoiceIndex below).
+    // Derived from MessageCatalog() by DeriveShiftCatalog() -- see that
+    // function's doc comment for the derivation rule -- every time
+    // MessageCatalog() itself changes, so it never needs a setter of its
+    // own. Index 0 always means "no shifted job."
+    const std::vector<UISystemMessageChoice>& ShiftCatalog() const { return shiftCatalog_; }
+
     // The add row's Preset combo options, and the registry every wizard
     // lookup resolves against: installing a preset, comparing a row's
     // config against the preset that created it, and restoring a diverged
@@ -453,7 +479,8 @@ public:
     // out-of-range controllerIx/rowIx, a field not advertised in this row's
     // editableFields (see SectionRows()), or fields represented by a
     // dedicated catalog accessor rather than a numeric scalar (MessageKind,
-    // BlockMessageType); otherwise writes the field's
+    // BlockMessageType, ShiftAction -- see UISystemMessageIndex()/
+    // ShiftChoiceIndex() instead); otherwise writes the field's
     // current value into `out` and returns true. For Field::EncoderMode,
     // `out` is the current mode's index into EncoderModeCatalog() (not the
     // raw enum value), matching ApplyMappingEdit's index-based contract for
@@ -462,6 +489,15 @@ public:
                        MidiMappingRowVM::Field field, double& out) const;
 
     int UISystemMessageIndex(std::size_t controllerIx, MidiConfigSection section, std::size_t rowIx) const;
+
+    // The Field::ShiftAction counterpart to UISystemMessageIndex() above:
+    // looks up a system Individual row's current shifted job as an index
+    // into ShiftCatalog(), so a JUCE combo box can preselect the row's
+    // current state. Returns 0 (the "(none)" entry) when the row has no
+    // shiftedPress, -1 when it has one but no ShiftCatalog() entry matches
+    // it, and -1 for a non-SystemMessages section, an out-of-range
+    // (controllerIx, rowIx), or a row that is not a system Individual row.
+    int ShiftChoiceIndex(std::size_t controllerIx, MidiConfigSection section, std::size_t rowIx) const;
 
     // Looks up a system Block row's current message type as an index into
     // BlockableMessageCatalog(), so a JUCE combo box can preselect the row's
@@ -688,6 +724,10 @@ private:
     MidiConnectionState connection_;
     std::vector<MidiControllerRowVM> controllers_;
     std::vector<UISystemMessageChoice> messageCatalog_ = UISystemMessageCatalog();
+    // Derived from messageCatalog_'s own default above; SetMessageCatalog()
+    // re-derives this whenever messageCatalog_ changes, so the two can never
+    // drift apart (DeriveShiftCatalog's own doc comment has the rule).
+    std::vector<UISystemMessageChoice> shiftCatalog_ = DeriveShiftCatalog(UISystemMessageCatalog());
     std::vector<UISystemMessageChoice> analogActionCatalog_;
     // Empty means "use the default registry"; Layouts() resolves that
     // default lazily so this header need not depend on ControllerWizard.hpp.

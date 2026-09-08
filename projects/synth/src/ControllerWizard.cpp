@@ -183,6 +183,7 @@ bool TwisterArgumentEnabled(UISystemMessage message) {
         case UISystemMessage::PrevParamBank:
         case UISystemMessage::AppAction:
         case UISystemMessage::HoldDrill:
+        case UISystemMessage::Shift:
             return false;
     }
     return false;
@@ -394,6 +395,7 @@ UISystemMessage TwisterMessageForAssociation(const MidiControllerSystemMessageAs
         case MessageIn::Type::ParamSetAbsoluteOnBank:
         case MessageIn::Type::AppAction:
         case MessageIn::Type::HoldDrill:
+        case MessageIn::Type::Shift:
             return UISystemMessage::ParamIncDec;
     }
     return UISystemMessage::ParamIncDec;

@@ -1470,6 +1470,10 @@ double SafeValueFor(MidiMappingRowVM::Field field) {
             return 0.0;
         case Field::AppAction:
             return 0.0;
+        case Field::ShiftAction:
+            // Index 0 ("(none)") is always a valid ShiftCatalog() index
+            // regardless of the row's actual catalog contents.
+            return 0.0;
         case Field::AddressType:
         case Field::GridSlotIx:
         case Field::GridXMin:
@@ -3981,6 +3985,22 @@ TEST_CASE(MakeUISystemMessageChoicesOrdersLibraryKindsThenActions) {
     }
 }
 
+// Shift has no static UISystemMessageCatalog() entry (same reason HoldDrill
+// doesn't: neither is a library message an app could plausibly want on its
+// own row), so MakeUISystemMessageChoices produces its choice directly,
+// exactly the way it already does for HoldDrill.
+TEST_CASE(MakeUISystemMessageChoicesOffersShiftLikeHoldDrill) {
+    MidiAppCatalog catalog;
+    catalog.libraryKinds = {UISystemMessage::HoldDrill, UISystemMessage::Shift};
+    const std::vector<synth::UISystemMessageChoice> choices = synth::MakeUISystemMessageChoices(catalog);
+
+    REQUIRE_TRUE(choices.size() == 2);
+    REQUIRE_TRUE(choices[0].message == UISystemMessage::HoldDrill);
+    REQUIRE_TRUE(choices[0].label == "Hold Drill");
+    REQUIRE_TRUE(choices[1].message == UISystemMessage::Shift);
+    REQUIRE_TRUE(choices[1].label == "Shift");
+}
+
 TEST_CASE(ViewModelOffersAppCatalogChoicesThroughMessageCatalog) {
     MidiConfigViewModel vm;
     vm.SetMessageCatalog(synth::MakeUISystemMessageChoices(MakeFakeAppCatalog()));
@@ -4063,6 +4083,113 @@ TEST_CASE(SystemMessageRowFromAppActionChoiceRoundTripsRowIdentity) {
     REQUIRE_TRUE(reopened.UISystemMessageIndex(0, MidiConfigSection::SystemMessages, 0) == bThreeIx);
 }
 
+// --- Shift field (Field::ShiftAction) --------------------------------------
+
+TEST_CASE(SystemRowsExposeShiftFieldExceptOnShiftAndHoldDrillRows) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument;
+    MidiControllerSlot slot = MakeGenericSlot("generic");
+    slot.config.systemMessages.clear();
+
+    MidiControllerSystemMessageAssociation appAction;
+    appAction.control = MidiControlAddress{.channel = 0, .cc = 20};
+    appAction.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+    appAction.feedback = appAction.press;
+    slot.config.systemMessages.push_back(appAction);
+
+    MidiControllerSystemMessageAssociation shiftRow;
+    shiftRow.control = MidiControlAddress{.channel = 0, .cc = 21};
+    shiftRow.press = synth::MessageIn::Shift(0, true);
+    shiftRow.feedback = shiftRow.press;
+    slot.config.systemMessages.push_back(shiftRow);
+
+    MidiControllerSystemMessageAssociation holdDrillRow;
+    holdDrillRow.control = MidiControlAddress{.channel = 0, .cc = 22};
+    holdDrillRow.press = synth::MessageIn::HoldDrill(0, true);
+    holdDrillRow.feedback = holdDrillRow.press;
+    slot.config.systemMessages.push_back(holdDrillRow);
+
+    REQUIRE_TRUE(instrument.AddController(slot));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+    vm.ToggleConfig(0);
+    vm.ToggleSection(0, MidiConfigSection::SystemMessages);
+
+    const std::vector<MidiMappingRowVM> rows = vm.SectionRows(0, MidiConfigSection::SystemMessages);
+    REQUIRE_TRUE(rows.size() == 3);
+
+    using Field = MidiMappingRowVM::Field;
+    const auto hasShiftAction = [](const MidiMappingRowVM& row) {
+        return std::find(row.editableFields.begin(), row.editableFields.end(), Field::ShiftAction) !=
+               row.editableFields.end();
+    };
+
+    // SystemMessageSortKey orders by MessageIn::Type's declaration order,
+    // which places AppAction before HoldDrill before Shift, so the
+    // app-action row is row 0 regardless of insertion order above.
+    REQUIRE_TRUE(rows[0].label.find("app action") != std::string::npos);
+    REQUIRE_TRUE(hasShiftAction(rows[0]));
+    REQUIRE_TRUE(rows[0].editableFields.back() == Field::ShiftAction);
+    REQUIRE_TRUE(!hasShiftAction(rows[1]));
+    REQUIRE_TRUE(!hasShiftAction(rows[2]));
+}
+
+TEST_CASE(ShiftFieldEditCommitsShiftedPressAndNoneClearsIt) {
+    MidiConfigViewModel vm;
+    const std::vector<synth::UISystemMessageChoice> catalog = synth::MakeUISystemMessageChoices(MakeFakeAppCatalog());
+    vm.SetMessageCatalog(catalog);
+
+    MidiInstrumentConfig instrument;
+    instrument.AddController(MakeGenericSlot("gen"));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+    vm.ToggleConfig(0);
+    vm.ToggleSection(0, MidiConfigSection::SystemMessages);
+
+    MidiInstrumentConfig afterAdd;
+    std::string reason;
+    REQUIRE_TRUE(
+        vm.AddSingle(0, MidiConfigSection::SystemMessages, MidiMappingRowVM::RowGroup::System, afterAdd, &reason));
+    vm.Rebuild(afterAdd, connection);
+
+    // ShiftCatalog() is derived from MessageCatalog(): "(none)" at 0, then
+    // MakeFakeAppCatalog()'s two arg-less AppAction choices ("A", "B 3") --
+    // ParamIncDec (has an arg) and HoldDrill are excluded, per
+    // DeriveShiftCatalog's own doc comment.
+    const std::vector<synth::UISystemMessageChoice>& shiftCatalog = vm.ShiftCatalog();
+    REQUIRE_TRUE(shiftCatalog.size() == 3);
+    REQUIRE_TRUE(shiftCatalog[0].label == "(none)");
+    const int bThreeShiftIx = 2;
+    REQUIRE_TRUE(shiftCatalog[static_cast<std::size_t>(bThreeShiftIx)].appAction == "app.b");
+
+    MidiInstrumentConfig committed;
+    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::SystemMessages, 0, MidiMappingRowVM::Field::ShiftAction,
+                                     static_cast<double>(bThreeShiftIx), committed, &reason));
+    REQUIRE_TRUE(vm.SectionExpanded(0, MidiConfigSection::SystemMessages) == true);
+
+    const MidiControllerSystemMessageAssociation& shifted = committed.controllers[0].config.systemMessages[0];
+    REQUIRE_TRUE(shifted.shiftedPress.has_value());
+    REQUIRE_TRUE(shifted.shiftedPress->type == synth::MessageIn::Type::AppAction);
+    REQUIRE_TRUE(shifted.shiftedPress->appActionIx == 1);
+    REQUIRE_TRUE(shifted.shiftedAppAction == "app.b");
+    REQUIRE_TRUE(shifted.shiftedAppActionValue == "2");
+    REQUIRE_TRUE(vm.ShiftChoiceIndex(0, MidiConfigSection::SystemMessages, 0) == bThreeShiftIx);
+
+    vm.Rebuild(committed, connection);
+    REQUIRE_TRUE(vm.SectionExpanded(0, MidiConfigSection::SystemMessages) == true);
+
+    MidiInstrumentConfig cleared;
+    REQUIRE_TRUE(vm.ApplyMappingEdit(0, MidiConfigSection::SystemMessages, 0, MidiMappingRowVM::Field::ShiftAction,
+                                     0.0, cleared, &reason));
+    REQUIRE_TRUE(vm.SectionExpanded(0, MidiConfigSection::SystemMessages) == true);
+
+    const MidiControllerSystemMessageAssociation& none = cleared.controllers[0].config.systemMessages[0];
+    REQUIRE_TRUE(!none.shiftedPress.has_value());
+    REQUIRE_TRUE(none.shiftedAppAction.empty());
+    REQUIRE_TRUE(none.shiftedAppActionValue.empty());
+    REQUIRE_TRUE(vm.ShiftChoiceIndex(0, MidiConfigSection::SystemMessages, 0) == 0);
+}
+
 // --- Analog app-action rows (RowGroup::AnalogAppAction) --------------------
 
 MidiAppCatalog MakeAnalogFakeAppCatalog() {
@@ -4085,6 +4212,19 @@ TEST_CASE(MakeAnalogAppActionChoicesReturnsOnlyAnalogRangeActions) {
     REQUIRE_TRUE(choices[0].appAction == "app.bpm");
     REQUIRE_TRUE(choices[0].appActionValue.empty());
     REQUIRE_TRUE(choices[0].appActionIx == 1);
+}
+
+// The row dropdown (MakeUISystemMessageChoices) is the plain, non-analog
+// counterpart of MakeAnalogAppActionChoices above: an analog-ranged action
+// takes a continuous value, so it belongs only on an analog row's own
+// AppAction combo, never on a system row's Message combo.
+TEST_CASE(MakeUISystemMessageChoicesSkipsAnalogRangedActions) {
+    const MidiAppCatalog catalog = MakeAnalogFakeAppCatalog();
+    const std::vector<synth::UISystemMessageChoice> choices = synth::MakeUISystemMessageChoices(catalog);
+
+    REQUIRE_TRUE(choices.size() == 1);
+    REQUIRE_TRUE(choices[0].label == "Plain");
+    REQUIRE_TRUE(choices[0].appAction == "app.plain");
 }
 
 TEST_CASE(AddAndCommitAnalogAppActionRowWritesAppActionsWithoutTouchingGestures) {

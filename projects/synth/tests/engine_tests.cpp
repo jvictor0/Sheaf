@@ -3128,6 +3128,106 @@ TEST_CASE(engine_rebuild_resolves_app_action_rows_and_drops_unknown_ones) {
     REQUIRE_TRUE(engine.Application().surface.dispatched.size() == 1);
 }
 
+TEST_CASE(engine_rebuild_resolves_shifted_app_action_and_clears_an_unknown_one) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.actionA", .value = "1", .label = "A"});
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.actionB", .value = "1", .label = "B"});
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "catalog-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+
+        synth::MidiControllerSystemMessageAssociation shiftButton;
+        shiftButton.control = synth::MidiControlAddress{.channel = 0, .cc = 30};
+        shiftButton.press = synth::MessageIn::Shift(0, true);
+        shiftButton.release = synth::MessageIn::Shift(0, false);
+        shiftButton.feedback = shiftButton.press;
+
+        // Row A: ordinary press names action 0; its shifted press names
+        // action 1, which the catalog knows.
+        synth::MidiControllerSystemMessageAssociation rowA;
+        rowA.control = synth::MidiControlAddress{.channel = 0, .cc = 10};
+        rowA.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+        rowA.appAction = "test.actionA";
+        rowA.appActionValue = "1";
+        rowA.feedback = rowA.press;
+        rowA.shiftedPress = synth::MessageIn::AppAction(0, 0, 0.0f);
+        rowA.shiftedAppAction = "test.actionB";
+        rowA.shiftedAppActionValue = "1";
+
+        // Row B: ordinary press also names action 0; its shifted press
+        // names an action the catalog does not have.
+        synth::MidiControllerSystemMessageAssociation rowB;
+        rowB.control = synth::MidiControlAddress{.channel = 0, .cc = 11};
+        rowB.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+        rowB.appAction = "test.actionA";
+        rowB.appActionValue = "1";
+        rowB.feedback = rowB.press;
+        rowB.shiftedPress = synth::MessageIn::AppAction(0, 0, 0.0f);
+        rowB.shiftedAppAction = "test.unknown";
+        rowB.shiftedAppActionValue = "9";
+
+        slot.config.systemMessages.push_back(shiftButton);
+        slot.config.systemMessages.push_back(rowA);
+        slot.config.systemMessages.push_back(rowB);
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    synth::MidiInProcessor* processor = engine.MidiInputProcessor(0);
+    REQUIRE_TRUE(processor != nullptr);
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+
+    processor->Process(synth::BasicMidi::CC(0, 0, 30, 127));  // shift on
+    processor->Process(synth::BasicMidi::CC(0, 0, 10, 127));  // row A, shifted
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    const auto& dispatched = engine.Application().surface.dispatched;
+    REQUIRE_TRUE(dispatched.size() == 1);
+    REQUIRE_TRUE(dispatched[0].name == "test.actionB");
+
+    // Row B's shifted press was unresolved and cleared from the built
+    // profile, so pressing it while shifted still fires its ordinary press.
+    processor->Process(synth::BasicMidi::CC(0, 0, 11, 127));
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+    REQUIRE_TRUE(dispatched.size() == 2);
+    REQUIRE_TRUE(dispatched[1].name == "test.actionA");
+
+    // The persisted instrument keeps both shifted name/value pairs,
+    // including row B's, which the running catalog cannot currently
+    // resolve.
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    const auto& persisted = snapshot.controllers.front().config.systemMessages;
+    REQUIRE_TRUE(persisted.size() == 3);
+    bool foundRowA = false;
+    bool foundRowB = false;
+    for (const auto& association : persisted) {
+        if (!association.control.has_value()) {
+            continue;
+        }
+        if (association.control->cc == 10) {
+            REQUIRE_TRUE(association.shiftedAppAction == "test.actionB");
+            REQUIRE_TRUE(association.shiftedAppActionValue == "1");
+            foundRowA = true;
+        } else if (association.control->cc == 11) {
+            REQUIRE_TRUE(association.shiftedAppAction == "test.unknown");
+            REQUIRE_TRUE(association.shiftedAppActionValue == "9");
+            foundRowB = true;
+        }
+    }
+    REQUIRE_TRUE(foundRowA);
+    REQUIRE_TRUE(foundRowB);
+}
+
 TEST_CASE(engine_forwards_encoder_press_to_catalog_action_instead_of_opening_modulation_view) {
     MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
     MidiCatalogTestApp::catalog.encoderPressAction = "test.press";
@@ -3387,6 +3487,73 @@ TEST_CASE(engine_ignores_version_two_midi_instrument_section_when_catalog_does_n
     REQUIRE_TRUE(snapshot.controllers.front().output.identifier == "changed-out");
 
     std::filesystem::remove_all(patchDir);
+}
+
+namespace {
+
+// An app with a file-export queue: satisfies HasFileExports<App> and
+// nothing else beyond SynthApplicationCore, matching InitTopologyApp's
+// minimal shape.
+struct FileExportTestApp {
+    static inline std::vector<synth::FileExport> pending;
+
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "EngineFileExportTest";
+        return config;
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+
+    std::optional<synth::FileExport> TakePendingFileExport() {
+        if (pending.empty()) {
+            return std::nullopt;
+        }
+        synth::FileExport fileExport = std::move(pending.front());
+        pending.erase(pending.begin());
+        return fileExport;
+    }
+};
+
+}  // namespace
+
+TEST_CASE(engine_delivers_a_queued_file_export_to_the_installed_handler_once) {
+    FileExportTestApp::pending.clear();
+    FileExportTestApp::pending.push_back(
+        synth::FileExport{.fileName = "probe.txt",
+                          .mediaType = "text/plain",
+                          .bytes = std::vector<std::uint8_t>{'h', 'i'},
+                          .note = "a note"});
+
+    synth::Engine<FileExportTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+
+    std::vector<synth::FileExport> received;
+    engine.SetFileExportHandler(
+        [&received](synth::FileExport fileExport) { received.push_back(std::move(fileExport)); });
+
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(received.size() == 1);
+    REQUIRE_TRUE(received[0].fileName == "probe.txt");
+    REQUIRE_TRUE(received[0].mediaType == "text/plain");
+    REQUIRE_TRUE(received[0].bytes == std::vector<std::uint8_t>({'h', 'i'}));
+    REQUIRE_TRUE(received[0].note == "a note");
+    REQUIRE_TRUE(FileExportTestApp::pending.empty());
+}
+
+TEST_CASE(engine_takes_a_file_export_with_no_handler_and_logs_it) {
+    FileExportTestApp::pending.clear();
+    FileExportTestApp::pending.push_back(synth::FileExport{
+        .fileName = "dropped.txt", .mediaType = "text/plain", .bytes = {}, .note = ""});
+
+    synth::Engine<FileExportTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(FileExportTestApp::pending.empty());
 }
 
 int main() {

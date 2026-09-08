@@ -618,6 +618,22 @@ public:
         // still be settling, MessageThread): do nothing this tick, per
         // design ("CAS failure or non-Quiescent load -> do nothing this
         // tick").
+
+        // An app that declares HasFileExports queues exports on the message
+        // thread; drain every one it has queued this tick and hand it to
+        // whatever handler the host installed. With no handler installed,
+        // the export is still taken (never retained for a later tick) and
+        // logged so a session log shows what was dropped.
+        if constexpr (HasFileExports<App>) {
+            while (std::optional<FileExport> fileExport = app_.TakePendingFileExport()) {
+                if (fileExportHandler_) {
+                    fileExportHandler_(std::move(*fileExport));
+                } else {
+                    INFO("MessageThreadTick: dropping file export with no handler installed name=%s",
+                         fileExport->fileName.c_str());
+                }
+            }
+        }
     }
 
     App& Application() { return app_; }
@@ -792,6 +808,12 @@ public:
 
     void SetMidiProcessorsRebuiltCallback(std::function<void()> callback) {
         midiProcessorsRebuiltCallback_ = std::move(callback);
+    }
+    // Host hook for an app that declares HasFileExports: MessageThreadTick
+    // hands each queued file export to this handler exactly once, in the
+    // order the app queued them. Called on the message thread.
+    void SetFileExportHandler(std::function<void(FileExport)> handler) {
+        fileExportHandler_ = std::move(handler);
     }
     // Reserved for host notification when engine-owned runtime configuration
     // changes audioDeviceState_ without being initiated by the host. Patch
@@ -1036,7 +1058,10 @@ private:
     // action the running catalog does not know about stays in the saved
     // instrument and comes back once a later app version adds it). A row
     // whose (action, value) the catalog has sets its resolved index; a row
-    // it does not have is dropped from the copy, logged once by name.
+    // it does not have is dropped from the copy, logged once by name. A
+    // shifted press is resolved by its own (shiftedAppAction,
+    // shiftedAppActionValue) pair; when the catalog does not have it, only
+    // the shifted press is cleared from the copy -- the row itself stays.
     void ResolveAppActionsAgainstCatalog(MidiControllerProfileConfig& config) {
         for (auto it = config.systemMessages.begin(); it != config.systemMessages.end();) {
             if (it->press.type != MessageIn::Type::AppAction) {
@@ -1045,6 +1070,16 @@ private:
             }
             if (const auto ix = FindMidiAppAction(midiCatalog_, it->appAction, it->appActionValue)) {
                 it->press.appActionIx = *ix;
+                if (it->shiftedPress.has_value() && it->shiftedPress->type == MessageIn::Type::AppAction) {
+                    if (const auto shiftedIx =
+                            FindMidiAppAction(midiCatalog_, it->shiftedAppAction, it->shiftedAppActionValue)) {
+                        it->shiftedPress->appActionIx = *shiftedIx;
+                    } else {
+                        INFO("RebuildMidiProcessors: clearing unresolved shifted app action action=%s value=%s",
+                             it->shiftedAppAction.c_str(), it->shiftedAppActionValue.c_str());
+                        it->shiftedPress.reset();
+                    }
+                }
                 ++it;
             } else {
                 INFO("RebuildMidiProcessors: dropping unresolved app action action=%s value=%s",
@@ -1436,6 +1471,8 @@ private:
     std::function<void()> midiProcessorsWillRebuildCallback_;
     // See SetAudioDeviceChangedCallback's doc comment.
     std::function<void()> audioDeviceChangedCallback_;
+    // See SetFileExportHandler's doc comment.
+    std::function<void(FileExport)> fileExportHandler_;
 
     double sampleRate_ = 0.0;
     int blockSize_ = 0;

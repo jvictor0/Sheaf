@@ -44,6 +44,7 @@ export type RuntimeResponse =
   | { type: "midi-diagnostics"; diagnostics: MidiOutputDiagnostics }
   | { type: "status"; status: string }
   | { type: "page-status"; path: string; status: string }
+  | { type: "file-export"; fileName: string; mediaType: string; bytes: ArrayBuffer }
   | { type: "error"; error: string };
 
 export interface RuntimeModuleFacade {
@@ -81,6 +82,7 @@ export interface RuntimeModuleFacade {
   deliverMidi(handle: number, controllerIx: number, bytes: number[], timestampMicros: number): number;
   dequeueMidiOutput(handle: number): MidiOutput | undefined;
   midiDiagnostics?(handle: number): MidiOutputDiagnostics;
+  dequeueFileExport?(handle: number): { fileName: string; mediaType: string; bytes: ArrayBuffer } | undefined;
   destroy(handle: number): void;
 }
 
@@ -159,6 +161,7 @@ type EmscriptenModule = {
   _synth_browser_deliver_midi(handle: number, controllerIx: number, bytes: number, size: number, timestampMicros: bigint): number;
   _synth_browser_dequeue_midi_output(handle: number, descriptor: number): number;
   _synth_browser_midi_diagnostics(handle: number, descriptor: number): number;
+  _synth_browser_dequeue_file_export?(handle: number, descriptor: number): number;
   _synth_browser_destroy(handle: number): void;
 };
 
@@ -202,6 +205,7 @@ const DESCRIPTOR_SIZE = 20;
 const MIDI_ACTION_SIZE = 24;
 const MIDI_OUTPUT_SIZE = 24;
 const MIDI_DIAGNOSTICS_SIZE = 24;
+const FILE_EXPORT_SIZE = 24;
 const MAX_BROWSER_AUDIO_INPUT_STATUS_CODE = 10;
 const MIDI_ACTION_TYPES: MidiAction["type"][] = ["open-input", "open-output", "close-input", "close-output", "update-input-ref", "update-output-ref", "resync"];
 
@@ -427,6 +431,30 @@ export function emscriptenRuntimeFacade(module: EmscriptenModule): RuntimeModule
         module._free(descriptor);
       }
     },
+    dequeueFileExport: module._synth_browser_dequeue_file_export
+      ? (handle) => {
+        const descriptor = module._malloc(FILE_EXPORT_SIZE);
+        try {
+          const status = module._synth_browser_dequeue_file_export!(handle, descriptor);
+          if (status === 0) return undefined;
+          if (status !== 1) throw new Error("runtime failed to dequeue file export");
+          const view = new DataView(module.HEAPU8.buffer);
+          const fileNamePointer = view.getUint32(descriptor, true);
+          const fileNameSize = view.getUint32(descriptor + 4, true);
+          const mediaTypePointer = view.getUint32(descriptor + 8, true);
+          const mediaTypeSize = view.getUint32(descriptor + 12, true);
+          const bytesPointer = view.getUint32(descriptor + 16, true);
+          const bytesSize = view.getUint32(descriptor + 20, true);
+          return {
+            fileName: decodeUtf8(module, fileNamePointer, fileNameSize),
+            mediaType: decodeUtf8(module, mediaTypePointer, mediaTypeSize),
+            bytes: module.HEAPU8.slice(bytesPointer, bytesPointer + bytesSize).buffer,
+          };
+        } finally {
+          module._free(descriptor);
+        }
+      }
+      : undefined,
     destroy: (handle) => module._synth_browser_destroy(handle),
   };
 }
@@ -616,10 +644,20 @@ export class BrowserRuntimeWorker {
           if (!module.audioWorkletStats) throw new Error("runtime does not expose AudioWorklet stats");
           return { type: "audio-worklet-stats", ...module.audioWorkletStats(this.requireHandle()) };
         }
-        case "message-tick":
+        case "message-tick": {
           await this.call((module, handle) => module.messageTick(handle, command.timestampMicros));
           this.syncPersistenceIfRuntimeDirty();
+          const module = this.requireModule();
+          const handle = this.requireHandle();
+          for (
+            let fileExport = module.dequeueFileExport?.(handle);
+            fileExport !== undefined;
+            fileExport = module.dequeueFileExport?.(handle)
+          ) {
+            this.emitStatus({ type: "file-export", ...fileExport });
+          }
           return { type: "ok" };
+        }
         case "build-ui-frame":
           return this.buildUiFrameResponse();
         case "dispatch-action": {
@@ -714,7 +752,7 @@ function defaultPersistenceFactory(
 
 type WorkerScope = {
   addEventListener(type: "message", listener: (event: MessageEvent<RuntimeCommand>) => void): void;
-  postMessage(response: RuntimeResponse): void;
+  postMessage(response: RuntimeResponse, transfer?: Transferable[]): void;
   importScripts?: (...urls: string[]) => void;
 };
 
@@ -722,7 +760,10 @@ export function installBrowserRuntimeWorker(scope: WorkerScope, loadModule: Runt
   const runtime = new BrowserRuntimeWorker(
     loadModule,
     (filesystem, identity, reportStatus) => new BrowserPersistence(filesystem, identity, {}, reportStatus),
-    (response) => scope.postMessage(response),
+    // A file export's bytes are transferred rather than structured-cloned:
+    // the buffer moves to the main thread instead of being copied.
+    (response) =>
+      scope.postMessage(response, response.type === "file-export" ? [response.bytes] : undefined),
   );
   scope.addEventListener("message", (event: MessageEvent<RuntimeCommand>) => {
     void runtime.handle(event.data).then((response) => scope.postMessage(response));

@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -380,6 +381,10 @@ public:
         // RefreshInputRoutedState() call is needed until SetAudioInputSource/
         // ClearAudioInputSource run.
         engine_.Context().inputRoutingSignal = &inputRoutingSignal_;
+        // Queue every file export the app hands the engine; DequeueFileExport
+        // drains this queue for the ABI layer, one export per call.
+        engine_.SetFileExportHandler(
+            [this](synth::FileExport fileExport) { fileExports_.push_back(std::move(fileExport)); });
     }
 
     Runtime(const Runtime&) = delete;
@@ -783,6 +788,16 @@ public:
         return dirty;
     }
 
+    std::optional<synth::FileExport> DequeueFileExport()
+    {
+        if (fileExports_.empty()) {
+            return std::nullopt;
+        }
+        synth::FileExport fileExport = std::move(fileExports_.front());
+        fileExports_.pop_front();
+        return fileExport;
+    }
+
 private:
     static std::size_t StaticAudioInputChannels()
     {
@@ -1068,6 +1083,9 @@ private:
     std::atomic<bool> started_{false};
     std::atomic<bool> stopped_{false};
     bool persistenceDirty_ = false;
+    // File exports the engine's handler has queued, oldest first; drained by
+    // DequeueFileExport.
+    std::deque<synth::FileExport> fileExports_;
 #ifdef __EMSCRIPTEN__
     EMSCRIPTEN_WEBAUDIO_T audioContext_ = 0;
     EMSCRIPTEN_WEBAUDIO_T audioNode_ = 0;
@@ -1108,6 +1126,15 @@ struct MidiActionDescriptor {
     std::uint32_t identifierSize = 0;
     const char* name = nullptr;
     std::uint32_t nameSize = 0;
+};
+
+struct FileExportDescriptor {
+    const char* fileName = nullptr;
+    std::uint32_t fileNameSize = 0;
+    const char* mediaType = nullptr;
+    std::uint32_t mediaTypeSize = 0;
+    const std::uint8_t* bytes = nullptr;
+    std::uint32_t bytesSize = 0;
 };
 
 // Stable Wasm32 ABI record for one bounded browser-output dequeue. Scheduled
@@ -1202,6 +1229,7 @@ public:
     virtual int SubmitMidiEndpoints(const MidiEndpointDescriptor* endpoints, std::uint32_t count) = 0;
     virtual int SubmitAudioDevices(const AudioDeviceDescriptor* devices, std::uint32_t count) = 0;
     virtual int DequeueMidiAction(MidiActionDescriptor* action) = 0;
+    virtual int DequeueFileExport(FileExportDescriptor* descriptor) = 0;
     virtual int DeliverMidi(std::uint32_t controllerIx, const std::uint8_t* bytes, std::uint32_t size,
                             std::uint64_t timestampMicros) = 0;
     virtual const std::uint8_t* DequeueMidiOutput(MidiOutputDescriptor* descriptor) = 0;
@@ -1414,6 +1442,29 @@ public:
         }
     }
 
+    int DequeueFileExport(FileExportDescriptor* descriptor) override
+    {
+        if (descriptor == nullptr) {
+            return -1;
+        }
+        try {
+            fileExport_.reset();
+            fileExport_ = runtime_.DequeueFileExport();
+            if (!fileExport_.has_value()) {
+                return 0;
+            }
+            descriptor->fileName = fileExport_->fileName.data();
+            descriptor->fileNameSize = static_cast<std::uint32_t>(fileExport_->fileName.size());
+            descriptor->mediaType = fileExport_->mediaType.data();
+            descriptor->mediaTypeSize = static_cast<std::uint32_t>(fileExport_->mediaType.size());
+            descriptor->bytes = fileExport_->bytes.data();
+            descriptor->bytesSize = static_cast<std::uint32_t>(fileExport_->bytes.size());
+            return 1;
+        } catch (const std::exception&) {
+            return -1;
+        }
+    }
+
     int DeliverMidi(std::uint32_t controllerIx, const std::uint8_t* bytes, std::uint32_t size,
                     std::uint64_t timestampMicros) override
     {
@@ -1502,6 +1553,7 @@ private:
     CommandBuffer frame_;
     std::optional<typename BrowserMidiBridge<synth::Engine<App>>::Action> action_;
     std::optional<typename BrowserMidiBridge<synth::Engine<App>>::OutboundMessage> output_;
+    std::optional<synth::FileExport> fileExport_;
 };
 
 }  // namespace synth_browser
@@ -1544,6 +1596,7 @@ int synth_browser_submit_midi_endpoints(synth_browser_runtime* runtime,
 int synth_browser_submit_audio_devices(synth_browser_runtime* runtime,
                                        const synth_browser::AudioDeviceDescriptor* devices, std::uint32_t count);
 int synth_browser_dequeue_midi_action(synth_browser_runtime* runtime, synth_browser::MidiActionDescriptor* action);
+int synth_browser_dequeue_file_export(synth_browser_runtime* runtime, synth_browser::FileExportDescriptor* descriptor);
 int synth_browser_deliver_midi(synth_browser_runtime* runtime, std::uint32_t controllerIx, const std::uint8_t* bytes,
                                std::uint32_t size, std::uint64_t timestampMicros);
 const std::uint8_t* synth_browser_dequeue_midi_output(

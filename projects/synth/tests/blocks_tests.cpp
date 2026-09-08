@@ -150,6 +150,8 @@ bool MessageInFullyEquivalent(const MessageIn& a, const MessageIn& b) {
             return a.appActionIx == b.appActionIx && a.value == b.value;
         case MessageIn::Type::HoldDrill:
             return a.hasBoolValue == b.hasBoolValue && (!a.hasBoolValue || a.boolValue == b.boolValue);
+        case MessageIn::Type::Shift:
+            return a.hasBoolValue == b.hasBoolValue && (!a.hasBoolValue || a.boolValue == b.boolValue);
     }
     return false;
 }

@@ -232,6 +232,8 @@ const char* MessageTypeName(MessageIn::Type type) {
         return "appAction";
     case MessageIn::Type::HoldDrill:
         return "holdDrill";
+    case MessageIn::Type::Shift:
+        return "shift";
     }
     return "clock";
 }
@@ -287,6 +289,8 @@ bool ParseMessageType(std::string_view value, MessageIn::Type& type) {
         type = MessageIn::Type::AppAction;
     } else if (value == "holdDrill") {
         type = MessageIn::Type::HoldDrill;
+    } else if (value == "shift") {
+        type = MessageIn::Type::Shift;
     } else {
         return false;
     }
@@ -915,10 +919,11 @@ void PolyphonicPressureMidiInProcessor::Process(const BasicMidi& midi) {
 }
 
 SystemButtonMidiInProcessor::SystemButtonMidiInProcessor(SystemButtonMidiInConfig config, MessageInBus* bus,
-                                                          HoldDrillState* holdDrill)
+                                                          HoldDrillState* holdDrill, ShiftState* shift)
     : MidiInProcessor(bus),
       config_(std::move(config)),
-      holdDrill_(holdDrill) {}
+      holdDrill_(holdDrill),
+      shift_(shift) {}
 
 void SystemButtonMidiInProcessor::SetConfig(SystemButtonMidiInConfig config) {
     config_ = std::move(config);
@@ -956,8 +961,19 @@ void SystemButtonMidiInProcessor::Process(const BasicMidi& midi) {
         return;
     }
 
+    if (association->press.type == MessageIn::Type::Shift) {
+        // Shift state lives in the profile's input chain, never the bus:
+        // while held, other buttons push their shifted press instead of
+        // their ordinary one (below), so neither edge is pushed here.
+        if (shift_ != nullptr) {
+            shift_->held = isPress;
+        }
+        return;
+    }
+
     if (isPress) {
-        PushStamped(association->press);
+        const bool shifted = shift_ != nullptr && shift_->held && association->shiftedPress.has_value();
+        PushStamped(shifted ? *association->shiftedPress : association->press);
         return;
     }
 
@@ -1854,6 +1870,7 @@ SystemMessageOutputState SystemMessageOutputInfo::Evaluate(const MessageIn& mess
     case MessageIn::Type::SelectGrid:
     case MessageIn::Type::AppAction:
     case MessageIn::Type::HoldDrill:
+    case MessageIn::Type::Shift:
         return {};
     case MessageIn::Type::GridPress:
     case MessageIn::Type::GridRelease:
@@ -2409,6 +2426,7 @@ JSON ToJSON(JsonArena& arena, const MessageIn& value) {
     case MessageIn::Type::SceneSelect:
     case MessageIn::Type::SetSceneBlend:
     case MessageIn::Type::HoldDrill:
+    case MessageIn::Type::Shift:
         break;
     }
     json.SetNew("slotIx", arena.Integer(static_cast<int64_t>(value.slotIx)));
@@ -2481,6 +2499,7 @@ bool FromJSON(JSON json, MessageIn& value) {
     case MessageIn::Type::SceneSelect:
     case MessageIn::Type::SetSceneBlend:
     case MessageIn::Type::HoldDrill:
+    case MessageIn::Type::Shift:
         break;
     }
     if (!ReadSize(json.Get("slotIx"), parsed.slotIx) || !ReadSize(json.Get("position"), parsed.position) ||
@@ -2592,11 +2611,20 @@ JSON ToJSON(JsonArena& arena, const MidiControllerSystemMessageAssociation& valu
     } else {
         json.SetNew("release", arena.Null());
     }
+    if (value.shiftedPress.has_value()) {
+        json.SetNew("shiftedPress", ToJSON(arena, *value.shiftedPress));
+    } else {
+        json.SetNew("shiftedPress", arena.Null());
+    }
     json.SetNew("feedback", ToJSON(arena, value.feedback));
     json.SetNew("outputFeedback", arena.Boolean(value.outputFeedback));
     if (value.press.type == MessageIn::Type::AppAction) {
         json.SetNew("appAction", arena.String(value.appAction.c_str()));
         json.SetNew("appActionValue", arena.String(value.appActionValue.c_str()));
+    }
+    if (value.shiftedPress.has_value() && value.shiftedPress->type == MessageIn::Type::AppAction) {
+        json.SetNew("shiftedAppAction", arena.String(value.shiftedAppAction.c_str()));
+        json.SetNew("shiftedAppActionValue", arena.String(value.shiftedAppActionValue.c_str()));
     }
     return json;
 }
@@ -2641,6 +2669,14 @@ bool FromJSON(JSON json, MidiControllerSystemMessageAssociation& value) {
         }
         parsed.release = parsedRelease;
     }
+    const JSON shiftedPress = json.Get("shiftedPress");
+    if (!shiftedPress.IsNull()) {
+        MessageIn parsedShiftedPress;
+        if (!FromJSON(shiftedPress, parsedShiftedPress)) {
+            return false;
+        }
+        parsed.shiftedPress = parsedShiftedPress;
+    }
     const JSON outputFeedback = json.Get("outputFeedback");
     if (!outputFeedback.IsNull() && !ReadBool(outputFeedback, parsed.outputFeedback)) {
         return false;
@@ -2658,6 +2694,20 @@ bool FromJSON(JSON json, MidiControllerSystemMessageAssociation& value) {
             return false;
         }
         parsed.appActionValue = appActionValue.StringValue();
+    }
+    if (ObjectHasKey(json, "shiftedAppAction")) {
+        const JSON shiftedAppAction = json.Get("shiftedAppAction");
+        if (!IsString(shiftedAppAction)) {
+            return false;
+        }
+        parsed.shiftedAppAction = shiftedAppAction.StringValue();
+    }
+    if (ObjectHasKey(json, "shiftedAppActionValue")) {
+        const JSON shiftedAppActionValue = json.Get("shiftedAppActionValue");
+        if (!IsString(shiftedAppActionValue)) {
+            return false;
+        }
+        parsed.shiftedAppActionValue = shiftedAppActionValue.StringValue();
     }
     value = std::move(parsed);
     return true;
@@ -2959,6 +3009,8 @@ MidiControllerProfileResult CreateMidiControllerProfileImpl(
     MidiControllerProfileResult result;
     result.holdDrill = std::make_unique<HoldDrillState>();
     HoldDrillState* const holdDrill = result.holdDrill.get();
+    result.shift = std::make_unique<ShiftState>();
+    ShiftState* const shift = result.shift.get();
     const EncoderMode feedbackMode =
         config.encoderInput.has_value() ? config.encoderInput->mode : EncoderMode::Signed7Bit;
     AbsoluteFeedbackCoordinator* activeAbsoluteFeedback =
@@ -2993,9 +3045,11 @@ MidiControllerProfileResult CreateMidiControllerProfileImpl(
                 .launchpadPosition = association.launchpadPosition,
                 .press = association.press,
                 .release = association.release,
+                .shiftedPress = association.shiftedPress,
             });
         }
-        appendInput(std::make_unique<SystemButtonMidiInProcessor>(std::move(systemInput), bus, holdDrill));
+        appendInput(
+            std::make_unique<SystemButtonMidiInProcessor>(std::move(systemInput), bus, holdDrill, shift));
     }
     if (config.pressureInput.has_value()) {
         appendInput(std::make_unique<PolyphonicPressureMidiInProcessor>(*config.pressureInput, bus));

@@ -23,7 +23,7 @@ std::vector<SystemAddressField> SystemAddressSchema(MidiProfileKind kind) {
 
 namespace {
 
-// MessageIn::Type's declaration order (ParamIncDec .. HoldDrill, 25 kinds)
+// MessageIn::Type's declaration order (ParamIncDec .. HoldDrill, Shift, 26 kinds)
 // IS the type ordering component of SystemMessageSortKey -- static_cast the
 // enum directly rather than maintaining a parallel table that could drift.
 int TypeOrder(MessageIn::Type type) {
@@ -117,6 +117,10 @@ SystemMessageSortKey ComputeSystemMessageSortKey(const MidiControllerSystemMessa
             key.arg1 = message.appActionIx;
             break;
         case MessageIn::Type::HoldDrill:
+            key.hasBoolValue = message.hasBoolValue;
+            key.boolValue = message.boolValue;
+            break;
+        case MessageIn::Type::Shift:
             key.hasBoolValue = message.hasBoolValue;
             key.boolValue = message.boolValue;
             break;

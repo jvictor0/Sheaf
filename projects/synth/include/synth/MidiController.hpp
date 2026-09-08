@@ -251,6 +251,12 @@ struct HoldDrillState {
     std::vector<bool> drilled;  // one flag per encoder-turn mapping
 };
 
+// Per-profile: set by a Shift button's press, cleared by its release, read
+// only by that profile's system-button processor.
+struct ShiftState {
+    bool held = false;
+};
+
 class EncoderMidiInProcessor final : public MidiInProcessor {
 public:
     EncoderMidiInProcessor(EncoderMidiInConfig config, MessageInBus* bus = nullptr,
@@ -371,6 +377,7 @@ struct SystemButtonMidiAssociation {
     std::optional<LaunchpadGridPosition> launchpadPosition;
     MessageIn press;
     std::optional<MessageIn> release;
+    std::optional<MessageIn> shiftedPress;
 };
 
 struct SystemButtonMidiInConfig {
@@ -380,7 +387,7 @@ struct SystemButtonMidiInConfig {
 class SystemButtonMidiInProcessor final : public MidiInProcessor {
 public:
     SystemButtonMidiInProcessor(SystemButtonMidiInConfig config, MessageInBus* bus = nullptr,
-                                HoldDrillState* holdDrill = nullptr);
+                                HoldDrillState* holdDrill = nullptr, ShiftState* shift = nullptr);
 
     void SetConfig(SystemButtonMidiInConfig config);
     const SystemButtonMidiInConfig& Config() const { return config_; }
@@ -392,6 +399,7 @@ private:
 
     SystemButtonMidiInConfig config_;
     HoldDrillState* holdDrill_ = nullptr;
+    ShiftState* shift_ = nullptr;
 };
 
 enum class MidiSchedulingCapability : std::uint8_t {
@@ -914,6 +922,14 @@ struct MidiControllerSystemMessageAssociation {
     bool outputFeedback = true;
     std::string appAction;
     std::string appActionValue;
+    // A second press for this button, pushed instead of `press` while a
+    // Shift button on the same profile is held. Absent means the button
+    // does its ordinary job shifted or not. When it is AppAction, the
+    // shifted name/value pair below identifies the action, resolved on
+    // rebuild the way appAction/appActionValue are.
+    std::optional<MessageIn> shiftedPress;
+    std::string shiftedAppAction;
+    std::string shiftedAppActionValue;
 };
 
 struct MidiControllerProfileConfig {
@@ -935,6 +951,7 @@ struct MidiControllerProfileResult {
     std::vector<std::unique_ptr<MidiInProcessor>> inputThru;
     std::vector<std::unique_ptr<MidiOutputProcessor>> outputs;
     std::unique_ptr<HoldDrillState> holdDrill;
+    std::unique_ptr<ShiftState> shift;
 };
 
 MidiControllerProfileResult CreateBlacklistedMidiControllerProfile();
