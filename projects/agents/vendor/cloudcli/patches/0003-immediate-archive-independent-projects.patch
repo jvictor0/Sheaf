@@ -1,114 +1,40 @@
-diff --git a/src/components/sidebar/hooks/useSidebarController.ts b/src/components/sidebar/hooks/useSidebarController.ts
-index c8c294c..15e6ba3 100644
---- a/src/components/sidebar/hooks/useSidebarController.ts
-+++ b/src/components/sidebar/hooks/useSidebarController.ts
-@@ -564,8 +564,10 @@ export function useSidebarController({
-   // `projectId` as their identifier after the migration.
-   const toggleProject = useCallback((projectId: string) => {
-     setExpandedProjects((prev) => {
--      const next = new Set<string>();
--      if (!prev.has(projectId)) {
-+      const next = new Set(prev);
-+      if (next.has(projectId)) {
-+        next.delete(projectId);
-+      } else {
-         next.add(projectId);
-       }
-       return next;
-@@ -833,9 +835,30 @@ export function useSidebarController({
-     [editingName, paletteOps],
-   );
- 
-+  const removeSession = useCallback(async (sessionId: string, hardDelete: boolean) => {
-+    try {
-+      const response = await api.deleteSession(sessionId, hardDelete);
-+
-+      if (response.ok) {
-+        onSessionDelete?.(sessionId);
-+        await fetchArchivedSessions();
-+      } else {
-+        const errorText = await response.text();
-+        console.error('[Sidebar] Failed to delete session:', {
-+          status: response.status,
-+          error: errorText,
-+        });
-+        alert(t('messages.deleteSessionFailed'));
-+      }
-+    } catch (error) {
-+      console.error('[Sidebar] Error deleting session:', error);
-+      alert(t('messages.deleteSessionError'));
-+    }
-+  }, [fetchArchivedSessions, onSessionDelete, t]);
-+
-   const showDeleteSessionConfirmation = useCallback(
-     // Kept with project/provider arguments for component wiring compatibility;
--    // deletion now uses only `sessionId` via /api/providers/sessions/:sessionId.
-+    // session removal uses only `sessionId` via /api/providers/sessions/:sessionId.
-     (
-       projectId: string | null,
-       sessionId: string,
-@@ -845,6 +868,11 @@ export function useSidebarController({
-         isArchived?: boolean;
-       } = {},
-     ) => {
-+      if (!options.isArchived) {
-+        void removeSession(sessionId, false);
-+        return;
-+      }
-+
-       setSessionDeleteConfirmation({
-         projectId,
-         sessionId,
-@@ -853,7 +881,7 @@ export function useSidebarController({
-         isArchived: Boolean(options.isArchived),
-       });
-     },
--    [],
-+    [removeSession],
-   );
- 
-   const confirmDeleteSession = useCallback(async (hardDelete = false) => {
-@@ -863,26 +891,8 @@ export function useSidebarController({
- 
-     const { sessionId } = sessionDeleteConfirmation;
-     setSessionDeleteConfirmation(null);
--
--    try {
--      const response = await api.deleteSession(sessionId, hardDelete);
--
--      if (response.ok) {
--        onSessionDelete?.(sessionId);
--        await fetchArchivedSessions();
--      } else {
--        const errorText = await response.text();
--        console.error('[Sidebar] Failed to delete session:', {
--          status: response.status,
--          error: errorText,
--        });
--        alert(t('messages.deleteSessionFailed'));
--      }
--    } catch (error) {
--      console.error('[Sidebar] Error deleting session:', error);
--      alert(t('messages.deleteSessionError'));
--    }
--  }, [fetchArchivedSessions, onSessionDelete, sessionDeleteConfirmation, t]);
-+    await removeSession(sessionId, hardDelete);
-+  }, [removeSession, sessionDeleteConfirmation]);
- 
-   const requestProjectDelete = useCallback(
-     (project: Project) => {
-diff --git a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
-index 90c98f0..2cb710d 100644
---- a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
-+++ b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
+diff --git a/src/modules/sidebar/SessionOptions.tsx b/src/modules/sidebar/SessionOptions.tsx
+index 1f7b254c..c93e859f 100644
+--- a/src/modules/sidebar/SessionOptions.tsx
++++ b/src/modules/sidebar/SessionOptions.tsx
 @@ -1,5 +1,5 @@
- import { useEffect, useRef, useState } from 'react';
--import { Check, Copy, Edit2, Loader2, MoreHorizontal, Trash2, X } from 'lucide-react';
-+import { Archive, Check, Copy, Edit2, Loader2, MoreHorizontal, X } from 'lucide-react';
+ import { useEffect, useRef } from 'react';
+-import { Check, Edit2, GitBranch, MoreHorizontal, Trash2, X } from 'lucide-react';
++import { Archive, Check, Edit2, GitBranch, MoreHorizontal, X } from 'lucide-react';
  import type { TFunction } from 'i18next';
- 
- import { ActionMenu, Badge, Dialog, DialogContent, DialogTitle, Tooltip, buttonVariants } from '../../../../shared/view/ui';
-@@ -393,10 +393,10 @@ export default function SidebarSessionItem({
+
+ import { ActionMenu } from '@/shared/ui';
+@@ -183,10 +183,9 @@ export default function SessionOptions({
+               onSelect: onFork,
+             }] : []),
+             ...(canDelete && !isProcessing ? [{
+-              key: 'delete',
+-              label: 'Archive or delete session',
+-              icon: Trash2,
+-              isDanger: true,
++              key: 'archive',
++              label: 'Archive session',
++              icon: Archive,
+               showDividerBefore: true,
+               onSelect: () => onDeleteSession(sessionId, sessionName),
+             }] : []),
+diff --git a/src/modules/sidebar/SidebarSessionItem.tsx b/src/modules/sidebar/SidebarSessionItem.tsx
+index 56699eaf..98082f93 100644
+--- a/src/modules/sidebar/SidebarSessionItem.tsx
++++ b/src/modules/sidebar/SidebarSessionItem.tsx
+@@ -1,5 +1,5 @@
+ import { memo, useState } from 'react';
+-import { Check, Edit2, Loader2, MoreHorizontal, Trash2, X } from 'lucide-react';
++import { Archive, Check, Edit2, Loader2, MoreHorizontal, X } from 'lucide-react';
+ import type { TFunction } from 'i18next';
+
+ import { Badge, Dialog, DialogContent, DialogTitle, LLMProviderLogo, Tooltip, buttonVariants } from '@/shared/ui';
+@@ -300,10 +300,10 @@ function SidebarSessionItem({
                        setMobileOptionsOpen(false);
                        requestDeleteSession();
                      }}
@@ -122,17 +48,102 @@ index 90c98f0..2cb710d 100644
                    </button>
                  )}
                </div>
-@@ -564,10 +564,9 @@ export default function SidebarSessionItem({
-                     onSelect: handleCopyAction,
-                   },
-                   ...(!isProcessing ? [{
--                    key: 'delete',
--                    label: 'Archive or delete session',
--                    icon: Trash2,
--                    isDanger: true,
-+                    key: 'archive',
-+                    label: 'Archive session',
-+                    icon: Archive,
-                     showDividerBefore: true,
-                     onSelect: requestDeleteSession,
-                   }] : []),
+diff --git a/src/modules/sidebar/hooks/useSidebarController.ts b/src/modules/sidebar/hooks/useSidebarController.ts
+index a12406fc..bfd9867a 100644
+--- a/src/modules/sidebar/hooks/useSidebarController.ts
++++ b/src/modules/sidebar/hooks/useSidebarController.ts
+@@ -492,8 +492,10 @@ export function useSidebarController({
+   // `projectId` as their identifier after the migration.
+   const toggleProject = useCallback((projectId: string) => {
+     setExpandedProjects((prev) => {
+-      const next = new Set<string>();
+-      if (!prev.has(projectId)) {
++      const next = new Set(prev);
++      if (next.has(projectId)) {
++        next.delete(projectId);
++      } else {
+         next.add(projectId);
+       }
+       return next;
+@@ -769,38 +771,13 @@ export function useSidebarController({
+     [paletteOps],
+   );
+
+-  const showDeleteSessionConfirmation = useCallback(
+-    (
+-      sessionId: string,
+-      sessionTitle: string,
+-      options: { isArchived?: boolean } = {},
+-    ) => {
+-      setPendingDeletion({
+-        kind: 'session',
+-        sessionId,
+-        sessionTitle,
+-        isArchived: Boolean(options.isArchived),
+-      });
+-    },
+-    [],
+-  );
+-
+-  const confirmDeleteSession = useCallback(async (hardDelete = false) => {
+-    if (pendingDeletion?.kind !== 'session') {
+-      return;
+-    }
+-
+-    const { sessionId } = pendingDeletion;
+-    setPendingDeletion(null);
+-
++  const removeSession = useCallback(async (sessionId: string, hardDelete: boolean) => {
+     try {
+       const response = await api.deleteSession(sessionId, hardDelete);
+
+       if (response.ok) {
+         onSessionDelete?.(sessionId);
+-        // Same gap as rename: nothing refetched the recents feed, so the row the
+-        // user just archived stayed in the list. Archiving keeps the session, so
+-        // only the non-archived total moves.
++        // Archiving keeps the session, so only the non-archived recents total moves.
+         setRecentConversations((previous) => {
+           const remaining = previous.filter((conversation) => conversation.sessionId !== sessionId);
+           if (remaining.length !== previous.length) {
+@@ -821,7 +798,39 @@ export function useSidebarController({
+       console.error('[Sidebar] Error deleting session:', error);
+       alert(t('messages.deleteSessionError'));
+     }
+-  }, [fetchArchivedSessions, onSessionDelete, pendingDeletion, t]);
++  }, [fetchArchivedSessions, onSessionDelete, t]);
++
++  const showDeleteSessionConfirmation = useCallback(
++    (
++      sessionId: string,
++      sessionTitle: string,
++      options: { isArchived?: boolean } = {},
++    ) => {
++      if (!options.isArchived) {
++        void removeSession(sessionId, false);
++        return;
++      }
++
++      setPendingDeletion({
++        kind: 'session',
++        sessionId,
++        sessionTitle,
++        isArchived: Boolean(options.isArchived),
++      });
++    },
++    [removeSession],
++  );
++
++  const confirmDeleteSession = useCallback(async (hardDelete = false) => {
++    if (pendingDeletion?.kind !== 'session') {
++      return;
++    }
++
++    const { sessionId } = pendingDeletion;
++    setPendingDeletion(null);
++
++    await removeSession(sessionId, hardDelete);
++  }, [removeSession, pendingDeletion]);
+
+   const requestProjectDelete = useCallback(
+     (project: Project) => {

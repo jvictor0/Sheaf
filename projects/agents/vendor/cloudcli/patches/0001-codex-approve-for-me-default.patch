@@ -1,51 +1,103 @@
-diff --git a/server/modules/providers/list/codex/codex-runtime.provider.js b/server/modules/providers/list/codex/codex-runtime.provider.js
-index dc5bf66..fe920b8 100644
---- a/server/modules/providers/list/codex/codex-runtime.provider.js
-+++ b/server/modules/providers/list/codex/codex-runtime.provider.js
-@@ -197 +197 @@ function transformCodexEvent(event) {
+diff --git a/server/modules/providers/list/codex/codex-runtime.provider.ts b/server/modules/providers/list/codex/codex-runtime.provider.ts
+index 89ccd0a1..9f0a923f 100644
+--- a/server/modules/providers/list/codex/codex-runtime.provider.ts
++++ b/server/modules/providers/list/codex/codex-runtime.provider.ts
+@@ -221,14 +221,17 @@ function transformCodexEvent(event: AnyRecord): AnyRecord {
+ /**
+  * Map permission mode to Codex SDK options
+  * @param {string} permissionMode - 'default', 'acceptEdits', or 'bypassPermissions'
 - * @returns {object} - { sandboxMode, approvalPolicy }
 + * @returns {object} - { sandboxMode, approvalPolicy, approvalsReviewer? }
-@@ -199 +199 @@ function transformCodexEvent(event) {
--function mapPermissionModeToCodexOptions(permissionMode) {
-+export function mapPermissionModeToCodexOptions(permissionMode) {
-@@ -204 +204,2 @@ function mapPermissionModeToCodexOptions(permissionMode) {
+  */
+-function mapPermissionModeToCodexOptions(permissionMode: string): Pick<ThreadOptions, 'sandboxMode' | 'approvalPolicy'> {
++export function mapPermissionModeToCodexOptions(
++  permissionMode: string,
++): Pick<ThreadOptions, 'sandboxMode' | 'approvalPolicy'> & { approvalsReviewer?: string } {
+   switch (permissionMode) {
+     case 'acceptEdits':
+       return {
+         sandboxMode: 'workspace-write',
 -        approvalPolicy: 'never'
 +        approvalPolicy: 'on-request',
 +        approvalsReviewer: 'auto_review'
-@@ -246 +247 @@ export async function queryCodex(command, options = {}, ws, context) {
+       };
+     case 'bypassPermissions':
+       return {
+@@ -277,7 +280,7 @@ async function queryCodex(
+   const resolvedModel = await context.resolveResumeModel(sessionId, model);
+
+   const workingDirectory = cwd || projectPath || process.cwd();
 -  const { sandboxMode, approvalPolicy } = mapPermissionModeToCodexOptions(permissionMode);
 +  const { sandboxMode, approvalPolicy, approvalsReviewer } = mapPermissionModeToCodexOptions(permissionMode);
-@@ -267 +268,3 @@ export async function queryCodex(command, options = {}, ws, context) {
+   const catalog = await context.getProviderModels();
+   const selectedModel = catalog.OPTIONS.find((option) => option.value === resolvedModel) || null;
+   const allowedEfforts = selectedModel?.effort?.values?.map((value) => value.value) || [];
+@@ -304,7 +307,9 @@ async function queryCodex(
+   const sessionKey = () => sessionId || capturedSessionId || null;
+
+   try {
 -    codex = new Codex();
 +    codex = new Codex({
 +      config: approvalsReviewer ? { approvals_reviewer: approvalsReviewer } : {}
 +    });
+
+     const threadOptions: ThreadOptions = {
+       workingDirectory,
 diff --git a/server/modules/providers/services/provider-capabilities.service.ts b/server/modules/providers/services/provider-capabilities.service.ts
-index b506615..71ca581 100644
+index 4f74b1cd..17a1c4b2 100644
 --- a/server/modules/providers/services/provider-capabilities.service.ts
 +++ b/server/modules/providers/services/provider-capabilities.service.ts
-@@ -62 +62 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
+@@ -74,7 +74,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
+   codex: {
+     provider: 'codex',
+     permissionModes: ['default', 'acceptEdits', 'bypassPermissions'],
 -    defaultPermissionMode: 'default',
 +    defaultPermissionMode: 'acceptEdits',
-diff --git a/src/i18n/locales/en/chat.json b/src/i18n/locales/en/chat.json
-index eaecb47..fd097c0 100644
---- a/src/i18n/locales/en/chat.json
-+++ b/src/i18n/locales/en/chat.json
-@@ -93 +93 @@
+     supportsImages: true,
+     supportsFiles: true,
+     supportsAbort: true,
+diff --git a/src/modules/i18n/locales/en/chat.json b/src/modules/i18n/locales/en/chat.json
+index b0c1d72f..54f1748e 100644
+--- a/src/modules/i18n/locales/en/chat.json
++++ b/src/modules/i18n/locales/en/chat.json
+@@ -90,14 +90,14 @@
+     "modes": {
+       "default": "Default Mode",
+       "auto": "Auto Mode",
 -      "acceptEdits": "Accept Edits",
 +      "acceptEdits": "Approve for me",
-@@ -100 +100 @@
+       "bypassPermissions": "Bypass Permissions",
+       "plan": "Plan Mode"
+     },
+     "descriptions": {
+       "default": "Only trusted commands (ls, cat, grep, git status, etc.) run automatically. Other commands are skipped. Can write to workspace.",
+       "auto": "A model classifier decides per tool call whether to approve or deny. Hands-off, but safer than Bypass — denials still happen.",
 -      "acceptEdits": "All commands run automatically within the workspace. Full auto mode with sandboxed execution.",
 +      "acceptEdits": "Codex automatically reviews approval requests while remaining sandboxed to the workspace.",
-diff --git a/src/i18n/locales/en/settings.json b/src/i18n/locales/en/settings.json
-index a783fb1..90550c0 100644
---- a/src/i18n/locales/en/settings.json
-+++ b/src/i18n/locales/en/settings.json
-@@ -423,2 +423,2 @@
+       "bypassPermissions": "Full system access with no restrictions. All commands run automatically with full disk and network access. Use with caution.",
+       "plan": "Planning mode - no commands are executed"
+     },
+diff --git a/src/modules/i18n/locales/en/settings.json b/src/modules/i18n/locales/en/settings.json
+index 09756a6c..0b8103b9 100644
+--- a/src/modules/i18n/locales/en/settings.json
++++ b/src/modules/i18n/locales/en/settings.json
+@@ -437,8 +437,8 @@
+           "description": "Runs commands within the workspace sandbox. Codex decides when approval is needed; requests cannot be approved in this non-interactive integration."
+         },
+         "acceptEdits": {
 -          "title": "Accept Edits",
 -          "description": "All commands run automatically within the workspace. Full auto mode with sandboxed execution."
 +          "title": "Approve for me",
 +          "description": "Codex automatically reviews approval requests while remaining sandboxed to the workspace."
-@@ -434 +434 @@
+         },
+         "bypassPermissions": {
+           "title": "Bypass Permissions",
+@@ -448,7 +448,7 @@
+       "technicalDetails": "Technical details",
+       "technicalInfo": {
+         "default": "sandboxMode=workspace-write, approvalPolicy=on-request. Runs commands within the workspace sandbox. Codex decides when approval is needed; requests cannot be approved in this non-interactive integration.",
 -        "acceptEdits": "sandboxMode=workspace-write, approvalPolicy=never. All commands auto-execute within project directory.",
 +        "acceptEdits": "sandboxMode=workspace-write, approvalPolicy=on-request, approvalsReviewer=auto_review.",
+         "bypassPermissions": "sandboxMode=danger-full-access, approvalPolicy=never. Full system access, use only in trusted environments.",
+         "overrideNote": "You can override this per-session using the mode button in the chat interface."
+       }

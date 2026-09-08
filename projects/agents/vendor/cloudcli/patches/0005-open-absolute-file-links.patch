@@ -1,11 +1,11 @@
 diff --git a/server/modules/file-tree/file-tree.service.ts b/server/modules/file-tree/file-tree.service.ts
-index 25ccd15..1ea0d4b 100644
+index 25ccd158..1ea0d4b3 100644
 --- a/server/modules/file-tree/file-tree.service.ts
 +++ b/server/modules/file-tree/file-tree.service.ts
 @@ -101,6 +101,12 @@ function resolvePathInsideProject(projectRoot: string, targetPath: string): stri
    return resolvedPath;
  }
- 
+
 +function resolveFileAccessPath(projectRoot: string, targetPath: string): string {
 +  return path.isAbsolute(targetPath)
 +    ? path.resolve(targetPath)
@@ -16,7 +16,7 @@ index 25ccd15..1ea0d4b 100644
    if (inputPath === '~') {
      return workspaceRoot;
 @@ -409,7 +415,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
- 
+
      async readTextFile(projectId, filePath) {
        const projectRoot = await resolveProjectRoot(projectId);
 -      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
@@ -25,7 +25,7 @@ index 25ccd15..1ea0d4b 100644
          const content = await fileSystem.readTextFile(resolvedPath);
          return { content, path: resolvedPath };
 @@ -423,7 +429,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
- 
+
      async openFile(projectId, filePath) {
        const projectRoot = await resolveProjectRoot(projectId);
 -      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
@@ -34,7 +34,7 @@ index 25ccd15..1ea0d4b 100644
          await fileSystem.access(resolvedPath);
        } catch {
 @@ -438,7 +444,7 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
- 
+
      async saveTextFile(projectId, filePath, content) {
        const projectRoot = await resolveProjectRoot(projectId);
 -      const resolvedPath = resolvePathInsideProject(projectRoot, filePath);
@@ -43,13 +43,13 @@ index 25ccd15..1ea0d4b 100644
          await fileSystem.writeTextFile(resolvedPath, content);
        } catch (error) {
 diff --git a/server/modules/file-tree/tests/file-tree.service.test.ts b/server/modules/file-tree/tests/file-tree.service.test.ts
-index 643d738..9a5fb38 100644
+index 643d7389..9a5fb385 100644
 --- a/server/modules/file-tree/tests/file-tree.service.test.ts
 +++ b/server/modules/file-tree/tests/file-tree.service.test.ts
 @@ -343,6 +343,45 @@ test('readTextFile rejects traversal before invoking the filesystem adapter', as
    assert.deepEqual(readPaths, []);
  });
- 
+
 +test('file access uses an absolute path independently of the selected project', async () => {
 +  const projectRoot = path.resolve('file-tree-test-project');
 +  const siblingFile = path.resolve('sibling-worktree', 'proposal.md');
@@ -92,11 +92,11 @@ index 643d738..9a5fb38 100644
  test('createEntry performs filesystem mutation only through the injected adapter', async () => {
    const projectRoot = path.resolve('file-tree-test-project');
    const targetPath = path.join(projectRoot, 'notes.txt');
-diff --git a/src/hooks/fileOpenResolver.ts b/src/hooks/fileOpenResolver.ts
+diff --git a/src/modules/project-workspace/hooks/fileOpenResolver.ts b/src/modules/project-workspace/hooks/fileOpenResolver.ts
 new file mode 100644
-index 0000000..cde4153
+index 00000000..cde41536
 --- /dev/null
-+++ b/src/hooks/fileOpenResolver.ts
++++ b/src/modules/project-workspace/hooks/fileOpenResolver.ts
 @@ -0,0 +1,38 @@
 +export type FileReferenceCandidate = {
 +  name: string;
@@ -136,56 +136,55 @@ index 0000000..cde4153
 +  const base = target.split('/').pop() || target;
 +  return files.find((file) => file.name === base)?.path ?? ref;
 +};
-diff --git a/src/hooks/useFileOpenResolver.test.ts b/src/hooks/useFileOpenResolver.test.ts
+diff --git a/src/modules/project-workspace/hooks/useFileOpenResolver.test.ts b/src/modules/project-workspace/hooks/useFileOpenResolver.test.ts
 new file mode 100644
-index 0000000..cb71077
+index 00000000..dfed56c2
 --- /dev/null
-+++ b/src/hooks/useFileOpenResolver.test.ts
-@@ -0,0 +1,28 @@
-+import assert from 'node:assert/strict';
-+import test from 'node:test';
++++ b/src/modules/project-workspace/hooks/useFileOpenResolver.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from 'vitest';
 +
-+import { resolveFileReference } from './fileOpenResolver';
++import { resolveFileReference } from '@/modules/project-workspace/hooks/fileOpenResolver';
 +
-+test('resolveFileReference preserves an absolute path outside the selected project', () => {
-+  const files = [
-+    {
-+      name: 'proposal.md',
-+      path: '/workspace/current/.dev/worktree/other/openspec/changes/unrelated/proposal.md',
-+    },
-+  ];
-+  const reference = '/workspace/sibling/openspec/changes/intended/proposal.md';
++describe('resolveFileReference', () => {
++  it('preserves an absolute path outside the selected project', () => {
++    const files = [
++      {
++        name: 'proposal.md',
++        path: '/workspace/current/.dev/worktree/other/openspec/changes/unrelated/proposal.md',
++      },
++    ];
++    const reference = '/workspace/sibling/openspec/changes/intended/proposal.md';
 +
-+  assert.equal(resolveFileReference(files, reference), reference);
++    expect(resolveFileReference(files, reference)).toBe(reference);
++  });
++
++  it('still resolves relative references against project files', () => {
++    const files = [
++      { name: 'other.ts', path: '/workspace/current/src/other.ts' },
++      { name: 'target.ts', path: '/workspace/current/src/utils/target.ts' },
++    ];
++
++    expect(resolveFileReference(files, 'src/utils/target.ts'))
++      .toBe('/workspace/current/src/utils/target.ts');
++  });
 +});
-+
-+test('resolveFileReference still resolves relative references against project files', () => {
-+  const files = [
-+    { name: 'other.ts', path: '/workspace/current/src/other.ts' },
-+    { name: 'target.ts', path: '/workspace/current/src/utils/target.ts' },
-+  ];
-+
-+  assert.equal(
-+    resolveFileReference(files, 'src/utils/target.ts'),
-+    '/workspace/current/src/utils/target.ts',
-+  );
-+});
-diff --git a/src/hooks/useFileOpenResolver.ts b/src/hooks/useFileOpenResolver.ts
-index ed5fd1f..89defea 100644
---- a/src/hooks/useFileOpenResolver.ts
-+++ b/src/hooks/useFileOpenResolver.ts
+diff --git a/src/modules/project-workspace/hooks/useFileOpenResolver.ts b/src/modules/project-workspace/hooks/useFileOpenResolver.ts
+index b514f70c..179ba60e 100644
+--- a/src/modules/project-workspace/hooks/useFileOpenResolver.ts
++++ b/src/modules/project-workspace/hooks/useFileOpenResolver.ts
 @@ -2,6 +2,7 @@ import { useCallback, useRef } from 'react';
- 
- import { api } from '../utils/api';
- import type { Project } from '../types/app';
-+import { isAbsoluteFileReference, resolveFileReference } from './fileOpenResolver';
- 
+
+ import { api } from '@/shared/api';
+ import type { Project } from '@/shared/types';
++import { isAbsoluteFileReference, resolveFileReference } from '@/modules/project-workspace/hooks/fileOpenResolver';
+
  type FileNode = {
    type: 'file' | 'directory';
 @@ -31,27 +32,6 @@ const flatten = (nodes: FileNode[], out: FlatFile[]): void => {
    }
  };
- 
+
 -// References inside chat messages are often bare basenames (`foo.ts`) or partial
 -// paths (`utils/foo.ts`) rather than full paths, so match by path suffix and
 -// fall back to filename equality.

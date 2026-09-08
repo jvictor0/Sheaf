@@ -1,15 +1,40 @@
-diff --git a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
---- a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
-+++ b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
-@@ -223 +223 @@ export default function SidebarSessionItem({
+diff --git a/src/modules/sidebar/SidebarSessionItem.tsx b/src/modules/sidebar/SidebarSessionItem.tsx
+index af752c37..56699eaf 100644
+--- a/src/modules/sidebar/SidebarSessionItem.tsx
++++ b/src/modules/sidebar/SidebarSessionItem.tsx
+@@ -128,7 +128,7 @@ function SidebarSessionItem({
+         <div
+           className={cn(
+             'p-2 mx-3 my-0.5 rounded-md bg-card border active:scale-[0.98] transition-all duration-150 relative',
 -            isSelected ? 'bg-primary/5 border-primary/20' : '',
 +            isSelected ? 'bg-primary/5 border-primary/20 dark:border-blue-400/60 dark:bg-blue-600/30 dark:ring-1 dark:ring-inset dark:ring-blue-400/20' : '',
-@@ -236 +236 @@ export default function SidebarSessionItem({
+             !isSelected && isProcessing
+               ? 'border-border/60 bg-muted/20'
+               : !isSelected && sessionView.isActive
+@@ -141,7 +141,7 @@ function SidebarSessionItem({
+             <div
+               className={cn(
+                 'w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0',
 -                isSelected ? 'bg-primary/10' : 'bg-muted/50',
 +                isSelected ? 'bg-primary/10 dark:bg-blue-500/30' : 'bg-muted/50',
-@@ -424 +424 @@ export default function SidebarSessionItem({
+               )}
+             >
+               <LLMProviderLogo provider={session.__provider} className="h-3 w-3" />
+@@ -330,7 +330,7 @@ function SidebarSessionItem({
+           className={cn(
+             buttonVariants({ variant: 'ghost' }),
+             'h-auto w-full justify-start rounded-md border bg-card p-2 pr-11 text-left font-normal transition-all duration-150',
 -            isSelected ? 'border-primary/20 bg-primary/5' : 'border-border/30',
 +            isSelected ? 'border-primary/20 bg-primary/5 dark:border-blue-400/60 dark:bg-blue-600/30 dark:ring-1 dark:ring-inset dark:ring-blue-400/20 dark:hover:bg-blue-600/40' : 'border-border/30',
-@@ -443 +443 @@ export default function SidebarSessionItem({
+             !isSelected && isProcessing
+               ? 'border-border/60 bg-muted/20 hover:bg-muted/25'
+               : !isSelected && sessionView.isActive
+@@ -349,7 +349,7 @@ function SidebarSessionItem({
+             <div
+               className={cn(
+                 'flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md',
 -                isSelected ? 'bg-primary/10' : 'bg-muted/50',
 +                isSelected ? 'bg-primary/10 dark:bg-blue-500/30' : 'bg-muted/50',
+               )}
+             >
+               <LLMProviderLogo provider={session.__provider} className="h-3 w-3" />
