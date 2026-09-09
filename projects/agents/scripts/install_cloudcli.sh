@@ -100,7 +100,7 @@ check_installation() {
         die "installed CloudCLI version is ${actual_version}; expected ${wanted_version}"
 
     runtime_path="${prefix}/lib/node_modules/@cloudcli-ai/cloudcli/dist-server/server/modules/providers/list/codex/codex-runtime.provider.js"
-    grep -q "approvals_reviewer" "${runtime_path}" ||
+    grep -Fq "approvalsReviewer: 'auto_review'" "${runtime_path}" ||
         die "installed CloudCLI is missing Sheaf's Approve-for-me patch"
 
     systemctl --user is-active --quiet cloudcli.service ||
