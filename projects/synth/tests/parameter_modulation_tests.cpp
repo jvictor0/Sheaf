@@ -5649,6 +5649,134 @@ TEST_CASE(param_set_absolute_unmapped_boundaries_are_no_ops) {
     REQUIRE_NEAR(parameter.SceneCenter(0), 0.25f, 0.00001f);
 }
 
+TEST_CASE(bank_addressed_absolute_write_reaches_a_bank_the_slot_has_not_selected) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices = 1, .numScenes = 1, .maxParameters = 2});
+    auto& selectedParam = manager.CreateParameter(group, {.name = "Selected", .defaultValue = 0.2f});
+    auto& targetParam = manager.CreateParameter(group, {.name = "Target", .defaultValue = 0.3f});
+    auto& selectedBank = manager.CreateBank();
+    selectedBank.AddMapping(10, selectedParam);
+    auto& targetBank = manager.CreateBank();
+    targetBank.AddMapping(10, targetParam);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.SelectBank(&selectedBank);
+
+    const float targetBefore = targetParam.SceneCenter(0);
+    manager.HandleSetAbsoluteOnBank(1, 0, 0, 0.9f);
+
+    REQUIRE_TRUE(targetParam.SceneCenter(0) != targetBefore);
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.9f, 0.0001f);
+    REQUIRE_NEAR(selectedParam.SceneCenter(0), 0.2f, 0.0001f);
+}
+
+TEST_CASE(bank_addressed_absolute_write_leaves_the_slots_selected_bank_unchanged) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices = 1, .numScenes = 1, .maxParameters = 2});
+    auto& selectedParam = manager.CreateParameter(group, {.name = "Selected", .defaultValue = 0.15f});
+    auto& targetParam = manager.CreateParameter(group, {.name = "Target", .defaultValue = 0.25f});
+    auto& selectedBank = manager.CreateBank();
+    selectedBank.AddMapping(10, selectedParam);
+    auto& targetBank = manager.CreateBank();
+    targetBank.AddMapping(10, targetParam);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.SelectBank(&selectedBank);
+
+    manager.HandleSetAbsoluteOnBank(1, 0, 0, 0.6f);
+
+    REQUIRE_TRUE(slot.SelectedBank() == &selectedBank);
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.6f, 0.0001f);
+}
+
+TEST_CASE(bank_addressed_absolute_write_to_a_different_bank_leaves_open_modulation_view_untouched) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 3,
+    });
+    MarkAllModulatorsConnectedForUi(group);
+    auto& viewedParam = manager.CreateParameter(group, {.name = "Viewed", .defaultValue = 0.2f});
+    auto& viewedDepth = manager.CreateParameter(group, {.name = "ViewedDepth", .defaultValue = 0.3f});
+    REQUIRE_TRUE(viewedParam.AssignModulationDepth(0, &viewedDepth));
+    auto& targetParam = manager.CreateParameter(group, {.name = "Target", .defaultValue = 0.4f});
+    auto& viewedBank = manager.CreateBank();
+    viewedBank.AddMapping(10, viewedParam);
+    auto& targetBank = manager.CreateBank();
+    targetBank.AddMapping(10, targetParam);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.AddPhysicalEncoder(11);
+    slot.SelectBank(&viewedBank);
+    manager.HandlePress(0, 0);
+    REQUIRE_TRUE(viewedBank.ShowingModulation());
+    REQUIRE_TRUE(viewedBank.SelectedParameter() == &viewedParam);
+
+    manager.HandleSetAbsoluteOnBank(1, 0, 0, 0.85f);
+
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.85f, 0.0001f);
+    REQUIRE_TRUE(viewedBank.ShowingModulation());
+    REQUIRE_TRUE(viewedBank.SelectedParameter() == &viewedParam);
+    REQUIRE_TRUE(viewedBank.VisibleParameter(10) == &viewedDepth);
+}
+
+TEST_CASE(bank_addressed_absolute_write_edits_top_level_parameter_not_visible_modulation_depth) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+    });
+    MarkAllModulatorsConnectedForUi(group);
+    auto& parent = manager.CreateParameter(group, {.name = "Parent", .defaultValue = 0.2f});
+    auto& depth = manager.CreateParameter(group, {.name = "Depth", .defaultValue = 0.3f});
+    REQUIRE_TRUE(parent.AssignModulationDepth(0, &depth));
+    auto& bank = manager.CreateBank();
+    bank.AddMapping(10, parent);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.AddPhysicalEncoder(11);
+    slot.SelectBank(&bank);
+    manager.HandlePress(0, 0);
+    REQUIRE_TRUE(bank.ShowingModulation());
+    REQUIRE_TRUE(bank.VisibleParameter(10) == &depth);
+
+    const float parentBefore = parent.SceneCenter(0);
+    const float depthBefore = depth.SceneCenter(0);
+
+    manager.HandleSetAbsoluteOnBank(0, 0, 0, 0.8f);
+
+    REQUIRE_TRUE(parent.SceneCenter(0) != parentBefore);
+    REQUIRE_NEAR(parent.SceneCenter(0), 0.8f, 0.00001f);
+    REQUIRE_NEAR(depth.SceneCenter(0), depthBefore, 0.00001f);
+    REQUIRE_TRUE(bank.ShowingModulation());
+    REQUIRE_TRUE(bank.VisibleParameter(10) == &depth);
+}
+
+TEST_CASE(bank_addressed_absolute_write_via_message_bus_matches_direct_call) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices = 1, .numScenes = 1, .maxParameters = 2});
+    auto& selectedParam = manager.CreateParameter(group, {.name = "Selected", .defaultValue = 0.1f});
+    auto& targetParam = manager.CreateParameter(group, {.name = "Target", .defaultValue = 0.2f});
+    auto& selectedBank = manager.CreateBank();
+    selectedBank.AddMapping(10, selectedParam);
+    auto& targetBank = manager.CreateBank();
+    targetBank.AddMapping(10, targetParam);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.SelectBank(&selectedBank);
+    synth::MessageInBus bus(&manager, 4);
+
+    manager.HandleSetAbsoluteOnBank(1, 0, 0, 0.55f);
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.55f, 0.0001f);
+
+    bus.Apply(synth::MessageIn::ParamSetAbsoluteOnBank(0, 1, 0, 0, 0.83f));
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.83f, 0.0001f);
+}
+
 TEST_CASE(unmapped_encoder_ignored) {
     synth::ParameterManager manager;
     manager.SetGestureCount(2);
@@ -13720,6 +13848,180 @@ TEST_CASE(patch_json_rejects_invalid_roots_without_mutating_runtime_configuratio
     REQUIRE_TRUE(synth::ValidatePatchJSON(invalidInstrumentRoot));
 }
 
+TEST_CASE(patch_json_with_carry_instrument_writes_schema_two_and_round_trips_the_instrument) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.63f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "carry-input", "carry-output");
+
+    synth::JsonArena arena(262144);
+    synth::JSON root =
+        synth::BuildPatchJSON(arena, "Carrying Patch", source, instrument, /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(!arena.Failed());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+    REQUIRE_TRUE(!root.Get("midiInstrument").IsNull());
+
+    synth::ParameterManager target;
+    target.SetGestureCount(0);
+    auto& targetGroup = target.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetCutoff = target.CreateParameter(targetGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+
+    synth::MidiInstrumentConfig liveInstrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "keep-in", "keep-out");
+    std::optional<synth::MidiInstrumentConfig> loadedInstrument;
+    REQUIRE_TRUE(synth::LoadPatchJSON(root, target, liveInstrument, nullptr, &loadedInstrument));
+    REQUIRE_NEAR(targetCutoff.SceneCenter(0), 0.63f, 0.000001f);
+
+    // The live instrument argument is never read or modified by LoadPatchJSON.
+    REQUIRE_TRUE(liveInstrument.controllers[0].input.identifier == "keep-in");
+    REQUIRE_TRUE(liveInstrument.controllers[0].output.identifier == "keep-out");
+
+    REQUIRE_TRUE(loadedInstrument.has_value());
+    synth::JsonArena expectedArena(262144);
+    synth::JsonArena actualArena(262144);
+    char* expectedDump = synth::ToJSON(expectedArena, instrument).Dumps(JSON_ENCODE_ANY);
+    char* actualDump = synth::ToJSON(actualArena, *loadedInstrument).Dumps(JSON_ENCODE_ANY);
+    REQUIRE_TRUE(expectedDump != nullptr && actualDump != nullptr);
+    REQUIRE_TRUE(std::string(expectedDump) == std::string(actualDump));
+    std::free(expectedDump);
+    std::free(actualDump);
+}
+
+TEST_CASE(patch_json_without_carry_instrument_matches_pre_change_version_one_output) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.5f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    synth::JsonArena arena(262144);
+    // carryInstrument defaults to false.
+    synth::JSON root = synth::BuildPatchJSON(arena, "No Carry", source, instrument);
+    REQUIRE_TRUE(!arena.Failed());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 1);
+    REQUIRE_TRUE(root.Get("midiInstrument").IsNull());
+    REQUIRE_TRUE(root.Size() == 4);  // schema, schemaVersion, patchName, parameterValues -- no other key
+}
+
+TEST_CASE(patch_json_load_leaves_loaded_instrument_unset_without_a_midi_instrument_section) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.4f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    // A version-1 file.
+    synth::JsonArena versionOneArena(262144);
+    synth::JSON versionOneRoot = synth::BuildPatchJSON(versionOneArena, "V1", source, instrument);
+    synth::ParameterManager targetOne;
+    targetOne.SetGestureCount(0);
+    auto& targetOneGroup = targetOne.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetOneCutoff = targetOne.CreateParameter(targetOneGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig liveOne = instrument;
+    std::optional<synth::MidiInstrumentConfig> loadedOne;
+    loadedOne.emplace();  // pre-seed so REQUIRE below actually proves it was reset, not merely default
+    REQUIRE_TRUE(synth::LoadPatchJSON(versionOneRoot, targetOne, liveOne, nullptr, &loadedOne));
+    REQUIRE_NEAR(targetOneCutoff.SceneCenter(0), 0.4f, 0.000001f);
+    REQUIRE_TRUE(!loadedOne.has_value());
+
+    // A version-2 file without a midiInstrument section.
+    synth::JsonArena versionTwoArena(262144);
+    synth::JSON versionTwoRoot = versionTwoArena.Object();
+    versionTwoRoot.SetNew("schema", versionTwoArena.String("sheaf.synth.patch"));
+    versionTwoRoot.SetNew("schemaVersion", versionTwoArena.Integer(2));
+    versionTwoRoot.SetNew("patchName", versionTwoArena.String("V2 No Section"));
+    versionTwoRoot.SetNew("parameterValues", source.ParameterValuesToJSON(versionTwoArena));
+    REQUIRE_TRUE(synth::ValidatePatchJSON(versionTwoRoot));  // ValidatePatchJSON now accepts version 2
+
+    synth::ParameterManager targetTwo;
+    targetTwo.SetGestureCount(0);
+    auto& targetTwoGroup = targetTwo.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetTwoCutoff = targetTwo.CreateParameter(targetTwoGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig liveTwo = instrument;
+    std::optional<synth::MidiInstrumentConfig> loadedTwo;
+    loadedTwo.emplace();
+    REQUIRE_TRUE(synth::LoadPatchJSON(versionTwoRoot, targetTwo, liveTwo, nullptr, &loadedTwo));
+    REQUIRE_NEAR(targetTwoCutoff.SceneCenter(0), 0.4f, 0.000001f);
+    REQUIRE_TRUE(!loadedTwo.has_value());
+}
+
+TEST_CASE(patch_json_version_two_with_null_loaded_instrument_pointer_loads_parameters_only) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.81f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    synth::JsonArena arena(262144);
+    synth::JSON root =
+        synth::BuildPatchJSON(arena, "V2 Null Out", source, instrument, /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+
+    synth::ParameterManager target;
+    target.SetGestureCount(0);
+    auto& targetGroup = target.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetCutoff = target.CreateParameter(targetGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig live =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "keep-in", "keep-out");
+    REQUIRE_TRUE(synth::LoadPatchJSON(root, target, live));  // loadedInstrument defaults to nullptr
+    REQUIRE_NEAR(targetCutoff.SceneCenter(0), 0.81f, 0.000001f);
+    REQUIRE_TRUE(live.controllers[0].input.identifier == "keep-in");
+    REQUIRE_TRUE(live.controllers[0].output.identifier == "keep-out");
+}
+
 TEST_CASE(patch_file_versioning_writes_collision_safe_sortable_versions) {
     const auto now = std::chrono::system_clock::from_time_t(1700000000);
     const auto tempRoot = std::filesystem::temp_directory_path() /
@@ -13893,7 +14195,8 @@ TEST_CASE(runtime_config_v1_migrates_to_default_sync_and_v2_save_contains_exact_
         .ppqn = 960,
     };
     REQUIRE_TRUE(synth::LoadRuntimeConfigJSON(v1, loadedInstrument, loadedAudio, loadedSync));
-    REQUIRE_TRUE(loadedAudio == sourceAudio);
+    REQUIRE_TRUE(loadedAudio.outputDeviceName == sourceAudio.outputDeviceName);
+    REQUIRE_TRUE(loadedAudio.inputDeviceName.empty());
     REQUIRE_TRUE(loadedSync == synth::SyncConfig{});
 
     const synth::SyncConfig savedSync{
@@ -13906,7 +14209,7 @@ TEST_CASE(runtime_config_v1_migrates_to_default_sync_and_v2_save_contains_exact_
     synth::JsonArena v2Arena(8192);
     const synth::JSON v2 = synth::BuildRuntimeConfigJSON(
         v2Arena, sourceInstrument, sourceAudio, savedSync);
-    REQUIRE_TRUE(v2.Get("schemaVersion").IntegerValue() == 2);
+    REQUIRE_TRUE(v2.Get("schemaVersion").IntegerValue() == synth::kRuntimeConfigSchemaVersion);
     const synth::JSON sync = v2.Get("sync");
     REQUIRE_TRUE(sync.Size() == 5);
     REQUIRE_TRUE(sync.Get("sendClock").BooleanValue());
@@ -13972,6 +14275,72 @@ TEST_CASE(runtime_config_v2_rejects_every_missing_or_wrong_sync_field_atomically
         const std::string text = prefix + syncObject + "}";
         requireAtomicRejection(text);
     }
+}
+
+TEST_CASE(runtime_config_v2_audio_device_input_name_dropped_on_migration) {
+    const synth::MidiInstrumentConfig instrument;
+    const synth::AudioDeviceState sourceAudio{.outputDeviceName = "Interface Out",
+                                               .inputDeviceName = "BlackHole 2ch"};
+    const synth::SyncConfig sync{.ppqn = 24};
+
+    synth::JsonArena arena(8192);
+    synth::JSON v2 = arena.Object();
+    v2.SetNew("schema", arena.String(synth::kRuntimeConfigSchema));
+    v2.SetNew("schemaVersion", arena.Integer(2));
+    v2.SetNew("midiInstrument", synth::ToJSON(arena, instrument));
+    v2.SetNew("audioDevice", synth::ToJSON(arena, sourceAudio));
+    v2.SetNew("sync", synth::ToJSON(arena, sync));
+
+    synth::MidiInstrumentConfig loadedInstrument;
+    synth::AudioDeviceState loadedAudio;
+    synth::SyncConfig loadedSync;
+    REQUIRE_TRUE(synth::LoadRuntimeConfigJSON(v2, loadedInstrument, loadedAudio, loadedSync));
+    REQUIRE_TRUE(loadedAudio.inputDeviceName.empty());
+    REQUIRE_TRUE(loadedAudio.outputDeviceName == sourceAudio.outputDeviceName);
+}
+
+TEST_CASE(runtime_config_v3_audio_device_input_name_preserved) {
+    const synth::MidiInstrumentConfig instrument;
+    const synth::AudioDeviceState sourceAudio{.outputDeviceName = "Interface Out",
+                                               .inputDeviceName = "BlackHole 2ch"};
+    const synth::SyncConfig sync{.ppqn = 24};
+
+    synth::JsonArena arena(8192);
+    const synth::JSON v3 = synth::BuildRuntimeConfigJSON(arena, instrument, sourceAudio, sync);
+    REQUIRE_TRUE(v3.Get("schemaVersion").IntegerValue() == synth::kRuntimeConfigSchemaVersion);
+
+    synth::MidiInstrumentConfig loadedInstrument;
+    synth::AudioDeviceState loadedAudio;
+    synth::SyncConfig loadedSync;
+    REQUIRE_TRUE(synth::LoadRuntimeConfigJSON(v3, loadedInstrument, loadedAudio, loadedSync));
+    REQUIRE_TRUE(loadedAudio.inputDeviceName == sourceAudio.inputDeviceName);
+    REQUIRE_TRUE(loadedAudio.outputDeviceName == sourceAudio.outputDeviceName);
+}
+
+TEST_CASE(runtime_config_v2_sync_section_still_loads) {
+    const synth::MidiInstrumentConfig instrument;
+    const synth::AudioDeviceState sourceAudio{.outputDeviceName = "Out", .inputDeviceName = ""};
+    const synth::SyncConfig sync{
+        .sendClock = true,
+        .receiveClock = true,
+        .sendTransport = false,
+        .receiveTransport = true,
+        .ppqn = 480,
+    };
+
+    synth::JsonArena arena(8192);
+    synth::JSON v2 = arena.Object();
+    v2.SetNew("schema", arena.String(synth::kRuntimeConfigSchema));
+    v2.SetNew("schemaVersion", arena.Integer(2));
+    v2.SetNew("midiInstrument", synth::ToJSON(arena, instrument));
+    v2.SetNew("audioDevice", synth::ToJSON(arena, sourceAudio));
+    v2.SetNew("sync", synth::ToJSON(arena, sync));
+
+    synth::MidiInstrumentConfig loadedInstrument;
+    synth::AudioDeviceState loadedAudio;
+    synth::SyncConfig loadedSync;
+    REQUIRE_TRUE(synth::LoadRuntimeConfigJSON(v2, loadedInstrument, loadedAudio, loadedSync));
+    REQUIRE_TRUE(loadedSync == sync);
 }
 
 TEST_CASE(runtime_config_load_invalid_schema_preserves_targets) {
