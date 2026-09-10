@@ -11,7 +11,7 @@ const launcherApp = {
   category: "Instrument",
   buildId: "portable-app-build-1",
   browser: {
-    abiVersion: 4,
+    abiVersion: 6,
     uiProtocolVersion: 2,
     runtimeConfigVersion: 1,
     entry: "packages/portable-app/portable-app-build-1/app.js",
@@ -231,7 +231,7 @@ test("launcher acquires once before package work and forwards one materialized p
   expect(result.events).toEqual(["lease:acquire", "package:begin", "package:ready", "runtime:install"]);
   expect(result.moduleIsMaterialized).toBe(true);
   expect(result.leasePresent).toBe(true);
-  expect(result.versions).toEqual({ abiVersion: 4, uiProtocolVersion: 2, runtimeConfigVersion: 1 });
+  expect(result.versions).toEqual({ abiVersion: 6, uiProtocolVersion: 2, runtimeConfigVersion: 1 });
   expect(result.launcherPresent).toBe(true);
 });
 
@@ -384,7 +384,7 @@ test("launcher reports an explicit non-retryable browser input limit diagnostic 
           return { type: "ok" };
         },
         async startAudioWorklet() { events.push("startAudioWorklet"); return { started: true }; },
-        async consumeAudioInputRetry() { events.push("consumeAudioInputRetry"); return true; },
+        async consumePendingAudioRequest() { events.push("consumePendingAudioRequest"); return { index: -1, control: 0 }; },
         terminate() { events.push("terminate"); },
       }),
     });
@@ -446,6 +446,11 @@ test("an input-capable leased app discovers its request after module load, retri
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
       value: {
+        // One presentable input device, so a selection index has something to
+        // resolve to once the operator retries.
+        async enumerateDevices() {
+          return [{ deviceId: "mic-1", label: "USB Mic", kind: "audioinput" }];
+        },
         async getUserMedia(requested: any) {
           events.push(`getUserMedia:${requested.audio.channelCount.ideal}`);
           const track = {
@@ -487,10 +492,14 @@ test("an input-capable leased app discovers its request after module load, retri
       },
       async clearAudioInputSource(statusCode: number) { events.push(`clearAudioInputSource:${statusCode}`); },
       clearAudioInputSourceNow(statusCode: number) { events.push(`clearAudioInputSourceNow:${statusCode}`); },
-      async consumeAudioInputRetry() {
+      // index: -1 nothing pending, -2 release input, otherwise the index of
+      // the operator's selection into the device list `submitAudioDevices`
+      // most recently enumerated -- here always the single mocked input
+      // device. control: 0 for input, the only control this fixture arms.
+      async consumePendingAudioRequest() {
         const pending = retryPending;
         retryPending = false;
-        return pending;
+        return { index: pending ? 0 : -1, control: 0 };
       },
       terminate() { events.push("terminate"); },
     };
@@ -526,32 +535,32 @@ test("an input-capable leased app discovers its request after module load, retri
     return { afterStart, ignoredRetry, afterRetry, synchronousUnload, events, trackCount: tracks.length };
   }, Array.from(new Uint8Array(frame)));
 
-  // Discovery only happens once the module is loaded, the runtime created, and
-  // the application initialized -- capture never precedes the app that asks for it.
+  // Discovery reports the declared channel count, but capture itself is never
+  // acquired automatically -- only an operator's device selection arms it, so
+  // opening the app raises no permission prompt.
   expect(result.afterStart).toEqual([
     "load",
     "create",
     "initialize",
     "audio-config",
+    // `enumerateDevices` neither prompts nor requires permission, so it runs
+    // unconditionally on activation; this fixture's context has no
+    // `setSinkId`, so that submission also reports output routing as
+    // unsupported, before native startup itself.
+    "dispatch:runtime.audio.output.routing_unsupported",
     "startAudioWorklet",
-    "clearAudioInputSource:1",
-    "getUserMedia:4",
-    "source:create",
-    "setAudioInputSource:2:2",
   ]);
-  // A UI action with no armed retry must not re-prompt.
+  // A UI action with no armed selection must not request capture.
   expect(result.ignoredRetry).toEqual([...result.afterStart, "dispatch:audio-input-retry"]);
   expect(result.afterRetry).toEqual([
     ...result.ignoredRetry,
     "dispatch:audio-input-retry",
     "clearAudioInputSource:1",
-    "source:disconnect",
-    "track:stop",
     "getUserMedia:4",
     "source:create",
     "setAudioInputSource:2:2",
   ]);
-  expect(result.trackCount).toBe(2);
+  expect(result.trackCount).toBe(1);
   // A dispatched pagehide releases capture synchronously, in the required
   // clear-native -> disconnect -> track-stop order.
   expect(result.synchronousUnload.slice(result.afterRetry.length)).toEqual([
@@ -570,10 +579,19 @@ test("an input-capable leased app discovers its request after module load, retri
   ]);
 });
 
-test("pending microphone permission does not block worklet startup, first frame, or unload readiness", async ({ page }) => {
+test("a still-pending capture permission from an operator selection does not block synchronous unload, and the late stream still tears down", async ({ page }) => {
   await page.goto("http://127.0.0.1:4174/dist/src/main.js");
   await page.setContent('<main id="synth-root"></main>');
-  const frame = makeCommandBuffer([{ id: "root", kind: NodeKind.Root, bounds: [0, 0, 40, 40] }]);
+  const frame = makeCommandBuffer([
+    { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 60], children: ["retry"] },
+    {
+      id: "retry",
+      kind: NodeKind.Button,
+      bounds: [0, 0, 200, 60],
+      label: "Retry Input",
+      action: { name: "audio-input-retry", value: "" },
+    },
+  ]);
   const result = await page.evaluate(async (bytes) => {
     const main = await (new Function("return import('/dist/src/main.js')")() as Promise<any>);
     const { ActivationLease } = await (new Function("return import('/dist/src/activation.js')")() as Promise<any>);
@@ -581,6 +599,7 @@ test("pending microphone permission does not block worklet startup, first frame,
     const tracks: any[] = [];
     let resolveCapture!: (stream: unknown) => void;
     const pendingCapture = new Promise((resolve) => { resolveCapture = resolve; });
+    let retryPending = false;
     const settle = async () => {
       for (let turn = 0; turn < 8; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
     };
@@ -607,7 +626,7 @@ test("pending microphone permission does not block worklet startup, first frame,
       sampleRate: 48_000,
       destination: {},
       audioWorklet: { addModule: async () => {} },
-      resume: async () => { events.push("context:resume"); },
+      resume: async () => {},
       close: async () => { events.push("context:close"); },
       createMediaStreamSource() {
         events.push("source:create");
@@ -617,6 +636,11 @@ test("pending microphone permission does not block worklet startup, first frame,
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
       value: {
+        // One presentable input device, so the operator's selection has
+        // something to resolve to.
+        async enumerateDevices() {
+          return [{ deviceId: "mic-1", label: "USB Mic", kind: "audioinput" }];
+        },
         getUserMedia(requested: any) {
           events.push(`getUserMedia:${requested.audio.channelCount.ideal}`);
           return pendingCapture;
@@ -634,8 +658,8 @@ test("pending microphone permission does not block worklet startup, first frame,
         if (command.type === "create") { events.push("create"); return { type: "created", handle: 1 }; }
         if (command.type === "initialize") { events.push("initialize"); return { type: "ok" }; }
         if (command.type === "audio-config") { events.push("audio-config"); return { type: "audio-config", channels: 2, inputChannels: 2 }; }
-        if (command.type === "message-tick") { events.push("message-tick"); return { type: "ok" }; }
-        if (command.type === "build-ui-frame") { events.push("build-ui-frame"); return { type: "ui-frame", frame: bytes }; }
+        if (command.type === "build-ui-frame") return { type: "ui-frame", frame: bytes };
+        if (command.type === "dispatch-action") { events.push(`dispatch:${command.name}`); return { type: "ui-frame", frame: bytes }; }
         if (command.type === "midi-endpoints") return { type: "midi-actions", actions: [] };
         if (command.type === "drain-midi-output") return { type: "midi-output" };
         return { type: "ok" };
@@ -648,59 +672,78 @@ test("pending microphone permission does not block worklet startup, first frame,
       async setAudioInputSource() { events.push("setAudioInputSource"); return 91; },
       async clearAudioInputSource(statusCode: number) { events.push(`clearAudioInputSource:${statusCode}`); },
       clearAudioInputSourceNow(statusCode: number) { events.push(`clearAudioInputSourceNow:${statusCode}`); },
+      // index: -1 nothing pending, -2 release input, otherwise the index of
+      // the operator's selection into the device list `submitAudioDevices`
+      // most recently enumerated -- here always the single mocked input
+      // device. control: 0 for input, the only control this fixture arms.
+      async consumePendingAudioRequest() {
+        const pending = retryPending;
+        retryPending = false;
+        return { index: pending ? 0 : -1, control: 0 };
+      },
       terminate() { events.push("terminate"); },
     };
 
-    let app: any;
-    const installed = main.installSynthBrowserApp(document.querySelector("#synth-root"), {
+    const app = await main.installSynthBrowserApp(document.querySelector("#synth-root"), {
       module: { entryUrl: "blob:entry", locateFile: {}, mainScriptUrlOrBlob: "blob:main" },
       activationLease: lease,
       runtimeClient: runtime,
       frameIntervalMs: 60_000,
-    }).then((installedApp: unknown) => {
-      app = installedApp;
-      events.push("app:resolved");
     });
-    await waitFor(() => events.includes("app:resolved"), "app did not become ready before capture settled");
-    const beforeCaptureSettled = {
-      events: [...events],
-      renderedRoot: Boolean(document.querySelector('[data-node-id="root"]')),
-      status: document.querySelector<HTMLElement>("#synth-root")!.dataset.synthStatus,
-    };
+    const afterStart = [...events];
 
+    retryPending = true;
+    document.querySelector<HTMLElement>('[data-node-id="retry"]')!.click();
+    await settle();
+    const afterSelection = [...events];
+
+    // Unload gives no chance to await, so everything observable has to have
+    // happened by the time the dispatched event returns.
     dispatchEvent(new Event("pagehide"));
     const afterPagehide = [...events];
+
     resolveCapture(makeStream());
-    await installed;
-    await waitFor(() => events.includes("terminate"), "app did not finish teardown after capture resolved");
+    await waitFor(() => events.includes("terminate"), "app did not finish teardown after the late permission settled");
     await settle();
     await app.stop();
     return {
-      beforeCaptureSettled,
+      afterStart,
+      afterSelection,
       afterPagehide,
       events,
       trackStops: tracks.map((track) => track.stops),
     };
   }, Array.from(new Uint8Array(frame)));
 
-  expect(result.beforeCaptureSettled.events).toEqual([
-    "context:resume",
+  // Startup runs to completion with no capture requested yet: the operator
+  // has not selected an input device.
+  expect(result.afterStart).toEqual([
     "load",
     "create",
     "initialize",
     "audio-config",
+    // `enumerateDevices` neither prompts nor requires permission, so it runs
+    // unconditionally on activation; this fixture's context has no
+    // `setSinkId`, so that submission also reports output routing as
+    // unsupported, before native startup itself.
+    "dispatch:runtime.audio.output.routing_unsupported",
     "startAudioWorklet",
+  ]);
+  // The operator's selection requests capture and leaves it pending -- the
+  // permission has not resolved by the time the dispatched pagehide fires.
+  expect(result.afterSelection.slice(result.afterStart.length)).toEqual([
+    "dispatch:audio-input-retry",
     "clearAudioInputSource:1",
     "getUserMedia:2",
-    "message-tick",
-    "build-ui-frame",
-    "app:resolved",
   ]);
-  expect(result.beforeCaptureSettled.renderedRoot).toBe(true);
-  expect(result.beforeCaptureSettled.status).toBe("running");
-  expect(result.afterPagehide.slice(result.beforeCaptureSettled.events.length)).toEqual([
+  // Teardown clears the native input registration synchronously regardless
+  // of the still-open permission prompt.
+  expect(result.afterPagehide.slice(result.afterSelection.length)).toEqual([
     "clearAudioInputSourceNow:0",
   ]);
+  // Once the permission resolves, the stream arrives too late to be wired
+  // into the graph, but it is still stopped, and runtime and context
+  // teardown follow.
   expect(result.events.slice(result.afterPagehide.length)).toEqual([
     "track:stop",
     "terminate",
@@ -761,6 +804,11 @@ test("clears a native registration that lands after a dispatched pagehide", asyn
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
       value: {
+        // One presentable input device, so a selection index has something to
+        // resolve to on both the initial acquisition and the retry.
+        async enumerateDevices() {
+          return [{ deviceId: "mic-1", label: "USB Mic", kind: "audioinput" }];
+        },
         async getUserMedia() {
           events.push("getUserMedia");
           const track = {
@@ -811,10 +859,14 @@ test("clears a native registration that lands after a dispatched pagehide", asyn
         events.push(`clearAudioInputSourceNow:${statusCode}`);
         published = { handle: 0, physicalChannels: 0 };
       },
-      async consumeAudioInputRetry() {
+      // index: -1 nothing pending, -2 release input, otherwise the index of
+      // the operator's selection into the device list `submitAudioDevices`
+      // most recently enumerated -- here always the single mocked input
+      // device. control: 0 for input, the only control this fixture arms.
+      async consumePendingAudioRequest() {
         const pending = retryPending;
         retryPending = false;
-        return pending;
+        return { index: pending ? 0 : -1, control: 0 };
       },
       terminate() { events.push("terminate"); },
     };
@@ -825,6 +877,12 @@ test("clears a native registration that lands after a dispatched pagehide", asyn
       runtimeClient: runtime,
       frameIntervalMs: 60_000,
     });
+
+    // Capture is never acquired automatically, so a first selection is needed
+    // to establish the registration the retry below will then replace.
+    retryPending = true;
+    document.querySelector<HTMLElement>('[data-node-id="retry"]')!.click();
+    await settle();
 
     retryPending = true;
     document.querySelector<HTMLElement>('[data-node-id="retry"]')!.click();
