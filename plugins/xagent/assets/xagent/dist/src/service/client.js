@@ -125,6 +125,9 @@ export function createXagentServiceClient(options = {}) {
         inspect(input) {
             return callTool("xagent_inspect", { ...input });
         },
+        listRuns(input) {
+            return callTool("xagent_list", { ...input });
+        },
         message(input) {
             return callTool("xagent_message", { ...input });
         },

@@ -622,6 +622,14 @@ def install_global(
             env=codex_env,
         ).stdout
         require_installed_plugin(plugin_list, destination)
+        # Force Codex to resolve and parse the plugin-provided MCP declaration
+        # now, while installation can still fail loudly, rather than leaving a
+        # malformed or undiscoverable server for the next controller session.
+        run_command(
+            [codex, "mcp", "get", PLUGIN_NAME],
+            cwd=repo_root,
+            env=codex_env,
+        )
 
     # Codex is served by the plugin package above. Every other harness needs
     # the skill and the MCP endpoint written into its own locations, or a

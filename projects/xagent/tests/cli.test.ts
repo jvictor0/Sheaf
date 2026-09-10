@@ -10,6 +10,7 @@ import { PlaceholderHarnessAdapter } from "../src/adapters/placeholder.js";
 import { main, parseArgs, runCli } from "../src/cli.js";
 import type { OutputEvent } from "../src/events.js";
 import { appendNormalizedEvent, createRunRecord, getDefaultLogRoot, listRuns } from "../src/logs.js";
+import type { XagentServiceClient } from "../src/service/client.js";
 
 const originalLogRoot = process.env.XAGENT_LOG_ROOT;
 delete process.env.XAGENT_LOG_ROOT;
@@ -63,6 +64,22 @@ test("parses a valid supervise start command with options", () => {
       deadlineSeconds: 120,
       prompt: "implement the task",
     },
+  );
+});
+
+test("parses a service start command without an await deadline", () => {
+  assert.deepEqual(
+    parseArgs(["start", "--harness", "claude_code", "--model", "opus", "ship it"]),
+    {
+      command: "start",
+      harness: "claude_code",
+      model: "opus",
+      prompt: "ship it",
+    },
+  );
+  assert.throws(
+    () => parseArgs(["start", "--harness", "codex", "--deadline-seconds", "60", "work"]),
+    /does not accept --deadline-seconds/,
   );
 });
 
@@ -309,6 +326,7 @@ test("rejects duplicate thinking-level flags", () => {
 
 test("run command reports unavailable placeholder harness as structured JSONL", async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), "xagent-cli-"));
+  await mkdir(path.join(repoRoot, ".git"));
   const stdout = new MemoryWritable();
   const stderr = new MemoryWritable();
 
@@ -421,31 +439,41 @@ test("top-level runner writes one diagnostic for command failures", async () => 
   assert.equal(stderr.text.trim().split("\n").length, 1);
 });
 
-test("list command reads persisted metadata", async () => {
+test("list command reads service-owned metadata", async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), "xagent-cli-"));
   const stdout = new MemoryWritable();
   const stderr = new MemoryWritable();
-
-  await createRunRecord({
-    repoRoot,
-    runId: "xrun_20260621000000000_00000003",
+  const serviceClient = listOnlyServiceClient([{
+    run_id: "xrun_20260621000000000_00000003",
     harness: "pi",
-    mode: "full",
-    clock: () => new Date("2026-06-21T00:00:00.000Z"),
-  });
+    phase: "completed",
+    sequence: 4,
+    exit_status: "completed",
+    live: false,
+    supervised: true,
+    created_at: "2026-06-21T00:00:00.000Z",
+    updated_at: "2026-06-21T00:00:01.000Z",
+  }]);
 
-  const result = await main(["list"], Readable.from([]), stdout, stderr, repoRoot);
+  const result = await main(
+    ["list"],
+    Readable.from([]),
+    stdout,
+    stderr,
+    repoRoot,
+    { createServiceClient: () => serviceClient },
+  );
 
   assert.deepEqual(result, { exitCode: 0 });
   assert.equal(stderr.text, "");
-  const runs = JSON.parse(stdout.text) as Array<{ run_id: string; harness: string; mode: string }>;
+  const runs = JSON.parse(stdout.text) as Array<{ run_id: string; harness: string }>;
   assert.equal(runs[0]?.run_id, "xrun_20260621000000000_00000003");
   assert.equal(runs[0]?.harness, "pi");
-  assert.equal(runs[0]?.mode, "full");
 });
 
 test("logs command reads persisted normalized logs and rejects traversal", async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), "xagent-cli-"));
+  await mkdir(path.join(repoRoot, ".git"));
   const runId = "xrun_20260621000000000_00000004";
   const record = await createRunRecord({
     repoRoot,
@@ -505,15 +533,6 @@ test("default log root resolves to top-level data when launched from package dir
   assert.equal(topLevelRuns.length, 1);
   assert.equal(await exists(path.join(packageDir, "data", "xagent")), false);
 
-  const listStdout = new MemoryWritable();
-  const listStderr = new MemoryWritable();
-  const listResult = await main(["list"], Readable.from([]), listStdout, listStderr, packageDir);
-
-  assert.deepEqual(listResult, { exitCode: 0 });
-  assert.equal(listStderr.text, "");
-  const listedRuns = JSON.parse(listStdout.text) as Array<{ run_id: string }>;
-  assert.equal(listedRuns[0]?.run_id, topLevelRuns[0]?.run_id);
-
   const logsStdout = new MemoryWritable();
   const logsStderr = new MemoryWritable();
   const logsResult = await main(["logs", topLevelRuns[0]?.run_id ?? ""], Readable.from([]), logsStdout, logsStderr, packageDir);
@@ -522,6 +541,22 @@ test("default log root resolves to top-level data when launched from package dir
   assert.equal(logsStderr.text, "");
   assert.match(logsStdout.text, /session\.started/);
 });
+
+function listOnlyServiceClient(
+  runs: Awaited<ReturnType<XagentServiceClient["listRuns"]>>["runs"],
+): XagentServiceClient {
+  return {
+    async start() { throw new Error("unused"); },
+    async await() { throw new Error("unused"); },
+    async inspect() { throw new Error("unused"); },
+    async listRuns() { return { runs }; },
+    async message() { throw new Error("unused"); },
+    async interrupt() { throw new Error("unused"); },
+    async closeRun() { throw new Error("unused"); },
+    async close() {},
+    awaitToolCallsIssued: 0,
+  };
+}
 
 class MemoryWritable extends Writable {
   text = "";

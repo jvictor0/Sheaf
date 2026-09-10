@@ -247,19 +247,25 @@ run logs. One long blocking await is the default wait mechanism.
 
 When plugin MCP discovery is unavailable but Conductor reports the xagent
 service healthy and the packaged xagent CLI remains functional, use the quiet
-`xagent supervise` service-client fallback instead of terminal polling:
+`xagent start` plus one blocking `xagent await` service-client fallback instead
+of terminal polling. `start` returns the durable run id immediately:
 
 ```shell
 XAGENT_PLUGIN_ROOT="${HOME}/.agents/plugins/plugins/xagent"
-"${XAGENT_PLUGIN_ROOT}/scripts/xagent" supervise --harness claude_code --model sonnet "<prompt>"
+"${XAGENT_PLUGIN_ROOT}/scripts/xagent" start --harness claude_code --model sonnet "<prompt>"
 "${XAGENT_PLUGIN_ROOT}/scripts/xagent" await <run_id> --after-sequence <n> --deadline-seconds 7000
 ```
 
-Issue one application-level blocking await per wait cycle. The quiet client may
-reissue shorter HTTP MCP request chunks under the hood (≤240 seconds) until that
-deadline; treat those as an implementation detail, not a polling loop. Surface
-the MCP discovery failure rather than hiding it. Use this fallback only when the
-Conductor-managed service is healthy and the work is outside Superpowers SDD.
+Issue one application-level blocking await per wait cycle. Progress pings keep
+one held MCP request alive. Watchdog findings are advisory: the CLI writes them
+to stderr and continues awaiting; deterministic attention still returns on
+stdout. Surface the MCP discovery failure rather than hiding it. Use this
+fallback only when the Conductor-managed service is healthy and the work is
+outside Superpowers SDD.
+
+`xagent supervise` remains a compatibility convenience that combines start and
+await. Prefer the split commands when losing the initial process output would
+otherwise lose the run id.
 
 ### Watchdog Boundary
 

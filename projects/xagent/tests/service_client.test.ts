@@ -51,6 +51,115 @@ test("mcp await request options reset on progress and omit maxTotalTimeout", () 
   assert.equal(other.onprogress, undefined);
 });
 
+test("quiet start returns the service run id immediately and list reads service-owned runs", async () => {
+  await withFakeService(async ({ baseUrl, adapterFactory }) => {
+    const releaseTurn = deferred<void>();
+    async function* scriptedTurn(): AsyncIterable<AdapterEvent> {
+      await releaseTurn.promise;
+      yield { type: "turn.completed", final_text: "done" };
+    }
+    adapterFactory.queueScripts([scriptedTurn()]);
+
+    const cwd = await mkdtemp(path.join(tmpdir(), "xagent-start-"));
+    const startStdout = new MemoryWritable();
+    const started = await main(
+      ["start", "--harness", "codex", "--cwd", cwd, "do the work"],
+      Readable.from([]),
+      startStdout,
+      new MemoryWritable(),
+      cwd,
+      { serviceBaseUrl: baseUrl },
+    );
+    assert.deepEqual(started, { exitCode: 0 });
+    const startBody = JSON.parse(startStdout.text.trim()) as { run_id: string };
+    assert.match(startBody.run_id, /^xrun_/);
+
+    const unrelatedCwd = await mkdtemp(path.join(tmpdir(), "xagent-list-cwd-"));
+    const listStdout = new MemoryWritable();
+    const listed = await main(
+      ["list"],
+      Readable.from([]),
+      listStdout,
+      new MemoryWritable(),
+      unrelatedCwd,
+      { serviceBaseUrl: baseUrl },
+    );
+    assert.deepEqual(listed, { exitCode: 0 });
+    const listedRuns = JSON.parse(listStdout.text.trim()) as Array<{ run_id: string }>;
+    assert.equal(listedRuns.some((run) => run.run_id === startBody.run_id), true);
+    releaseTurn.resolve(undefined);
+  });
+});
+
+test("quiet supervise reports watchdog attention as advisory and keeps awaiting", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "xagent-watchdog-advisory-"));
+  const stdout = new MemoryWritable();
+  const stderr = new MemoryWritable();
+  let awaitCalls = 0;
+  const result = await main(
+    ["supervise", "--harness", "codex", "--cwd", cwd, "keep working"],
+    Readable.from([]),
+    stdout,
+    stderr,
+    cwd,
+    {
+      createServiceClient: () => ({
+        async start() {
+          return { run_id: "xrun_advisory_1", sequence: 1, phase: "running" };
+        },
+        async await() {
+          awaitCalls += 1;
+          if (awaitCalls === 1) {
+            return {
+              schema_version: 1,
+              event: "supervision.attention",
+              run_id: "xrun_advisory_1",
+              sequence: 2,
+              phase: "running",
+              elapsed_ms: 1,
+              reason: "watchdog_uncertain",
+              payload: {
+                advisory: true,
+                worker_continues: true,
+                message: "Please check when convenient.",
+              },
+            };
+          }
+          return {
+            schema_version: 1,
+            event: "turn.completed",
+            run_id: "xrun_advisory_1",
+            sequence: 3,
+            phase: "completed",
+            elapsed_ms: 2,
+            report: { text: "finished" },
+          };
+        },
+        async inspect() { throw new Error("unused"); },
+        async listRuns() { throw new Error("unused"); },
+        async message() { throw new Error("unused"); },
+        async interrupt() { throw new Error("unused"); },
+        async closeRun() { throw new Error("unused"); },
+        async close() {},
+        awaitToolCallsIssued: 0,
+      }),
+    },
+  );
+
+  assert.deepEqual(result, { exitCode: 0 });
+  assert.equal(awaitCalls, 2);
+  assert.equal((JSON.parse(stdout.text) as { event: string }).event, "turn.completed");
+  const advisory = JSON.parse(stderr.text) as {
+    event: string;
+    reason: string;
+    payload: { advisory: boolean; worker_continues: boolean };
+  };
+  assert.equal(advisory.event, "supervision.attention");
+  assert.equal(advisory.reason, "watchdog_uncertain");
+  assert.equal(advisory.payload.advisory, true);
+  assert.equal(advisory.payload.worker_continues, true);
+});
+
 test("client await issues one held HTTP MCP tool call for a long wait", async () => {
   await withFakeService(async ({ baseUrl, adapterFactory }) => {
     const releaseTurn = deferred<void>();
@@ -652,6 +761,9 @@ test("quiet supervise includes run_id on infrastructure failure after start", as
           );
         },
         async inspect() {
+          throw new Error("unused");
+        },
+        async listRuns() {
           throw new Error("unused");
         },
         async message() {

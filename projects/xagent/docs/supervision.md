@@ -208,7 +208,7 @@ A 90-minute healthy run with sustained semantic progress (one delta per minute u
 | Wait mode | Wake count | Leader-visible progress in completion envelope |
 | --- | --- | --- |
 | 30-second terminal polling (`xagent_inspect` every 30 s) | 180 (analytic) | none — inspect snapshots are not completion envelopes |
-| Quiet CLI fallback (one blocking await) | 1 (measured at run-manager layer) | final report only — no deltas, tools, or progress fields |
+| Quiet CLI fallback (`start` then one blocking `await`) | 1 (measured at run-manager layer) | final report only — no deltas, tools, or progress fields |
 | MCP await (`xagent_await`) | 1 (measured at run-manager layer) | final report only — envelope shape asserts absence of deltas/tools/progress |
 
 The MCP await and quiet CLI paths wake exactly once for the terminal `turn.completed` event. Routine deltas, tools, raw events, status, and healthy watchdog verdicts never complete an await. Parent-side token or byte totals are not measured here; the tests instead assert that completion envelopes omit non-terminal progress fields.
@@ -217,7 +217,7 @@ The MCP await and quiet CLI paths wake exactly once for the terminal `turn.compl
 
 The long-await claim is load-bearing for the whole design, so the test boundary is documented here explicitly:
 
-- **Quiet CLI fallback (`xagent supervise`)** — the service client in `src/service/client.ts` chunks each `xagent_await` HTTP POST at `x_McpAwaitHttpChunkSeconds = 240` and reissues until the application deadline. This exists because Node's fetch/undici stack idles out a response body around ~300 s and aborts a single long POST with "fetch failed" while the service-owned worker keeps running. The chunk-and-reissue loop is exercised over real HTTP by `tests/service_client.test.ts` ("client await chunks HTTP MCP deadlines until the application deadline") with `awaitHttpChunkSeconds: 1` and a 10 s application deadline, so multiple chunks are issued and reissued against a real `http.Server`. That is a real-transport multi-chunk test, just shortened so CI stays fast.
+- **Quiet CLI fallback (`xagent start`, then `xagent await`)** — `start` returns the durable run id immediately. The service client holds one `xagent_await` HTTP request and resets its request timeout on 30-second MCP progress notifications. `tests/service_client.test.ts` exercises the real HTTP transport and asserts that a long healthy wait issues exactly one await tool call. Advisory watchdog attention is written to stderr and the CLI keeps waiting; deterministic attention and terminal results return on stdout.
 - **Primary Codex MCP path** — the packaged `.mcp.json` connects Codex directly to `http://127.0.0.1:9005/mcp` with `tool_timeout_sec: 7200` and **no chunking**. Whether Codex's HTTP client holds a single 90-minute idle response body is **not verified by this branch's tests**. The 90-minute rows above are fake-clock run-manager tests, not transport tests against the Codex client. If Codex's HTTP stack has an undici-like idle ceiling, the plugin path will need the same chunking the quiet client already has; that work is tracked as a follow-up rather than asserted here.
 - **90-minute healthy-run tests** — `mcp_await.test.ts` ("ninety-minute healthy run completes without an intermediate deadline wake") and `supervision_cost.test.ts` ("90-minute healthy run: MCP await wakes once; quiet client measured; polling analytic") both advance a `FakeClock` and call `runManager.awaitRun(...)` directly. They prove the supervisor does not wake the leader for routine progress; they do **not** prove a real HTTP body survives 90 minutes.
 
@@ -227,7 +227,7 @@ The long-await claim is load-bearing for the whole design, so the test boundary 
 | --- | --- |
 | `xagent_await` default deadline | 7000 seconds |
 | `xagent_await` maximum deadline | 7000 seconds |
-| Quiet-client MCP await HTTP chunk | 240 seconds (reissued until the application deadline; avoids ~300s fetch/undici body idle drops). Real-HTTP multi-chunk reissue is exercised by `tests/service_client.test.ts`. |
+| Quiet-client MCP request idle timeout | 60 seconds, reset by 30-second MCP progress notifications. No fixed-duration polling or request chunking. |
 | Plugin MCP `tool_timeout_sec` | 7200 seconds (no chunking on the primary Codex path — see "Transport provenance" above; the 90-minute single-POST assumption is unverified at the transport layer) |
 | Service request timeout | 7,200,000 ms |
 | Service headers timeout | 7,270,000 ms |

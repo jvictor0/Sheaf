@@ -16,7 +16,7 @@ const DEFAULT_OUTPUT_LIMIT_BYTES = 2 * 1024;
 // runaway process filling the pipe.
 //
 export const DEFAULT_STDOUT_LIMIT_BYTES = 16 * 1024;
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 90_000;
 const HAIKU_INPUT_USD_PER_MILLION_TOKENS = 1;
 const HAIKU_OUTPUT_USD_PER_MILLION_TOKENS = 5;
 const CLAUDE_CODE_OVERHEAD_RESERVE_USD = 0.02;
@@ -55,6 +55,8 @@ const WATCHDOG_SYSTEM_PROMPT = [
     "Classify only the semantic health of the active worker from bounded provider JSON.",
     "Use the harness field to interpret provider-specific records.",
     "Repeated tools, retries, failures, empty deltas, and unfamiliar transport records are ambiguous and are not by themselves evidence of derailment.",
+    "Failing tests, temporary build failures, and briefly inconsistent files are normal while an implementation is in progress and are not by themselves evidence of derailment.",
+    "Use derailed only for sustained evidence that the worker abandoned or materially contradicted the assigned task.",
     "Return healthy, derailed, or uncertain using the required schema.",
     "Evidence entries must be short factual observations already supported by the input.",
     "Do not provide commands, remediation, controller actions, or instructions to the worker.",
@@ -118,7 +120,7 @@ export class ClaudeWatchdogClassifier {
                 });
             }
             catch {
-                return uncertain("classifier_invocation_failed");
+                return uncertain("classifier_spawn_failed", ["Claude Code could not be started."]);
             }
             const stdoutBytes = Buffer.byteLength(result.stdout, "utf8");
             if (result.aborted === true) {
@@ -133,21 +135,24 @@ export class ClaudeWatchdogClassifier {
             if (result.budgetExceeded === true) {
                 return withOutput(uncertain("classifier_budget_exceeded"), stdoutBytes);
             }
-            if (result.exitCode !== 0) {
-                return withOutput(uncertain("classifier_invocation_failed"), stdoutBytes);
-            }
             let envelope;
             try {
                 envelope = JSON.parse(result.stdout);
             }
             catch {
+                if (result.exitCode !== 0) {
+                    return withOutput(uncertain("classifier_nonzero_exit", [`Claude Code exited with status ${String(result.exitCode)}.`]), stdoutBytes);
+                }
                 return withOutput(uncertain("invalid_classifier_output"), stdoutBytes);
+            }
+            if (isRecord(envelope) && envelope.subtype === "error_max_budget_usd") {
+                return withOutput(uncertain("classifier_budget_exceeded"), stdoutBytes);
+            }
+            if (result.exitCode !== 0) {
+                return withOutput(uncertain("classifier_nonzero_exit", [`Claude Code exited with status ${String(result.exitCode)}.`]), stdoutBytes);
             }
             if (!isRecord(envelope)) {
                 return withOutput(uncertain("invalid_classifier_output"), stdoutBytes);
-            }
-            if (envelope.subtype === "error_max_budget_usd") {
-                return withOutput(uncertain("classifier_budget_exceeded"), stdoutBytes);
             }
             const candidate = structuredOutput(envelope);
             // The verdict output bound is applied to the normalized structured
@@ -323,12 +328,12 @@ function finiteNonNegative(value) {
 function withOutput(verdict, outputBytes) {
     return { ...verdict, output_bytes: outputBytes };
 }
-function uncertain(reasonCode) {
+function uncertain(reasonCode, evidence = []) {
     return {
         verdict: "uncertain",
         confidence: 0,
         reason_code: reasonCode,
-        evidence: [],
+        evidence,
     };
 }
 function boundedPositiveInteger(value, maximum, name) {

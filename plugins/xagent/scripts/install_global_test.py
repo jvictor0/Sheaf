@@ -32,10 +32,12 @@ HELPER_NAMES = (
     "update_plugin_cachebuster.py",
     "read_marketplace_name.py",
     "validate_plugin.py",
+    "identifier_validation.py",
 )
 FIXED_CACHEBUSTER = "test-20260725"
 XAGENT_MCP_URL = "http://127.0.0.1:9005/mcp"
 XAGENT_MCP_TIMEOUT_SEC = 7200
+XAGENT_MCP_STARTUP_TIMEOUT_SEC = 30
 EXPECTED_MCP_TOOL_NAMES = (
     "xagent_await",
     "xagent_close",
@@ -57,7 +59,9 @@ def write_stub_mcp_json(plugin_root: Path) -> None:
                     "xagent": {
                         "type": "http",
                         "url": XAGENT_MCP_URL,
+                        "startup_timeout_sec": XAGENT_MCP_STARTUP_TIMEOUT_SEC,
                         "tool_timeout_sec": XAGENT_MCP_TIMEOUT_SEC,
+                        "required": True,
                     }
                 }
             }
@@ -719,7 +723,12 @@ class PackageXagentOutputTests(unittest.TestCase):
             xagent = mcp["mcpServers"]["xagent"]
             self.assertEqual("http", xagent["type"])
             self.assertEqual(XAGENT_MCP_URL, xagent["url"])
+            self.assertEqual(
+                XAGENT_MCP_STARTUP_TIMEOUT_SEC,
+                xagent["startup_timeout_sec"],
+            )
             self.assertEqual(XAGENT_MCP_TIMEOUT_SEC, xagent["tool_timeout_sec"])
+            self.assertIs(xagent["required"], True)
             self.assertNotIn("command", xagent)
 
             runtime_root = destination / "assets" / "xagent" / "dist" / "src"
@@ -966,15 +975,20 @@ args = sys.argv[1:]
 log_path = Path(os.environ["FAKE_CODEX_LOG"])
 with log_path.open("a", encoding="utf-8") as handle:
     handle.write(" ".join(args) + "\\n")
-if os.environ.get("FAKE_CODEX_FAIL") and args[:2] == ["plugin", "add"]:
+if os.environ.get("FAKE_CODEX_FAIL") == "add" and args[:2] == ["plugin", "add"]:
     print("fake codex add failure", file=sys.stderr)
     raise SystemExit(23)
+if os.environ.get("FAKE_CODEX_FAIL") == "mcp" and args == ["mcp", "get", "xagent"]:
+    print("fake codex MCP resolution failure", file=sys.stderr)
+    raise SystemExit(24)
 if args == ["plugin", "list"]:
     print("NAME    VERSION    STATUS               PATH")
     print(
         "xagent  0.1.0     installed, enabled   "
         + str(Path(os.environ["FAKE_CODEX_PLUGIN_PATH"]).resolve())
     )
+elif args == ["mcp", "get", "xagent"]:
+    print("xagent MCP configured")
 """,
         )
         self.environment = mock.patch.dict(
@@ -1031,7 +1045,7 @@ if args == ["plugin", "list"]:
             marketplace["plugins"],
         )
         self.assertEqual(
-            ["plugin add xagent@personal", "plugin list"],
+            ["plugin add xagent@personal", "plugin list", "mcp get xagent"],
             self.codex_log.read_text(encoding="utf-8").splitlines(),
         )
 
@@ -1175,6 +1189,9 @@ if args == ["plugin", "list"]:
     print("NAME    VERSION    STATUS               PATH")
     print("xagent  0.1.0     installed, enabled   " + str(source_path.resolve()))
     raise SystemExit(0)
+if args == ["mcp", "get", "xagent"]:
+    print("xagent MCP configured")
+    raise SystemExit(0)
 raise SystemExit(f"unexpected fake codex arguments: {args!r}")
 """,
         )
@@ -1279,6 +1296,27 @@ raise SystemExit(f"unexpected fake codex arguments: {args!r}")
             )
         self.assertNotEqual(0, result)
         self.assertIn("plugin add xagent@personal", stderr.getvalue())
+
+        os.environ["FAKE_CODEX_FAIL"] = "mcp"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = install_global.main(
+                [
+                    "install",
+                    "--repo-root",
+                    str(self.repo_root),
+                    "--home",
+                    str(self.home),
+                    "--codex-home",
+                    str(self.codex_home),
+                    "--codex",
+                    str(self.bin_root / "codex"),
+                    "--cachebuster",
+                    FIXED_CACHEBUSTER,
+                ]
+            )
+        self.assertNotEqual(0, result)
+        self.assertIn("mcp get xagent", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -636,6 +636,9 @@ export class Supervisor {
                 phase: this.#phase,
                 reason: `watchdog_${verdict.verdict}`,
                 payload: sanitizeValue({
+                    advisory: true,
+                    worker_continues: true,
+                    message: "The watchdog noticed signals that may merit review. No action was taken and the worker is still running. Please check when convenient.",
                     verdict: verdict.verdict,
                     confidence: verdict.confidence,
                     reason_code: verdict.reason_code,

@@ -4,7 +4,7 @@ import path from "node:path";
 import { harnessNames, thinkingLevels, } from "./events.js";
 import { FakeHarnessAdapter } from "./adapters/fake.js";
 import { createAdapter } from "./adapters/index.js";
-import { getDefaultLogRoot, listRuns, readNormalizedLog } from "./logs.js";
+import { getDefaultLogRoot, listRuns as listLocalRuns, readNormalizedLog } from "./logs.js";
 import { runSession } from "./runtime.js";
 import { createXagentServiceClient, resolveXagentServiceBaseUrl, XagentServiceToolError, XagentServiceUnavailableError, } from "./service/client.js";
 import { x_DefaultAwaitDeadlineSeconds, x_MaxAwaitDeadlineSeconds, } from "./service/tool_schemas.js";
@@ -30,6 +30,17 @@ export function parseArgs(argv) {
         }
         return parseSuperviseArgs(rest);
     }
+    if (command === "start") {
+        if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h")) {
+            return { command: "help", topic: "supervise" };
+        }
+        const parsed = parseSuperviseArgs(rest, "start");
+        if (parsed.command !== "supervise") {
+            throw new Error("xagent start parser returned an invalid command.");
+        }
+        const { deadlineSeconds: _deadlineSeconds, ...start } = parsed;
+        return { ...start, command: "start" };
+    }
     if (command === "await") {
         return parseAwaitArgs(rest);
     }
@@ -46,10 +57,10 @@ export function parseArgs(argv) {
         return parseRunIdOnlyArgs("close", rest);
     }
     if (command === "list") {
-        if (rest.length !== 0) {
-            throw new Error("Usage: xagent list");
+        if (rest.length > 1 || (rest.length === 1 && rest[0] !== "--local")) {
+            throw new Error("Usage: xagent list [--local]");
         }
-        return { command: "list" };
+        return { command: "list", local: rest[0] === "--local" };
     }
     if (command === "logs") {
         if (rest.length !== 1 || rest[0] === undefined || rest[0].startsWith("--")) {
@@ -62,8 +73,8 @@ export function parseArgs(argv) {
 export async function main(argv, stdin, stdout, stderr, cwd, dependencies = {}) {
     const command = parseArgs(argv);
     const adapterFactory = dependencies.createAdapter ?? createCliAdapter;
-    const logRoot = await resolveLogRoot(cwd);
     if (command.command === "run") {
+        const logRoot = await resolveLogRoot(cwd);
         return runSession({
             harness: command.harness,
             mode: command.mode,
@@ -82,24 +93,25 @@ export async function main(argv, stdin, stdout, stderr, cwd, dependencies = {}) 
         stdout.write(`${usage(command.topic)}\n`);
         return { exitCode: 0 };
     }
-    if (command.command === "list") {
-        const runs = await listRuns(logRoot);
-        stdout.write(`${JSON.stringify(runs, null, 2)}\n`);
-        return { exitCode: 0 };
-    }
     if (command.command === "logs") {
+        const logRoot = await resolveLogRoot(cwd);
         stdout.write(await readNormalizedLog(logRoot, command.runId));
         return { exitCode: 0 };
     }
-    return runQuietServiceCommand(command, stdout, cwd, dependencies);
+    if (command.command === "list" && command.local) {
+        const logRoot = await resolveLogRoot(cwd);
+        stdout.write(`${JSON.stringify(await listLocalRuns(logRoot), null, 2)}\n`);
+        return { exitCode: 0 };
+    }
+    return runQuietServiceCommand(command, stdout, stderr, cwd, dependencies);
 }
-async function runQuietServiceCommand(command, stdout, cwd, dependencies) {
+async function runQuietServiceCommand(command, stdout, stderr, cwd, dependencies) {
     const baseUrl = resolveXagentServiceBaseUrl(dependencies.serviceBaseUrl);
     const createClient = dependencies.createServiceClient ?? createXagentServiceClient;
     const client = createClient({ baseUrl });
     let startedRunId;
     try {
-        if (command.command === "supervise") {
+        if (command.command === "supervise" || command.command === "start") {
             const workingDirectory = path.resolve(command.cwd ?? cwd);
             const startInput = {
                 cwd: workingDirectory,
@@ -118,22 +130,27 @@ async function runQuietServiceCommand(command, stdout, cwd, dependencies) {
             };
             const started = await client.start(startInput);
             startedRunId = started.run_id;
+            if (command.command === "start") {
+                writeCompactJson(stdout, started);
+                return { exitCode: 0 };
+            }
             const deadlineSeconds = command.deadlineSeconds ?? x_DefaultAwaitDeadlineSeconds;
-            const awaited = await awaitControllerEvent(client, started.run_id, 0, deadlineSeconds);
+            const awaited = await awaitControllerEvent(client, started.run_id, 0, deadlineSeconds, stderr);
             writeCompactJson(stdout, awaited);
             return { exitCode: exitCodeForAwait(awaited) };
         }
         if (command.command === "await") {
-            const awaited = await client.await({
-                run_id: command.runId,
-                after_sequence: command.afterSequence,
-                deadline_seconds: command.deadlineSeconds ?? x_DefaultAwaitDeadlineSeconds,
-            });
+            const awaited = await awaitControllerEvent(client, command.runId, command.afterSequence, command.deadlineSeconds ?? x_DefaultAwaitDeadlineSeconds, stderr);
             writeCompactJson(stdout, awaited);
             return { exitCode: exitCodeForAwait(awaited) };
         }
         if (command.command === "inspect") {
             writeCompactJson(stdout, await client.inspect({ run_id: command.runId }));
+            return { exitCode: 0 };
+        }
+        if (command.command === "list") {
+            const listed = await client.listRuns({ live_only: false, limit: 50 });
+            writeCompactJson(stdout, listed.runs);
             return { exitCode: 0 };
         }
         if (command.command === "message") {
@@ -178,7 +195,7 @@ function withOptionalRunId(structured, runId) {
 function writeCompactJson(stdout, body) {
     stdout.write(`${JSON.stringify(body)}\n`);
 }
-async function awaitControllerEvent(client, runId, afterSequence, deadlineSeconds) {
+async function awaitControllerEvent(client, runId, afterSequence, deadlineSeconds, advisoryOutput) {
     let cursor = afterSequence;
     const deadlineMs = Date.now() + deadlineSeconds * 1000;
     for (;;) {
@@ -190,6 +207,24 @@ async function awaitControllerEvent(client, runId, afterSequence, deadlineSecond
         });
         if (awaited.event === "supervision.state"
             && nonTerminalSupervisionPhases.has(awaited.phase)) {
+            cursor = awaited.sequence;
+            if (Date.now() >= deadlineMs) {
+                return {
+                    schema_version: 1,
+                    event: "supervision.deadline",
+                    run_id: runId,
+                    sequence: cursor,
+                    phase: awaited.phase,
+                    elapsed_ms: deadlineSeconds * 1000,
+                    reason: "await_deadline",
+                };
+            }
+            continue;
+        }
+        if (awaited.event === "supervision.attention"
+            && typeof awaited.reason === "string"
+            && awaited.reason.startsWith("watchdog_")) {
+            writeCompactJson(advisoryOutput, awaited);
             cursor = awaited.sequence;
             if (Date.now() >= deadlineMs) {
                 return {
@@ -364,7 +399,7 @@ function parseRunArgs(argv) {
         initialMessage: initialMessageParts.length > 0 ? initialMessageParts.join(" ") : undefined,
     };
 }
-function parseSuperviseArgs(argv) {
+function parseSuperviseArgs(argv, commandName = "supervise") {
     let harness;
     let model;
     let thinkingLevel;
@@ -394,7 +429,7 @@ function parseSuperviseArgs(argv) {
         }
         if (flag === "--harness") {
             if (harness !== undefined) {
-                throw new Error("xagent supervise requires exactly one --harness value.");
+                throw new Error(`xagent ${commandName} requires exactly one --harness value.`);
             }
             const value = readFlagValue(argv, index, flag);
             assertHarness(value);
@@ -404,7 +439,7 @@ function parseSuperviseArgs(argv) {
         }
         if (flag === "--model") {
             if (model !== undefined) {
-                throw new Error("xagent supervise accepts --model at most once.");
+                throw new Error(`xagent ${commandName} accepts --model at most once.`);
             }
             model = readFlagValue(argv, index, flag);
             index += 1;
@@ -412,7 +447,7 @@ function parseSuperviseArgs(argv) {
         }
         if (flag === "--permission-mode") {
             if (permissionMode !== undefined) {
-                throw new Error("xagent supervise accepts --permission-mode at most once.");
+                throw new Error(`xagent ${commandName} accepts --permission-mode at most once.`);
             }
             permissionMode = readFlagValue(argv, index, flag);
             index += 1;
@@ -420,7 +455,7 @@ function parseSuperviseArgs(argv) {
         }
         if (flag === "--resume") {
             if (providerThreadId !== undefined) {
-                throw new Error("xagent supervise accepts --resume at most once.");
+                throw new Error(`xagent ${commandName} accepts --resume at most once.`);
             }
             providerThreadId = readFlagValue(argv, index, flag);
             index += 1;
@@ -428,7 +463,7 @@ function parseSuperviseArgs(argv) {
         }
         if (flag === "--thinking-level") {
             if (thinkingLevel !== undefined) {
-                throw new Error("xagent supervise accepts --thinking-level at most once.");
+                throw new Error(`xagent ${commandName} accepts --thinking-level at most once.`);
             }
             const value = readFlagValue(argv, index, flag);
             assertThinkingLevel(value);
@@ -438,7 +473,7 @@ function parseSuperviseArgs(argv) {
         }
         if (flag === "--cwd") {
             if (cwd !== undefined) {
-                throw new Error("xagent supervise accepts --cwd at most once.");
+                throw new Error(`xagent ${commandName} accepts --cwd at most once.`);
             }
             cwd = readFlagValue(argv, index, flag);
             index += 1;
@@ -446,13 +481,16 @@ function parseSuperviseArgs(argv) {
         }
         if (flag === "--policy") {
             if (policy !== undefined) {
-                throw new Error("xagent supervise accepts --policy at most once.");
+                throw new Error(`xagent ${commandName} accepts --policy at most once.`);
             }
             policy = parsePolicyJson(readFlagValue(argv, index, flag));
             index += 1;
             continue;
         }
         if (flag === "--deadline-seconds") {
+            if (commandName === "start") {
+                throw new Error("xagent start does not accept --deadline-seconds; use xagent await to wait.");
+            }
             if (deadlineSeconds !== undefined) {
                 throw new Error("xagent supervise accepts --deadline-seconds at most once.");
             }
@@ -460,13 +498,13 @@ function parseSuperviseArgs(argv) {
             index += 1;
             continue;
         }
-        throw new Error(`Unsupported flag for xagent supervise: ${flag}.`);
+        throw new Error(`Unsupported flag for xagent ${commandName}: ${flag}.`);
     }
     if (harness === undefined) {
-        throw new Error("xagent supervise requires --harness <codex|pi|cursor|claude_code>.");
+        throw new Error(`xagent ${commandName} requires --harness <codex|pi|cursor|claude_code>.`);
     }
     if (promptParts.length === 0) {
-        throw new Error("xagent supervise requires an initial prompt.");
+        throw new Error(`xagent ${commandName} requires an initial prompt.`);
     }
     return {
         command: "supervise",
@@ -642,6 +680,7 @@ function usage(topic) {
     if (topic === "supervise") {
         return [
             "Usage:",
+            "  xagent start --harness <codex|pi|cursor|claude_code> [--model <model>] [--thinking-level <low|medium|high|xhigh>] [--permission-mode <mode>] [--resume <provider-thread-id>] [--cwd <abs-path>] [--policy <json>] <prompt>",
             "  xagent supervise --harness <codex|pi|cursor|claude_code> [--model <model>] [--thinking-level <low|medium|high|xhigh>] [--permission-mode <mode>] [--resume <provider-thread-id>] [--cwd <abs-path>] [--policy <json>] [--deadline-seconds <n>] <prompt>",
             "  xagent await <run_id> --after-sequence <n> [--deadline-seconds <n>]",
             "  xagent inspect <run_id>",
@@ -651,8 +690,9 @@ function usage(topic) {
             "",
             "Quiet service-client fallback for the Conductor-managed xagent service at 127.0.0.1:9005.",
             "Requires a healthy service; never starts an embedded supervisor.",
-            "Stdout stays quiet through healthy progress and emits one compact JSON result for attention,",
-            "terminal completion/failure, await deadline, infrastructure failure, or explicit inspect/message/interrupt/close.",
+            "Use start to get the run_id immediately, then await to wait for the result.",
+            "Supervise and await keep stdout quiet through healthy progress and advisory watchdog notices.",
+            "Advisory watchdog notices go to stderr; stdout emits one compact terminal or actionable result.",
             "Successful completion includes the sanitized final assistant report inline.",
             "Use the returned run_id to reattach with await/inspect/message/interrupt/close.",
         ].join("\n");
@@ -660,13 +700,14 @@ function usage(topic) {
     return [
         "Usage:",
         "  xagent run --harness <codex|pi|cursor|claude_code> [--model <model>] [--thinking-level <low|medium|high|xhigh>] (--subagent|--full) [initial message]",
+        "  xagent start --harness <codex|pi|cursor|claude_code> [options] <prompt>",
         "  xagent supervise --harness <codex|pi|cursor|claude_code> [options] <prompt>",
         "  xagent await <run_id> --after-sequence <n> [--deadline-seconds <n>]",
         "  xagent inspect <run_id>",
         "  xagent message <run_id> <text>",
         "  xagent interrupt <run_id>",
         "  xagent close <run_id>",
-        "  xagent list",
+        "  xagent list [--local]",
         "  xagent logs <run_id>",
         "",
         "Run protocol:",
@@ -675,14 +716,16 @@ function usage(topic) {
         "",
         "Quiet supervision:",
         "  xagent supervise talks to the Conductor-managed xagent service (127.0.0.1:9005).",
-        "  Healthy deltas/tools stay off stdout; one compact JSON result carries attention, terminal events,",
-        "  deadlines, or the sanitized final assistant report. Reattach with run_id.",
+        "  Use start when the controller needs the run_id before waiting.",
+        "  Healthy deltas/tools stay off stdout; advisory watchdog notices go to stderr and do not detach.",
+        "  One compact stdout JSON carries actionable attention, terminal events, deadlines, or the final report.",
         "",
         "Examples:",
         "  xagent run --harness codex --subagent \"hello\"",
         "  xagent run --harness claude_code --model haiku --subagent \"hello\"",
         "  xagent supervise --harness claude_code --model sonnet \"implement the task\"",
         "  xagent list",
+        "  xagent list --local  # legacy xagent run records",
         "  xagent logs <run_id>",
         "",
         "Use `xagent run --help` for run protocol details.",

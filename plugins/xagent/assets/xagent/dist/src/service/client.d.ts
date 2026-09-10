@@ -1,6 +1,6 @@
 import type { Progress } from "@modelcontextprotocol/sdk/types.js";
-import type { AwaitRunResult, CloseRunResult, InspectRunResult, InterruptRunResult, MessageRunResult, StartRunResult } from "./run_manager.js";
-import type { StructuredToolError, XagentAwaitInput, XagentCloseInput, XagentInspectInput, XagentInterruptInput, XagentMessageInput, XagentStartInput } from "./tool_schemas.js";
+import type { AwaitRunResult, CloseRunResult, InspectRunResult, InterruptRunResult, ListRunsResult, MessageRunResult, StartRunResult } from "./run_manager.js";
+import type { StructuredToolError, XagentAwaitInput, XagentCloseInput, XagentInspectInput, XagentInterruptInput, XagentListInput, XagentMessageInput, XagentStartInput } from "./tool_schemas.js";
 export declare const XAGENT_DEFAULT_SERVICE_BASE_URL = "http://127.0.0.1:9005";
 export type XagentServiceClientOptions = {
     readonly baseUrl?: string;
@@ -9,6 +9,7 @@ export type XagentServiceClient = {
     start(input: XagentStartInput): Promise<StartRunResult>;
     await(input: XagentAwaitInput, signal?: AbortSignal): Promise<AwaitRunResult>;
     inspect(input: XagentInspectInput): Promise<InspectRunResult>;
+    listRuns(input: XagentListInput): Promise<ListRunsResult>;
     message(input: XagentMessageInput): Promise<MessageRunResult>;
     interrupt(input: XagentInterruptInput): Promise<InterruptRunResult>;
     closeRun(input: XagentCloseInput): Promise<CloseRunResult>;

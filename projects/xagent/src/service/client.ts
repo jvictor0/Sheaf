@@ -14,6 +14,7 @@ import type {
   CloseRunResult,
   InspectRunResult,
   InterruptRunResult,
+  ListRunsResult,
   MessageRunResult,
   StartRunResult,
 } from "./run_manager.js";
@@ -23,6 +24,7 @@ import type {
   XagentCloseInput,
   XagentInspectInput,
   XagentInterruptInput,
+  XagentListInput,
   XagentMessageInput,
   XagentStartInput,
 } from "./tool_schemas.js";
@@ -38,6 +40,7 @@ export type XagentServiceClient = {
   start(input: XagentStartInput): Promise<StartRunResult>;
   await(input: XagentAwaitInput, signal?: AbortSignal): Promise<AwaitRunResult>;
   inspect(input: XagentInspectInput): Promise<InspectRunResult>;
+  listRuns(input: XagentListInput): Promise<ListRunsResult>;
   message(input: XagentMessageInput): Promise<MessageRunResult>;
   interrupt(input: XagentInterruptInput): Promise<InterruptRunResult>;
   closeRun(input: XagentCloseInput): Promise<CloseRunResult>;
@@ -201,6 +204,9 @@ export function createXagentServiceClient(
     },
     inspect(input) {
       return callTool<InspectRunResult>("xagent_inspect", { ...input });
+    },
+    listRuns(input) {
+      return callTool<ListRunsResult>("xagent_list", { ...input });
     },
     message(input) {
       return callTool<MessageRunResult>("xagent_message", { ...input });

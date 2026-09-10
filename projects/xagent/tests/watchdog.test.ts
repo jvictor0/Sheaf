@@ -1345,6 +1345,9 @@ test("derailed watchdog checks emit advisory attention without acting on the wor
   assert.equal(attention.type, "supervision.attention");
   assert.equal(attention.reason, "watchdog_derailed");
   assert.deepEqual(attention.payload, {
+    advisory: true,
+    worker_continues: true,
+    message: "The watchdog noticed signals that may merit review. No action was taken and the worker is still running. Please check when convenient.",
     verdict: "derailed",
     confidence: 0.93,
     reason_code: "repeated_failed_tool",
@@ -1414,6 +1417,9 @@ test("classifier-authored attention evidence is sanitized before durable deliver
   const attention = await attentionSeen.promise;
 
   assert.deepEqual(attention.payload, {
+    advisory: true,
+    worker_continues: true,
+    message: "The watchdog noticed signals that may merit review. No action was taken and the worker is still running. Please check when convenient.",
     verdict: "derailed",
     confidence: 0.9,
     reason_code: "secret_path_echo",

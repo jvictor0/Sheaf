@@ -90,7 +90,7 @@ test("executable full mode emits raw provider and normalized tool events", async
   assert.equal(events.some((event) => event.type === "turn.completed"), true);
 });
 
-test("executable list and logs inspect persisted runs without a server", async () => {
+test("executable local list and logs inspect legacy persisted runs without a server", async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), "xagent-e2e-"));
   const result = await runXagent(
     ["run", "--harness", "codex", "--subagent"],
@@ -102,7 +102,7 @@ test("executable list and logs inspect persisted runs without a server", async (
   const runId = parseJsonl(result.stdout)[0]?.run_id;
   assert.equal(typeof runId, "string");
 
-  const list = await runXagent(["list"], "", repoRoot);
+  const list = await runXagent(["list", "--local"], "", repoRoot);
   assert.equal(list.code, 0, list.stderr);
   const runs = JSON.parse(list.stdout) as Array<{ run_id: string }>;
   assert.equal(runs.some((run) => run.run_id === runId), true);
@@ -260,4 +260,3 @@ test("two agents, four submissions, two immutable rows, reports only in the log"
     await service.close();
   }
 });
-

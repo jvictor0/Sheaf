@@ -12,6 +12,16 @@ export type CliCommand = {
     permissionMode?: string;
     initialMessage?: string;
 } | {
+    command: "start";
+    harness: HarnessName;
+    model?: string;
+    thinkingLevel?: ThinkingLevel;
+    permissionMode?: string;
+    providerThreadId?: string;
+    cwd?: string;
+    policy?: SupervisionPolicy;
+    prompt: string;
+} | {
     command: "supervise";
     harness: HarnessName;
     model?: string;
@@ -42,6 +52,7 @@ export type CliCommand = {
     runId: string;
 } | {
     command: "list";
+    local: boolean;
 } | {
     command: "logs";
     runId: string;

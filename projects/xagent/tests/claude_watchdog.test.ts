@@ -73,6 +73,9 @@ test("launches one fresh isolated no-tools Haiku invocation with bounded stdin",
   assert.match(systemPrompt, /bounded provider JSON/i);
   assert.match(systemPrompt, /harness/i);
   assert.match(systemPrompt, /repeated tools.*ambiguous/i);
+  assert.match(systemPrompt, /failing tests.*normal/i);
+  assert.match(systemPrompt, /sustained evidence.*abandoned.*contradicted/i);
+  assert.equal(call.timeoutMs, 90_000);
   assert.doesNotMatch(systemPrompt, /sanitized JSON evidence/i);
   assert.deepEqual(call.cwdEntries, []);
   assert.ok(Buffer.byteLength(call.input, "utf8") <= 64 * 1024);
@@ -156,7 +159,7 @@ test("normalizes invalid JSON, failed invocation, over-budget, and oversized out
       spawn: async () => {
         throw new Error("spawn failed");
       },
-      reason: "classifier_invocation_failed",
+      reason: "classifier_spawn_failed",
     },
     {
       name: "budget exceeded",
@@ -164,9 +167,17 @@ test("normalizes invalid JSON, failed invocation, over-budget, and oversized out
         exitCode: 1,
         stdout: JSON.stringify({ type: "result", subtype: "error_max_budget_usd" }),
         stderr: "",
-        budgetExceeded: true,
       }),
       reason: "classifier_budget_exceeded",
+    },
+    {
+      name: "nonzero exit",
+      spawn: async () => ({
+        exitCode: 7,
+        stdout: JSON.stringify({ type: "result", subtype: "error_during_execution" }),
+        stderr: "provider failed",
+      }),
+      reason: "classifier_nonzero_exit",
     },
     {
       name: "output too large",
