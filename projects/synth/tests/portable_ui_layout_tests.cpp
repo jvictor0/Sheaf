@@ -1363,6 +1363,89 @@ void TestEmptyTextCheckCatchesAReservedBandThatSaysNothing()
     Require(Mentions(violations.front(), "silent"), "the empty-text violation names the silent node");
 }
 
+// A captioned control declaring ControlStyle::controlWidth = Intrinsic is
+// pinned to the control column's left edge but sized to its own content, not
+// stretched to fill the column -- the button described in the plan. A
+// captioned control that leaves controlWidth at its default keeps filling the
+// column exactly as before.
+void TestCaptionedButtonIsSizedToItsOwnCaptionInsteadOfTheColumn()
+{
+    synth::ui::LayoutOptions grid;
+    grid.formGrid = true;
+    synth::ui::Builder b;
+    b.Root("root", {0.0f, 0.0f, 400.0f, 300.0f});
+    b.Column("form", grid, [](synth::ui::Builder& b) {
+        synth::ui::ControlStyle field;
+        field.caption = "Output device";
+        b.ComboBox("output", {}, "", synth::ui::Action::Named("pick"), field);
+
+        synth::ui::ControlStyle button;
+        button.caption = "Input capture";
+        button.controlWidth = synth::ui::Extent::Intrinsic();
+        b.Button("retry", "Retry Input", synth::ui::Action::Named("retry"), button);
+
+        synth::ui::ControlStyle textField;
+        textField.caption = "Note";
+        b.TextField("note", "", "", synth::ui::Action::Named("edit"), textField);
+    });
+    const auto tree = b.Build({0.0f, 0.0f, 400.0f, 300.0f});
+
+    const synth::ui::Node& output = FindNode(tree, "output");
+    const synth::ui::Node& retry = FindNode(tree, "retry");
+    const synth::ui::Node& note = FindNode(tree, "note");
+
+    const float expectedIntrinsic =
+        std::max(72.0f, synth::ui::metrics::TextWidth("Retry Input", synth::ui::TextStyle{}));
+    Require(NearlyEqual(retry.bounds.width, expectedIntrinsic),
+            "a captioned button declaring Intrinsic controlWidth sizes to its own label, not the column");
+    Require(retry.bounds.width < output.bounds.width,
+            "the intrinsic button is narrower than the column a full-width control occupies");
+    Require(NearlyEqual(retry.bounds.x, output.bounds.x),
+            "the intrinsic button's left edge matches a full-width control's left edge in the same grid");
+    Require(NearlyEqual(note.bounds.width, output.bounds.width),
+            "a captioned control with no controlWidth override still spans the full control column");
+}
+
+// The control-cell width assignment does two jobs (PortableUILayout.hpp
+// ApplyFormGrid): size a weighted control to fill the column, and clamp a
+// non-weighted control that would otherwise overrun it. This exercises the
+// second job directly: a button whose own content is wider than what the
+// column has left must be held to the column, and the row it lives in must
+// still hold its children (RequireContainerHoldsItsChildren judges FINAL
+// bounds, after this clamp runs).
+void TestContentWiderThanTheColumnIsClampedAndTheRowStillHoldsItsChildren()
+{
+    synth::ui::LayoutOptions grid;
+    grid.formGrid = true;
+    synth::ui::Builder b;
+    b.Root("root", {0.0f, 0.0f, 400.0f, 300.0f});
+    b.Column("form", grid, [](synth::ui::Builder& b) {
+        synth::ui::ControlStyle field;
+        field.caption = "A considerably longer caption";
+        b.ComboBox("output", {}, "", synth::ui::Action::Named("pick"), field);
+
+        synth::ui::ControlStyle button;
+        button.caption = "Short";
+        button.controlWidth = synth::ui::Extent::Intrinsic();
+        b.Button("wide", "A button label far too long to fit the remaining column width",
+                 synth::ui::Action::Named("wide"), button);
+    });
+    // Must not throw: RequireContainerHoldsItsChildren aborts the build if the
+    // clamp fails to keep the oversized button inside its row.
+    const auto tree = b.Build({0.0f, 0.0f, 400.0f, 300.0f});
+
+    const synth::ui::Node& row = FindNode(tree, "wide.row");
+    const synth::ui::Node& wide = FindNode(tree, "wide");
+    const float expectedIntrinsic = std::max(
+        72.0f,
+        synth::ui::metrics::TextWidth("A button label far too long to fit the remaining column width",
+                                      synth::ui::TextStyle{}));
+    Require(wide.bounds.width < expectedIntrinsic,
+            "the content-sized control's declared width really is wider than what the column can hold");
+    Require(wide.bounds.x + wide.bounds.width <= row.bounds.width + 0.01f,
+            "a content-sized control wider than its column is clamped to the column, so the row still holds it");
+}
+
 }  // namespace
 
 int main()
@@ -1412,4 +1495,6 @@ int main()
     TestColumnAlignmentCheckCatchesAControlLeavingItsColumn();
     TestCaptionCheckSeesThroughAnUnrenderedLabel();
     TestEmptyTextCheckCatchesAReservedBandThatSaysNothing();
+    TestCaptionedButtonIsSizedToItsOwnCaptionInsteadOfTheColumn();
+    TestContentWiderThanTheColumnIsClampedAndTheRowStillHoldsItsChildren();
 }
