@@ -1,0 +1,97 @@
+diff --git a/server/modules/providers/list/codex/codex-runtime.provider.ts b/server/modules/providers/list/codex/codex-runtime.provider.ts
+index 7dd2a3e..719bbc2 100644
+--- a/server/modules/providers/list/codex/codex-runtime.provider.ts
++++ b/server/modules/providers/list/codex/codex-runtime.provider.ts
+@@ -285 +285 @@ function transformCodexEvent(event: AnyRecord): AnyRecord {
+- * Map permission mode to Codex SDK options
++ * Map permission mode to explicit Codex app-server options. Used by provider tests.
+@@ -287 +287 @@ function transformCodexEvent(event: AnyRecord): AnyRecord {
+- * @returns {object} - { sandboxMode, approvalPolicy, approvalsReviewer? }
++ * @returns {object} - { sandboxMode, approvalPolicy, approvalsReviewer }
+@@ -294 +294 @@ export function mapPermissionModeToCodexOptions(
+-  approvalsReviewer?: string;
++  approvalsReviewer: 'user' | 'auto_review';
+@@ -306 +306,2 @@ export function mapPermissionModeToCodexOptions(
+-        approvalPolicy: 'never'
++        approvalPolicy: 'never',
++        approvalsReviewer: 'user'
+@@ -314 +315,2 @@ export function mapPermissionModeToCodexOptions(
+-        approvalPolicy: 'on-request'
++        approvalPolicy: 'on-request',
++        approvalsReviewer: 'user'
+@@ -372 +374 @@ export async function queryCodex(
+-      ...(approvalsReviewer ? { approvalsReviewer } : {}),
++      approvalsReviewer,
+@@ -482,0 +485,3 @@ export async function queryCodex(
++    // Resuming an already loaded thread rejoins it without replacing its
++    // configuration. Apply every selected permission field to the new turn;
++    // omission would retain the previous turn's sandbox/reviewer (or config defaults).
+@@ -484,0 +490,11 @@ export async function queryCodex(
++      approvalPolicy,
++      approvalsReviewer,
++      sandboxPolicy: sandboxMode === 'danger-full-access'
++        ? { type: 'dangerFullAccess' }
++        : {
++          type: 'workspaceWrite',
++          writableRoots: [],
++          networkAccess: false,
++          excludeTmpdirEnvVar: false,
++          excludeSlashTmp: false,
++        },
+diff --git a/server/modules/providers/tests/codex-runtime.test.ts b/server/modules/providers/tests/codex-runtime.test.ts
+index 0b85851..88c9a26 100644
+--- a/server/modules/providers/tests/codex-runtime.test.ts
++++ b/server/modules/providers/tests/codex-runtime.test.ts
+@@ -70 +70 @@ for (const resumed of [false, true]) {
+-        assert.equal(threadRequest?.params.approvalsReviewer, permissionMode === 'acceptEdits' ? 'auto_review' : undefined);
++        assert.equal(threadRequest?.params.approvalsReviewer, permissionMode === 'acceptEdits' ? 'auto_review' : 'user');
+@@ -72,0 +73,5 @@ for (const resumed of [false, true]) {
++        assert.equal(turnRequest?.params.approvalPolicy, permissionMode === 'bypassPermissions' ? 'never' : 'on-request');
++        assert.equal(turnRequest?.params.approvalsReviewer, permissionMode === 'acceptEdits' ? 'auto_review' : 'user');
++        assert.deepEqual(turnRequest?.params.sandboxPolicy, permissionMode === 'bypassPermissions'
++          ? { type: 'dangerFullAccess' }
++          : { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false });
+@@ -81,0 +87,43 @@ for (const resumed of [false, true]) {
++
++// A loaded app-server thread keeps its configuration when rejoined. Only
++// turn/start overrides change the policy used for the next model turn.
++class LoadedThreadClient extends FakeAppServerClient {
++  effective = {
++    approvalPolicy: 'on-request',
++    approvalsReviewer: 'auto_review',
++    sandboxPolicy: { type: 'workspaceWrite' },
++  };
++
++  override async request(method: string, params: Record<string, unknown>) {
++    if (method === 'turn/start') {
++      for (const key of ['approvalPolicy', 'approvalsReviewer', 'sandboxPolicy'] as const) {
++        if (params[key] !== undefined) Object.assign(this.effective, { [key]: params[key] });
++      }
++    }
++    return super.request(method, params);
++  }
++}
++
++test('loaded thread changes effective permissions in both directions without restarting', async () => {
++  const client = new LoadedThreadClient();
++  setCodexAppServerClientForTests(client);
++  const context: ProviderRuntimeContext = {
++    resolveProviderSessionId: () => 'native-thread',
++    resolveResumeModel: async () => 'test-model',
++    getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'test-model' }),
++    normalizeMessage: () => [],
++    isProviderInstalled: async () => true,
++  };
++  try {
++    for (const mode of ['acceptEdits', 'bypassPermissions', 'acceptEdits', 'default', 'bypassPermissions']) {
++      await codexRuntime.run('next turn', {
++        sessionId: 'app-session', permissionMode: mode, cwd: process.cwd(),
++      }, { isWebSocketWriter: true, send: () => {} }, context);
++      assert.equal(client.effective.approvalPolicy, mode === 'bypassPermissions' ? 'never' : 'on-request');
++      assert.equal(client.effective.approvalsReviewer, mode === 'acceptEdits' ? 'auto_review' : 'user');
++      assert.equal(client.effective.sandboxPolicy.type, mode === 'bypassPermissions' ? 'dangerFullAccess' : 'workspaceWrite');
++    }
++  } finally {
++    setCodexAppServerClientForTests(null);
++  }
++});

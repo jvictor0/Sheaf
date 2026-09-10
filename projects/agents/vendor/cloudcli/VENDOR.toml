@@ -8,4 +8,5 @@ patches = [
   "patches/0003-immediate-archive-independent-projects.patch",
   "patches/0004-steer-active-codex-turns.patch",
   "patches/0005-open-absolute-file-links.patch",
+  "patches/0006-apply-codex-permissions-per-turn.patch",
 ]
