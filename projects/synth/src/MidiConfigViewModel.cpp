@@ -912,6 +912,7 @@ void MidiConfigViewModel::Rebuild(const MidiInstrumentConfig& instrument, const 
         row.outputDeviceLabel = DeviceLabel(slot.output, outputConnection.status);
         row.storedInput = slot.input;
         row.storedOutput = slot.output;
+        row.launchpadModel = slot.config.launchpadModel;
         row.sections = SectionsForKind(slot.kind);
 
         // Ensure expand state exists for this controller (first appearance
@@ -3066,6 +3067,69 @@ bool MidiConfigViewModel::RestoreController(std::size_t controllerIx, MidiInstru
     return true;
 }
 
+LaunchpadController MidiConfigViewModel::LaunchpadModel(std::size_t controllerIx) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        return LaunchpadController::LaunchpadX;
+    }
+    return instrument_.controllers[controllerIx].config.launchpadModel;
+}
+
+bool MidiConfigViewModel::SetLaunchpadModel(std::size_t controllerIx, LaunchpadController model,
+                                            MidiInstrumentConfig& out, std::string* reason) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        if (reason != nullptr) {
+            *reason = "controller does not exist";
+        }
+        return false;
+    }
+    const MidiControllerSlot& existing = instrument_.controllers[controllerIx];
+    if (existing.kind != MidiProfileKind::Launchpad) {
+        if (reason != nullptr) {
+            *reason = "only a Launchpad controller has a model";
+        }
+        return false;
+    }
+    if (existing.config.launchpadModel == model) {
+        if (reason != nullptr) {
+            *reason = "model is unchanged";
+        }
+        return false;
+    }
+
+    // Every position is checked against the chosen model's grid before any is
+    // written, so a model with less room than the row uses leaves the row
+    // exactly as it was rather than dropping the pads that do not fit.
+    for (const MidiControllerSystemMessageAssociation& association : existing.config.systemMessages) {
+        if (!association.launchpadPosition.has_value()) {
+            continue;
+        }
+        const LaunchpadGridPosition& position = *association.launchpadPosition;
+        if (!LaunchpadShapeSupports(model, position.x, position.y)) {
+            if (reason != nullptr) {
+                std::ostringstream oss;
+                oss << "pad (" << position.x << "," << position.y << ") is outside "
+                    << LaunchpadControllerDisplayName(model) << "'s grid";
+                *reason = oss.str();
+            }
+            return false;
+        }
+    }
+
+    MidiInstrumentConfig scratch = instrument_;
+    MidiControllerSlot& slot = scratch.controllers[controllerIx];
+    slot.config.launchpadModel = model;
+    for (MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
+        if (association.launchpadPosition.has_value()) {
+            association.launchpadPosition->controller = model;
+        }
+    }
+    if (!SlotValidForKind(slot, reason)) {
+        return false;
+    }
+    out = std::move(scratch);
+    return true;
+}
+
 bool MidiConfigViewModel::SetEndpointRef(std::size_t controllerIx, bool output, MidiEndpointRef ref,
                                          MidiInstrumentConfig& out) const {
     if (controllerIx >= instrument_.controllers.size()) {
@@ -3340,21 +3404,6 @@ std::optional<std::pair<int, int>> NextFreeWrldBldrGridPair(
     return std::nullopt;
 }
 
-// The slot's current Launchpad variant, read from the first launchpad
-// association's controller (default LaunchpadX when the slot has no
-// launchpad associations yet). Used by AddSingle/AddBlock's launchpad
-// branches below so a new row/block added to an already-retargeted (e.g.
-// Pro MK3) slot is seeded with THAT variant rather than a hardcoded
-// LaunchpadX.
-LaunchpadController CurrentLaunchpadVariant(const std::vector<MidiControllerSystemMessageAssociation>& associations) {
-    for (const MidiControllerSystemMessageAssociation& association : associations) {
-        if (association.launchpadPosition.has_value()) {
-            return association.launchpadPosition->controller;
-        }
-    }
-    return LaunchpadController::LaunchpadX;
-}
-
 // Lowest-unused Launchpad (x,y) within the given controller's shape,
 // row-major scan of a generous bounding box (Launchpad coordinates can be
 // -1..9 per LaunchpadShapeSupports).
@@ -3515,7 +3564,7 @@ bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection 
             button.x = position->first;
             button.y = position->second;
         } else if (visibleSlot.kind == MidiProfileKind::Launchpad) {
-            const LaunchpadController controller = CurrentLaunchpadVariant(visibleSlot.config.systemMessages);
+            const LaunchpadController controller = visibleSlot.config.launchpadModel;
             const auto position = NextFreeLaunchpadGridPair(
                 visibleSlot.config.systemMessages, visibleSlot.config.pressureInput, controller,
                 /*pair=*/false);
@@ -3570,7 +3619,7 @@ bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection 
             }
             case MidiProfileKind::Launchpad: {
                 const auto position = NextFreeLaunchpadPosition(
-                    visibleSlot.config.systemMessages, CurrentLaunchpadVariant(visibleSlot.config.systemMessages));
+                    visibleSlot.config.systemMessages, visibleSlot.config.launchpadModel);
                 if (!position.has_value()) {
                     if (reason != nullptr) {
                         *reason = "no free launchpad grid position for a new system row";
@@ -3722,7 +3771,7 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
             block.startX = position->first;
             block.startY = position->second;
         } else if (visibleSlot.kind == MidiProfileKind::Launchpad) {
-            const LaunchpadController controller = CurrentLaunchpadVariant(visibleSlot.config.systemMessages);
+            const LaunchpadController controller = visibleSlot.config.launchpadModel;
             const auto position = NextFreeLaunchpadGridPair(
                 visibleSlot.config.systemMessages, visibleSlot.config.pressureInput, controller,
                 /*pair=*/true);
@@ -3776,7 +3825,7 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
             block.endY = position->second + 1;
         } else if (visibleSlot.kind == MidiProfileKind::Launchpad) {
             const auto position = NextFreeLaunchpadPosition(
-                visibleSlot.config.systemMessages, CurrentLaunchpadVariant(visibleSlot.config.systemMessages));
+                visibleSlot.config.systemMessages, visibleSlot.config.launchpadModel);
             if (!position.has_value()) {
                 if (reason != nullptr) {
                     *reason = "no free launchpad grid position for a new block";

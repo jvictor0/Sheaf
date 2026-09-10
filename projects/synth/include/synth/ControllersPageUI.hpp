@@ -284,6 +284,11 @@ inline std::string ControllerKind(std::size_t controllerIx)
     return ControllerRow(controllerIx) + ".kind";
 }
 
+inline std::string ControllerVariant(std::size_t controllerIx)
+{
+    return ControllerRow(controllerIx) + ".variant";
+}
+
 inline std::string ControllerBadge(std::size_t controllerIx)
 {
     return ControllerRow(controllerIx) + ".badge";
@@ -412,6 +417,7 @@ inline constexpr const char* kBack = "runtime.controllers.back";
 inline constexpr const char* kToggleConfig = "runtime.controllers.toggle_config";
 inline constexpr const char* kToggleSection = "runtime.controllers.toggle_section";
 inline constexpr const char* kEndpointSelect = "runtime.controllers.endpoint_select";
+inline constexpr const char* kVariantSelect = "runtime.controllers.variant_select";
 inline constexpr const char* kMappingFieldCommit = "runtime.controllers.mapping_field_commit";
 inline constexpr const char* kDeleteRow = "runtime.controllers.delete_row";
 inline constexpr const char* kAddSingle = "runtime.controllers.add_single";
@@ -443,6 +449,7 @@ inline constexpr std::string_view kControllersActions[] = {
     kToggleConfig,
     kToggleSection,
     kEndpointSelect,
+    kVariantSelect,
     kMappingFieldCommit,
     kDeleteRow,
     kAddSingle,
@@ -502,6 +509,9 @@ inline constexpr float kAvailableControlGap = 8.0f;
 inline constexpr float kControllerNameWidth = 200.0f;
 inline constexpr float kControllerKindWidth = 100.0f;
 inline constexpr float kControllerDisclosureWidth = 24.0f;
+// Line one's Variant selector, on launchpad rows only: wide enough for
+// "Launchpad Mini MK3" plus its caption.
+inline constexpr float kVariantFieldWidth = 180.0f;
 // The draft column is wide enough to hold the "Name" caption plus a usable
 // field for a short name.
 inline constexpr float kLifecycleDraftWidth = 160.0f;
@@ -526,11 +536,12 @@ inline constexpr float kBlacklistedBadgeWidth = 84.0f;
 // draft and Rename button are simply gone here, not moved.
 inline constexpr float kBlacklistedLifecycleWidth =
     kLifecycleConfigureWidth + kLifecycleControlGap + kLifecycleRemoveWidth;
-// Line one: disclosure, name, kind. The status dots are on line two now,
-// beside the ports they describe.
+// Line one: disclosure, name, kind, and on a launchpad row the Variant
+// selector. The status dots are on line two now, beside the ports they
+// describe. The width below is the launchpad case, the wider of the two.
 inline constexpr float kActiveHeaderLine1Width =
     kControllerDisclosureWidth + kLifecycleControlGap + kControllerNameWidth +
-    kLifecycleControlGap + kControllerKindWidth;
+    kLifecycleControlGap + kControllerKindWidth + kLifecycleControlGap + kVariantFieldWidth;
 // Line two: a status dot immediately before each port's combo, then the
 // lifecycle controls.
 inline constexpr float kActiveHeaderLine2Width =
@@ -916,6 +927,33 @@ inline bool InstallDescriptorProfile(const std::vector<ControllerWizardDescripto
     return true;
 }
 
+// The Launchpad models the Variant selector offers, in this order. The
+// option id is the index into this list, which is what HandleVariantSelect
+// parses back -- one list, so the offered order and the parsed meaning cannot
+// drift apart.
+inline constexpr LaunchpadController kLaunchpadVariants[] = {
+    LaunchpadController::LaunchpadX,
+    LaunchpadController::LaunchpadProMk3,
+    LaunchpadController::LaunchpadMiniMk3,
+};
+
+inline std::vector<ui::ControlOption> BuildLaunchpadVariantOptions(LaunchpadController selected,
+                                                                   std::string& selectedOptionId)
+{
+    std::vector<ui::ControlOption> options;
+    selectedOptionId = "0";
+    for (std::size_t ix = 0; ix < std::size(kLaunchpadVariants); ++ix)
+    {
+        const std::string id = std::to_string(ix);
+        if (kLaunchpadVariants[ix] == selected)
+        {
+            selectedOptionId = id;
+        }
+        options.push_back({id, LaunchpadControllerDisplayName(kLaunchpadVariants[ix])});
+    }
+    return options;
+}
+
 // The add row's Preset combo: every registry descriptor's display name
 // (option id = descriptor id), then one "Custom (<kind>)" entry per
 // MidiProfileKind in this fixed order, option id `custom.<kind token>` using
@@ -1237,6 +1275,7 @@ public:
     bool NeedsDeferredDispatch(const ui::Action& action) const
     {
         return action.name == Actions::kBack || action.name == Actions::kToggleConfig ||
+               action.name == Actions::kVariantSelect ||
                action.name == Actions::kToggleSection ||
                action.name == Actions::kDeleteRow || action.name == Actions::kAddSingle ||
                action.name == Actions::kAddBlock || action.name == Actions::kEndpointSelect ||
@@ -1414,6 +1453,12 @@ private:
         if (action.name == Actions::kEndpointSelect)
         {
             HandleEndpointSelect(action.value);
+            return;
+        }
+
+        if (action.name == Actions::kVariantSelect)
+        {
+            HandleVariantSelect(action.value);
             return;
         }
 
@@ -2048,6 +2093,41 @@ private:
             parts.push_back(part);
         }
         return parts;
+    }
+
+    // "<controllerIx>:<optionId>": the row's own index, then the option id the
+    // backend appends, which BuildLaunchpadVariantOptions writes as the index
+    // into kLaunchpadVariants.
+    void HandleVariantSelect(const std::string& value)
+    {
+        const auto parts = Split(value, ':');
+        if (parts.size() != 2)
+        {
+            return;
+        }
+        const std::size_t controllerIx = ParseIndex(parts[0]);
+        const std::size_t variantIx = ParseIndex(parts[1]);
+        if (variantIx >= std::size(ControllersLayout::kLaunchpadVariants))
+        {
+            return;
+        }
+        const LaunchpadController model = ControllersLayout::kLaunchpadVariants[variantIx];
+
+        MidiInstrumentConfig out;
+        std::string reason;
+        if (m_vm.SetLaunchpadModel(controllerIx, model, out, &reason))
+        {
+            Commit(std::move(out));
+            SetStatus(std::string("Set ") + LaunchpadControllerDisplayName(model));
+            return;
+        }
+        // A model the row is already on is not a refusal worth a status line:
+        // the combo simply reports the selection it already showed.
+        if (reason != "model is unchanged")
+        {
+            SetStatus("Refused: " + reason);
+        }
+        ++m_treeRevision;
     }
 
     void HandleEndpointSelect(const std::string& value)
@@ -3099,6 +3179,21 @@ private:
                             row.Label(NodeIds::ControllerKind(controllerIx),
                                      MidiProfileKindDisplayName(rowVm.kind),
                                      labelStyle(ControllersLayout::kControllerKindWidth));
+                            if (rowVm.kind == MidiProfileKind::Launchpad)
+                            {
+                                std::string selectedVariant;
+                                ui::ControlStyle variantStyle =
+                                    fieldControl(ControllersLayout::kVariantFieldWidth);
+                                variantStyle.caption = "Variant";
+                                row.ComboBox(
+                                    NodeIds::ControllerVariant(controllerIx),
+                                    ControllersLayout::BuildLaunchpadVariantOptions(
+                                        rowVm.launchpadModel, selectedVariant),
+                                    selectedVariant,
+                                    ui::Action::WithValue(Actions::kVariantSelect,
+                                                          std::to_string(controllerIx)),
+                                    variantStyle);
+                            }
                         });
 
                     section.Row(

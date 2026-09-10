@@ -1279,6 +1279,62 @@ TEST_CASE(SlotValidForKindAcceptsLaunchpadDefaultProfile) {
     REQUIRE_TRUE(synth::SlotValidForKind(slot, &reason));
 }
 
+TEST_CASE(LaunchpadProfileJsonCarriesItsModelAndDerivesAnOlderRecordsFromItsPads) {
+    // Round trip: the recorded model is what comes back.
+    {
+        synth::JsonArena arena(65536);
+        MidiControllerProfileConfig source = synth::LaunchpadDefaultProfileConfig(
+            {.controller = synth::LaunchpadController::LaunchpadMiniMk3});
+        MidiControllerProfileConfig parsed;
+        REQUIRE_TRUE(synth::FromJSON(synth::ToJSON(arena, source), parsed));
+        REQUIRE_TRUE(parsed.launchpadModel == synth::LaunchpadController::LaunchpadMiniMk3);
+    }
+
+    // A record stored before the model was recorded carries no field at all,
+    // which is a state ToJSON can no longer produce -- so the field is cut
+    // from the serialized text, the way such a record really reads. Its model
+    // is the one its pads already imply; without the derivation every stored
+    // Pro MK3 and Mini MK3 row would come back as an X and seed its next row
+    // wrong.
+    const auto withoutTheField = [](synth::JsonArena& arena,
+                                    const MidiControllerProfileConfig& source) {
+        synth::JsonArena writeArena(262144);
+        std::string text = synth::ToJSON(writeArena, source).Dumps(0);
+        const std::size_t at = text.find("\"launchpadModel\"");
+        REQUIRE_TRUE(at != std::string::npos);
+        const std::size_t end = text.find_first_of(",}", text.find(':', at));
+        REQUIRE_TRUE(end != std::string::npos);
+        // The field is written last, so cutting it forward would leave the
+        // comma before it dangling; the cut starts at that comma instead when
+        // the field is not first in its object.
+        const std::size_t from = (at > 0 && text[at - 1] == ',') ? at - 1 : at;
+        const std::size_t to = text[end] == ',' && from == at ? end + 1 : end;
+        text.erase(from, to - from);
+        return arena.Loads(text.c_str());
+    };
+
+    {
+        synth::JsonArena arena(262144);
+        MidiControllerProfileConfig source = synth::LaunchpadDefaultProfileConfig(
+            {.controller = synth::LaunchpadController::LaunchpadProMk3});
+        REQUIRE_TRUE(!source.systemMessages.empty());
+        MidiControllerProfileConfig parsed;
+        REQUIRE_TRUE(synth::FromJSON(withoutTheField(arena, source), parsed));
+        REQUIRE_TRUE(parsed.launchpadModel == synth::LaunchpadController::LaunchpadProMk3);
+    }
+
+    // The same record with no pads at all has nothing to imply a model, which
+    // is Launchpad X -- what such a row already behaved as.
+    {
+        synth::JsonArena arena(262144);
+        MidiControllerProfileConfig empty;
+        empty.launchpadModel = synth::LaunchpadController::LaunchpadMiniMk3;
+        MidiControllerProfileConfig parsed;
+        REQUIRE_TRUE(synth::FromJSON(withoutTheField(arena, empty), parsed));
+        REQUIRE_TRUE(parsed.launchpadModel == synth::LaunchpadController::LaunchpadX);
+    }
+}
+
 TEST_CASE(AddControllerRejectsDuplicateName) {
     MidiInstrumentConfig instrument;
     MidiControllerSlot first = MakeGenericSlot("dup");

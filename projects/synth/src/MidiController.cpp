@@ -2745,6 +2745,7 @@ JSON ToJSON(JsonArena& arena, const MidiControllerProfileConfig& value) {
         openSysEx.AppendNew(messageJson);
     }
     json.SetNew("openSysEx", openSysEx);
+    json.SetNew("launchpadModel", ToJSON(arena, value.launchpadModel));
     return json;
 }
 
@@ -2825,6 +2826,21 @@ bool FromJSON(JSON json, MidiControllerProfileConfig& value) {
             parsedOpenSysEx.push_back(std::move(message));
         }
         parsed.openSysEx = std::move(parsedOpenSysEx);
+    }
+    // Records written before the model was recorded carry no field. Their
+    // model is the one their pads already imply, so it is read off the first
+    // positioned association; a record with no positions at all means
+    // Launchpad X, which is what the default already says.
+    const JSON launchpadModel = json.Get("launchpadModel");
+    if (launchpadModel.IsNull()) {
+        for (const MidiControllerSystemMessageAssociation& association : parsed.systemMessages) {
+            if (association.launchpadPosition.has_value()) {
+                parsed.launchpadModel = association.launchpadPosition->controller;
+                break;
+            }
+        }
+    } else if (!FromJSON(launchpadModel, parsed.launchpadModel)) {
+        return false;
     }
     value = std::move(parsed);
     return true;
@@ -3322,6 +3338,7 @@ MidiControllerProfileResult CreateMfTwisterDefaultProfile(
 
 MidiControllerProfileConfig LaunchpadDefaultProfileConfig(LaunchpadDefaultProfileOptions options) {
     MidiControllerProfileConfig config;
+    config.launchpadModel = options.controller;
 
     auto addSystemPosition = [&](LaunchpadGridPosition position, MessageIn press,
                                  std::optional<MessageIn> release = std::nullopt,
@@ -3384,6 +3401,15 @@ const char* MidiProfileKindName(MidiProfileKind kind) {
         case MidiProfileKind::Generic: return "generic";
     }
     return "generic";
+}
+
+const char* LaunchpadControllerDisplayName(LaunchpadController controller) {
+    switch (controller) {
+        case LaunchpadController::LaunchpadX: return "Launchpad X";
+        case LaunchpadController::LaunchpadProMk3: return "Launchpad Pro MK3";
+        case LaunchpadController::LaunchpadMiniMk3: return "Launchpad Mini MK3";
+    }
+    return "Launchpad X";
 }
 
 const char* MidiProfileKindDisplayName(MidiProfileKind kind) {

@@ -359,6 +359,10 @@ struct MidiControllerRowVM {
     // identifier to stay unambiguous across duplicate same-name devices.
     MidiEndpointRef storedInput;
     MidiEndpointRef storedOutput;
+    // Launchpad rows only: the model the row's profile records, which its
+    // Variant selector shows. LaunchpadX on every other kind, where the
+    // selector is not offered.
+    LaunchpadController launchpadModel = LaunchpadController::LaunchpadX;
     bool configExpanded = false;    // starts false
     std::vector<MidiConfigSection> sections;  // kind-filtered via KindSupport, each starts collapsed
 };
@@ -552,6 +556,16 @@ public:
 
     bool SetEndpointRef(std::size_t controllerIx, bool output, MidiEndpointRef ref,
                         MidiInstrumentConfig& out) const;
+
+    // The Launchpad model a row addresses, and pointing it at another one.
+    // The model is recorded on the profile, so a row with no mappings still
+    // has an answer. Setting it rewrites every grid position the row already
+    // holds; a position the chosen model's grid has no room for refuses the
+    // whole change, naming that position, and leaves the row as it was.
+    // LaunchpadX for a row of any other kind, and setting it there is refused.
+    LaunchpadController LaunchpadModel(std::size_t controllerIx) const;
+    bool SetLaunchpadModel(std::size_t controllerIx, LaunchpadController model,
+                           MidiInstrumentConfig& out, std::string* reason = nullptr) const;
 
     // --- Presentation: add/delete ------------------------------------
     //

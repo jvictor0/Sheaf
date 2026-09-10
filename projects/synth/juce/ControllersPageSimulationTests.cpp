@@ -112,7 +112,7 @@ std::set<std::string> OutOfFlowIds(const synth::ui::NodeTree& tree)
 // that basis, not as a residual.
 //
 // The rest are the residual: controller-row endpoint selectors, the rename and
-// add fields, the variant selector, and the wizard's message/argument cells all
+// add fields, and the wizard's message/argument cells all
 // carry their only identifying string in a field neither backend renders
 // (`ComboBox::label` was retired; `TextField::label` was never
 // rendered), and their tables have no column headings. Each is a recorded

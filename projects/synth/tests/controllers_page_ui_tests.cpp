@@ -1916,6 +1916,62 @@ void TestSystemMessageShiftFieldRendersAndCommits()
 
 }  // namespace
 
+void TestLaunchpadRowOffersVariantAndRetargetsItsPads()
+{
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.SetContentBounds({0.0f, 0.0f, 1000.0f, 800.0f});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // MakeInstrument()'s three rows: 0 wrldbldr, 1 launchpad, 2 generic.
+    constexpr std::size_t launchpadIx = 1;
+    const synth::ui::NodeTree tree = surface.BuildTree();
+    const synth::ui::Node* variant =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerVariant(launchpadIx));
+    Require(variant != nullptr, "the launchpad row offers a Variant selector");
+    Require(variant->kind == synth::ui::NodeKind::ComboBox, "Variant is a combo box");
+    Require(variant->options.size() == 3, "Variant offers every Launchpad model");
+    Require(variant->options[0].label == std::string("Launchpad X"), "first option is Launchpad X");
+    Require(variant->options[2].label == std::string("Launchpad Mini MK3"),
+            "last option is the Mini MK3");
+    Require(variant->selectedOption == "0", "a default-profile row shows Launchpad X");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerVariant(0)) == nullptr &&
+                FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerVariant(2)) == nullptr,
+            "no other kind offers a Variant selector");
+
+    // The backend appends the chosen option's id to the action's value.
+    const int commitsBefore = harness.commits;
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kVariantSelect, "1:2"));
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    Require(harness.commits == commitsBefore + 1, "choosing a model commits once");
+    const synth::MidiControllerSlot& pads = harness.instrument.controllers[launchpadIx];
+    Require(pads.config.launchpadModel == synth::LaunchpadController::LaunchpadMiniMk3,
+            "the row records the chosen model");
+    std::size_t retargeted = 0;
+    for (const auto& association : pads.config.systemMessages)
+    {
+        if (association.launchpadPosition.has_value())
+        {
+            Require(association.launchpadPosition->controller ==
+                        synth::LaunchpadController::LaunchpadMiniMk3,
+                    "every pad follows the chosen model");
+            ++retargeted;
+        }
+    }
+    Require(retargeted > 0, "the default profile had pads to retarget");
+
+    const synth::ui::NodeTree after = surface.BuildTree();
+    const synth::ui::Node* afterVariant =
+        FindNodeById(after, synth::runtime_ui::NodeIds::ControllerVariant(launchpadIx));
+    Require(afterVariant != nullptr && afterVariant->selectedOption == "2",
+            "the selector shows what the row now records");
+}
+
 int main()
 {
     TestNoHandRolledControllerNodesSurvive();
@@ -1941,6 +1997,7 @@ int main()
     TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence();
     TestEncoderGroupHeaderSeparatesLastColumnFromAddButton();
     TestSystemMessageShiftFieldRendersAndCommits();
+    TestLaunchpadRowOffersVariantAndRetargetsItsPads();
 
     TestHarness harness;
     synth::runtime_ui::ControllersPageSurface surface = harness.MakeSurface();

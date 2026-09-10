@@ -995,6 +995,7 @@ TEST_CASE(AddBlockAfterVariantChangeSeedsNewVariant) {
     // Placed at (8,7) -- far from (-1,-1)/(0,-1), the first two cells Pro
     // MK3's row-major scan tries -- so the default 2-wide block lands
     // without colliding with this lone association.
+    slot.config.launchpadModel = synth::LaunchpadController::LaunchpadProMk3;
     MidiControllerSystemMessageAssociation lone;
     lone.launchpadPosition = synth::LaunchpadGridPosition{.controller = synth::LaunchpadController::LaunchpadProMk3, .x = 8, .y = 7};
     lone.press = synth::MessageIn::SceneSelect(0, 0);
@@ -1025,6 +1026,115 @@ TEST_CASE(AddBlockAfterVariantChangeSeedsNewVariant) {
         }
     }
     REQUIRE_TRUE(foundNewProMk3Position);
+}
+
+TEST_CASE(SetLaunchpadModelOnAnEmptyRowSticksAndSeedsWhatComesNext) {
+    // The case the derived model could never serve: a row with no mappings
+    // has no position to read a model off, so before the model was recorded
+    // the choice went nowhere and read back as Launchpad X.
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument;
+    MidiControllerSlot slot;
+    slot.name = "pads";
+    slot.kind = MidiProfileKind::Launchpad;
+    REQUIRE_TRUE(instrument.AddController(std::move(slot)));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+    REQUIRE_TRUE(vm.LaunchpadModel(0) == synth::LaunchpadController::LaunchpadX);
+
+    MidiInstrumentConfig out;
+    std::string reason;
+    REQUIRE_TRUE(vm.SetLaunchpadModel(0, synth::LaunchpadController::LaunchpadMiniMk3, out, &reason));
+    REQUIRE_TRUE(out.controllers[0].config.launchpadModel ==
+                 synth::LaunchpadController::LaunchpadMiniMk3);
+
+    vm.Rebuild(out, connection);
+    REQUIRE_TRUE(vm.LaunchpadModel(0) == synth::LaunchpadController::LaunchpadMiniMk3);
+    REQUIRE_TRUE(vm.Controllers()[0].launchpadModel == synth::LaunchpadController::LaunchpadMiniMk3);
+
+    MidiInstrumentConfig afterAdd;
+    REQUIRE_TRUE(vm.AddSingle(0, MidiConfigSection::SystemMessages,
+                              MidiMappingRowVM::RowGroup::System, afterAdd, &reason));
+    bool sawMini = false;
+    for (const auto& association : afterAdd.controllers[0].config.systemMessages) {
+        if (association.launchpadPosition.has_value()) {
+            REQUIRE_TRUE(association.launchpadPosition->controller ==
+                         synth::LaunchpadController::LaunchpadMiniMk3);
+            sawMini = true;
+        }
+    }
+    REQUIRE_TRUE(sawMini);
+}
+
+TEST_CASE(SetLaunchpadModelRewritesEveryPositionOrRefusesTheWholeChange) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument;
+    MidiControllerSlot slot;
+    slot.name = "pads";
+    slot.kind = MidiProfileKind::Launchpad;
+    slot.config = synth::LaunchpadDefaultProfileConfig(
+        {.controller = synth::LaunchpadController::LaunchpadProMk3});
+    // The Pro MK3 alone has a column at x = -1; Launchpad X and the Mini MK3
+    // start at 0, so this position is what the refusal is about.
+    MidiControllerSystemMessageAssociation proOnly;
+    proOnly.launchpadPosition = synth::LaunchpadGridPosition{
+        .controller = synth::LaunchpadController::LaunchpadProMk3, .x = -1, .y = 3};
+    proOnly.press = synth::MessageIn::SceneSelect(0, 0);
+    proOnly.feedback = proOnly.press;
+    slot.config.systemMessages.push_back(proOnly);
+    REQUIRE_TRUE(instrument.AddController(std::move(slot)));
+    MidiConnectionState connection = MakeSingleControllerConnection();
+    vm.Rebuild(instrument, connection);
+
+    MidiInstrumentConfig out;
+    std::string reason;
+    REQUIRE_TRUE(!vm.SetLaunchpadModel(0, synth::LaunchpadController::LaunchpadX, out, &reason));
+    REQUIRE_TRUE(reason.find("(-1,3)") != std::string::npos);
+    REQUIRE_TRUE(reason.find("Launchpad X") != std::string::npos);
+    REQUIRE_TRUE(vm.LaunchpadModel(0) == synth::LaunchpadController::LaunchpadProMk3);
+
+    // Positive control for the refusal: the same row, minus the one position
+    // no other model has room for, is rewritten whole.
+    MidiInstrumentConfig narrowed = instrument;
+    auto& messages = narrowed.controllers[0].config.systemMessages;
+    messages.erase(std::remove_if(messages.begin(), messages.end(),
+                                  [](const MidiControllerSystemMessageAssociation& association) {
+                                      return association.launchpadPosition.has_value() &&
+                                             !LaunchpadShapeSupports(
+                                                 synth::LaunchpadController::LaunchpadX,
+                                                 association.launchpadPosition->x,
+                                                 association.launchpadPosition->y);
+                                  }),
+                   messages.end());
+    REQUIRE_TRUE(!messages.empty());
+    vm.Rebuild(narrowed, connection);
+    REQUIRE_TRUE(vm.SetLaunchpadModel(0, synth::LaunchpadController::LaunchpadX, out, &reason));
+    REQUIRE_TRUE(out.controllers[0].config.launchpadModel == synth::LaunchpadController::LaunchpadX);
+    std::size_t rewritten = 0;
+    for (const auto& association : out.controllers[0].config.systemMessages) {
+        if (association.launchpadPosition.has_value()) {
+            REQUIRE_TRUE(association.launchpadPosition->controller ==
+                         synth::LaunchpadController::LaunchpadX);
+            ++rewritten;
+        }
+    }
+    REQUIRE_TRUE(rewritten == messages.size());
+}
+
+TEST_CASE(SetLaunchpadModelIsRefusedOnEveryOtherKind) {
+    MidiConfigViewModel vm;
+    MidiInstrumentConfig instrument = MakeFourKindInstrument();
+    vm.Rebuild(instrument, MakeFourKindConnection());
+    for (std::size_t ix = 0; ix < instrument.controllers.size(); ++ix) {
+        if (instrument.controllers[ix].kind == MidiProfileKind::Launchpad) {
+            continue;
+        }
+        MidiInstrumentConfig out;
+        std::string reason;
+        REQUIRE_TRUE(!vm.SetLaunchpadModel(ix, synth::LaunchpadController::LaunchpadMiniMk3, out, &reason));
+        REQUIRE_TRUE(reason == "only a Launchpad controller has a model");
+        REQUIRE_TRUE(vm.LaunchpadModel(ix) == synth::LaunchpadController::LaunchpadX);
+    }
 }
 
 TEST_CASE(AddControllerGenericSeedsEmptyConfig) {

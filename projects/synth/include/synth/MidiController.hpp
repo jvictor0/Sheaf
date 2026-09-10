@@ -944,6 +944,14 @@ struct MidiControllerProfileConfig {
     // system message; a device that needs a mode message on connect uses
     // this field regardless of what else the profile maps.
     std::vector<std::vector<std::uint8_t>> openSysEx;
+
+    // Launchpad profiles only: which model this profile addresses. Every
+    // association carries its own model too -- that is what the runtime
+    // routes on -- but a profile with no associations has none to be read
+    // off, which is why the choice is recorded here rather than derived.
+    // New rows, blocks and grid cells are stamped from this, so the two
+    // agree by construction. Ignored by every other kind.
+    LaunchpadController launchpadModel = LaunchpadController::LaunchpadX;
 };
 
 struct MidiControllerProfileResult {
@@ -960,6 +968,10 @@ enum class MidiProfileKind { WrldBldr, MfTwister, Launchpad, Generic };
 
 const char* MidiProfileKindName(MidiProfileKind kind);
 const char* MidiProfileKindDisplayName(MidiProfileKind kind);
+// What an operator reads for a Launchpad model: the product name, as
+// Novation prints it. Used by the Controllers page's Variant selector and by
+// the refusal it renders when a model has no room for a pad the row holds.
+const char* LaunchpadControllerDisplayName(LaunchpadController controller);
 bool MidiProfileKindFromName(std::string_view name, MidiProfileKind& out);
 
 struct MidiKindSupport {
