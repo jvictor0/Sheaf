@@ -133,7 +133,7 @@ test("assembles a deterministic complete multi-app catalog from the exact matchi
       abiVersion: app.browser.abiVersion,
       uiProtocolVersion: app.browser.uiProtocolVersion,
       runtimeConfigVersion: app.browser.runtimeConfigVersion,
-    }, { abiVersion: 4, uiProtocolVersion: 2, runtimeConfigVersion: 1 });
+    }, { abiVersion: 6, uiProtocolVersion: 2, runtimeConfigVersion: 1 });
     for (const file of app.browser.files) {
       const emittedRelativePath = file.path.slice(`packages/${app.appId}/${app.buildId}/`.length);
       const sourceBytes = Buffer.from(emittedFiles[`apps/${app.appId}/${emittedRelativePath}`]);

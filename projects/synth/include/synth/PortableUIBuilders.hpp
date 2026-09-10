@@ -17,6 +17,11 @@
 
 namespace synth::ui {
 
+enum class CaptionPlacement {
+    Before,
+    After
+};
+
 struct ControlStyle {
     std::optional<Color> color{};
     std::optional<TextStyle> textStyle{};
@@ -29,7 +34,12 @@ struct ControlStyle {
     std::optional<Action> pointerDragAction{};
     std::optional<Action> doubleClickAction{};
     std::string caption;                       // emitted as a sibling Label node
+    CaptionPlacement captionPlacement = CaptionPlacement::Before;
     LayoutOptions layout{};
+    // The CONTROL node's own width inside the caption row FinishControl
+    // synthesizes -- distinct from `layout`, which is spent entirely on the
+    // `.row` wrapper. Default fills the column, preserving prior behaviour.
+    Extent controlWidth = Extent::Weight(1.0f);
 };
 
 // A subtree plus the layout declarations that belong to it. This is the unit of
@@ -126,7 +136,7 @@ public:
     // survives. A ROOTLESS subtree attaches its FOREST ROOTS — the nodes not
     // named in any sibling's `children` — to the open scope; that is the shape
     // Tasks 12 and 13 produce. Grafting without attaching leaves the nodes
-    // parentless, and PortableJuceBackend.hpp:664-676 throws when more than one
+    // parentless, and PortableJuceBackend.hpp:696-699 throws when more than one
     // node has no parent.
     Builder& Splice(Subtree subtree) {
         assert(!scopeStack_.empty() && "Builder::Root must be called before splicing");
@@ -422,9 +432,13 @@ private:
     }
 
     // Caption id convention (Task 11 Audio page + Task 14 Playwright):
-    // A non-empty ControlStyle::caption emits Label "<controlId>.caption" before
-    // the control, wrapping both in an implicit Row "<controlId>.row" so the
-    // form grid sees a label cell and a control cell.
+    // A non-empty ControlStyle::caption emits Label "<controlId>.caption"
+    // before the control (or after it, when ControlStyle::captionPlacement is
+    // After), wrapping both in an implicit Row "<controlId>.row" so the form
+    // grid sees a label cell and a control cell. Both placements route through
+    // the same Label(...) call below -- only its position relative to
+    // AppendChild(node) changes, so caption id derivation and text sync never
+    // fork between placements.
     Builder& FinishControl(Node node, ControlStyle style) {
         ApplyStyle(node, style);
         if (style.caption.empty()) {
@@ -453,13 +467,18 @@ private:
         rowLayout.gap = kSpacing.labelGap;
         layoutByNodeId_[controlId + ".row"] = rowLayout;
         LayoutOptions controlLayout;
-        controlLayout.main = Extent::Weight(1.0f);
+        controlLayout.main = style.controlWidth;
         layoutByNodeId_[controlId] = controlLayout;
         scopeStack_.push_back(tree_.nodes.size() - 1);
         ControlStyle captionStyle;
         captionStyle.textStyle = style.textStyle;
-        Label(controlId + ".caption", style.caption, std::move(captionStyle));
-        AppendChild(std::move(node));
+        if (style.captionPlacement == CaptionPlacement::After) {
+            AppendChild(std::move(node));
+            Label(controlId + ".caption", style.caption, std::move(captionStyle));
+        } else {
+            Label(controlId + ".caption", style.caption, std::move(captionStyle));
+            AppendChild(std::move(node));
+        }
         scopeStack_.pop_back();
         return *this;
     }

@@ -150,7 +150,8 @@ template<std::size_t VoiceCount>
 void BuildGangedRandomLfoCommands(
     const GangedRandomLfoSnapshot<VoiceCount>& snapshot,
     Bounds bounds,
-    std::vector<DrawCommand>& commandBuffer)
+    std::vector<DrawCommand>& commandBuffer,
+    bool drawBackground = true)
 {
     namespace detail = ganged_random_lfo_detail;
 
@@ -159,7 +160,10 @@ void BuildGangedRandomLfoCommands(
         return;
     }
     const Bounds nodeExtent{0.0f, 0.0f, bounds.width, bounds.height};
-    detail::AppendBackgroundAndAxis(nodeExtent, commandBuffer);
+    if (drawBackground)
+    {
+        detail::AppendBackgroundAndAxis(nodeExtent, commandBuffer);
+    }
     if (nodeExtent.width <= 0.0f || nodeExtent.height <= 0.0f ||
         !std::isfinite(snapshot.sampleRate) || snapshot.sampleRate <= 0.0 ||
         !std::isfinite(snapshot.roundElapsedSamples) || snapshot.roundElapsedSamples < 0.0)
@@ -253,8 +257,8 @@ void BuildGangedRandomLfoCommands(
 template<std::size_t VoiceCount>
 class GangedRandomLfoVisualizer final : public Visualizer {
 public:
-    explicit GangedRandomLfoVisualizer(const GangedRandomLfoUiState<VoiceCount>& uiState)
-        : m_uiState(uiState)
+    explicit GangedRandomLfoVisualizer(const GangedRandomLfoUiState<VoiceCount>& uiState, bool drawBackground = true)
+        : m_uiState(uiState), m_drawBackground(drawBackground)
     {}
 
 protected:
@@ -268,12 +272,13 @@ protected:
         std::vector<DrawCommand> commands;
         commands.reserve(GangedRandomLfoGeometry::MaximumCommandCount<VoiceCount>());
         const Bounds bounds = GetBounds();
-        BuildGangedRandomLfoCommands(snapshot, bounds, commands);
+        BuildGangedRandomLfoCommands(snapshot, bounds, commands, m_drawBackground);
         return commands;
     }
 
 private:
     const GangedRandomLfoUiState<VoiceCount>& m_uiState;
+    bool m_drawBackground;
 };
 
 } // namespace synth::ui
