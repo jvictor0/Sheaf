@@ -17,6 +17,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -134,6 +135,60 @@ public:
 
 private:
     ActionHandler handler_;
+};
+
+// Browser-backend parity for the extent-aware hook. The
+// browser Runtime shares synth::runtime_ui::RuntimeMainComponent verbatim
+// (it constructs RuntimeMainComponent<App, BrowserRuntimeMainServices<App>>),
+// so exercising the same class directly under this (non-JUCE) browser
+// translation unit proves the identical resolved-width rule applies here too.
+class ExtentAwareContractSurface final : public synth::ui::Surface,
+                                         public synth::ui::ExtentAwareSurface
+{
+public:
+    synth::ui::NodeTree BuildTree() override
+    {
+        synth::ui::Node root;
+        root.id = "extent.contract.app.root";
+        root.kind = synth::ui::NodeKind::Root;
+        root.bounds = extent_;
+        return synth::ui::NodeTree{{std::move(root)}};
+    }
+
+    void SetActionHandler(ActionHandler handler) override
+    {
+        handler_ = std::move(handler);
+    }
+
+    void DispatchAction(const synth::ui::Action&) override {}
+
+    void SetContentExtent(synth::ui::Bounds extent) override
+    {
+        extent_ = extent;
+    }
+
+private:
+    synth::ui::Bounds extent_{0.0f, 0.0f, 640.0f, 480.0f};
+    ActionHandler handler_;
+};
+
+class ExtentAwareContractApp
+{
+public:
+    static synth::RuntimeConfig Config()
+    {
+        synth::RuntimeConfig config;
+        config.appName = "ExtentAwareContractApp";
+        config.uiWidth = 640;
+        config.uiHeight = 480;
+        return config;
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+    synth::ui::Surface& PortableSurface() { return surface; }
+
+    ExtentAwareContractSurface surface;
 };
 
 class ValidApp
@@ -463,13 +518,79 @@ void TestBrowserRuntimeUsesSharedFrameAndActionRouting()
     Require(surface.lastValue == "17", "application receives action value");
 }
 
+void TestBrowserRuntimeMainComponentSidebarTracksResolvedAppWidth()
+{
+    synth::Engine<ExtentAwareContractApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    synth_browser::BrowserMidiBridge<synth::Engine<ExtentAwareContractApp>> bridge(engine);
+    bridge.Start();
+    std::vector<synth_browser::BrowserAudioDevice> audioDevices;
+    synth_browser::BrowserRuntimeMainServices<ExtentAwareContractApp> services(engine, bridge, audioDevices);
+    synth::runtime_ui::RuntimeMainComponent<ExtentAwareContractApp,
+                                            synth_browser::BrowserRuntimeMainServices<ExtentAwareContractApp>>
+        mainComponent(engine.Application(), services);
+
+    // Default (never offered anything beyond compiled-in size): the browser
+    // composition path places the sidebar at the resolved app width, same
+    // as the pinned-width legacy rule (640 == config.uiWidth). The tree is
+    // captured in a named local (not passed as a temporary) because
+    // FindPortableNode returns a pointer into it that must outlive this
+    // Require pair.
+    const synth::ui::NodeTree initial = mainComponent.BuildTree();
+    const synth::ui::Node* sidebarDefault = FindPortableNode(initial, "runtime.sidebar.root");
+    Require(sidebarDefault != nullptr, "sidebar renders through the browser composition path");
+    Require(NearlyEqual(sidebarDefault->bounds.x, 640.0f),
+            "browser composition places the sidebar at the resolved app width");
+
+    // The browser host offers a new live extent through the same
+    // RuntimeMainComponent::SetContentExtent hook the JUCE renderer would
+    // use; the resolved app width and sidebar placement track it identically
+    // (backend parity -- same class, same composition arithmetic).
+    mainComponent.SetContentExtent({0.0f, 0.0f, 800.0f, 480.0f});
+    const synth::ui::NodeTree resized = mainComponent.BuildTree();
+    const synth::ui::Node* appRoot = FindPortableNode(resized, "extent.contract.app.root");
+    const synth::ui::Node* sidebarResized = FindPortableNode(resized, "runtime.sidebar.root");
+    Require(appRoot != nullptr, "app root renders after the browser offers a new extent");
+    Require(NearlyEqual(appRoot->bounds.width, 800.0f), "app resolves against the offered extent");
+    Require(sidebarResized != nullptr, "sidebar renders after the browser offers a new extent");
+    Require(NearlyEqual(sidebarResized->bounds.x, 800.0f),
+            "browser composition tracks the resized extent identically to JUCE");
+
+    // A vertical resize too -- the composite root
+    // (runtime.main.root) height must track the resolved app height rather
+    // than staying pinned to config.uiHeight (480). The composite root's
+    // height used to stay hardcoded to config.uiHeight even on this
+    // extent-aware branch, so this resize would validate (the validator only
+    // checks the app root) and then throw inside RequireCompositionHolds,
+    // because the taller app root no longer fit inside a 480-tall composite
+    // root.
+    mainComponent.SetContentExtent({0.0f, 0.0f, 800.0f, 600.0f});
+    const synth::ui::NodeTree resizedTaller = mainComponent.BuildTree();
+    const synth::ui::Node* appRootTaller = FindPortableNode(resizedTaller, "extent.contract.app.root");
+    const synth::ui::Node* sidebarTaller = FindPortableNode(resizedTaller, "runtime.sidebar.root");
+    const synth::ui::Node* compositeRootTaller = FindPortableNode(resizedTaller, "runtime.main.root");
+    Require(appRootTaller != nullptr, "app root renders after the browser offers a taller extent");
+    Require(NearlyEqual(appRootTaller->bounds.height, 600.0f),
+            "app resolves against the taller offered extent");
+    Require(sidebarTaller != nullptr, "sidebar renders after the browser offers a taller extent");
+    Require(NearlyEqual(sidebarTaller->bounds.x, 800.0f),
+            "sidebar x still tracks the resolved width, unaffected by the height-only change");
+    Require(compositeRootTaller != nullptr,
+            "composite root renders after the browser offers a taller extent");
+    Require(NearlyEqual(compositeRootTaller->bounds.height, 600.0f),
+            "composite root height tracks the resolved app height (600), not config.uiHeight "
+            "(480) -- BuildTree() completing without throwing also proves the validator accepted "
+            "the taller app root and RequireCompositionHolds held for both children");
+}
+
 void TestBrowserControllerDiscoveryCacheUsesSignalsAndSuccessfulCommits()
 {
     synth::Engine<ValidApp> engine([] { return std::uint64_t{0}; });
     engine.Initialize();
     synth_browser::BrowserMidiBridge<synth::Engine<ValidApp>> bridge(engine);
     bridge.Start();
-    synth_browser::BrowserRuntimeMainServices<ValidApp> services(engine, bridge);
+    std::vector<synth_browser::BrowserAudioDevice> audioDevices;
+    synth_browser::BrowserRuntimeMainServices<ValidApp> services(engine, bridge, audioDevices);
     synth::runtime_ui::RuntimeMainComponent<ValidApp,
                                             synth_browser::BrowserRuntimeMainServices<ValidApp>>
         mainComponent(engine.Application(), services);
@@ -577,8 +698,8 @@ void TestWizardSubmitRefusesACandidateRemovedSinceTheLastFrame()
             "the unique candidate opens its wizard form");
 
     // The controller is unplugged and Submit is activated before the host
-    // builds another frame. D5 requires Submit to recheck that the candidate is
-    // still present, so the cached classification has to follow the device-list
+    // builds another frame. Submit must recheck that the candidate is
+    // still present, so the cached classification follows the device-list
     // change itself rather than the next frame build.
     fixture.runtime.SubmitMidiEndpoints({});
     fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
@@ -846,6 +967,12 @@ void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
                 label);
     };
 
+    Require(FindNode(fixture.Frame(), synth::runtime_ui::NodeIds::ControllerRenameDraft(2).c_str()) == nullptr,
+            "browser Rename draft field is absent while controller 2 is collapsed");
+    Require(FindNode(fixture.Frame(), synth::runtime_ui::NodeIds::ControllerRename(2).c_str()) == nullptr,
+            "browser Rename button is absent while controller 2 is collapsed");
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kToggleConfig, "2");
+
     dispatchNode(synth::runtime_ui::NodeIds::ControllerRenameDraft(2), ":Browser Twister");
     const synth_browser::DecodedCommandBuffer renamedDraftFrame = fixture.Frame();
     if (FindNode(renamedDraftFrame, synth::runtime_ui::NodeIds::ControllerRenameDraft(2).c_str())->text !=
@@ -862,30 +989,6 @@ void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
     Require(fixture.runtime.ConsumePersistenceDirty(),
             "browser Rename immediately reports a real runtime-configuration save");
     requirePersisted(3, "browser Rename persists the renamed controller record");
-
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerReconfigure(2));
-    fixture.runtime.DispatchAction("controller-wizard.twister.encoder-slot", "7");
-    fixture.runtime.Engine().EditInstrument([](synth::MidiInstrumentConfig& instrument) {
-        instrument.controllers[2].output.identifier = "stale-output";
-    });
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
-    Require(!fixture.runtime.ConsumePersistenceDirty(),
-            "refused browser reconfigure does not report a runtime-configuration save");
-    synth::MidiInstrumentConfig refusedPersisted;
-    synth::AudioDeviceState refusedAudio;
-    synth::SyncConfig refusedSync;
-    Require(synth::LoadRuntimeConfigFile(
-                fixture.Paths().configFile, refusedPersisted, refusedAudio, refusedSync) ==
-                synth::RuntimeConfigFileStatus::Ok &&
-                refusedPersisted.controllers[2].output.identifier == "twister-out",
-            "refused browser reconfigure leaves the previously persisted configuration authoritative");
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardCancel, "");
-
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerReconfigure(2));
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "browser Reconfigure immediately reports a real runtime-configuration save");
-    requirePersisted(3, "browser Reconfigure persists the replacement profile");
 
     dispatchNode(synth::runtime_ui::NodeIds::ControllerBlacklist(2));
     Require(fixture.runtime.ConsumePersistenceDirty(),
@@ -1044,8 +1147,8 @@ void TestAudioWorkletDeadlineMeterAveragesQuantizedTimerSamples()
 
 void TestBrowserContractVersionsAreReadableBeforeRuntimeCreation()
 {
-    Require(synth_browser_abi_version() == 4,
-            "browser ABI v4 version is available before runtime creation");
+    Require(synth_browser_abi_version() == 6,
+            "browser ABI v6 version is available before runtime creation");
     Require(synth_browser_ui_protocol_version() == 2,
             "browser UI protocol version is available before runtime creation");
     Require(synth_browser_ui_protocol_version() == synth_browser::kCommandBufferVersion,
@@ -1140,9 +1243,12 @@ public:
         observedClears.push_back(statusCode);
         return 0;
     }
-    int ConsumeAudioInputRetry() override
+    int ConsumePendingAudioRequest(std::uint32_t* outControl) override
     {
         ++retryConsumeCount;
+        if (outControl != nullptr) {
+            *outControl = static_cast<std::uint32_t>(synth_browser::BrowserAudioDeviceKind::Input);
+        }
         return 1;
     }
     int SetTimestampEpochOffsetMicros(std::int64_t) override { return 0; }
@@ -1151,6 +1257,7 @@ public:
     int DispatchAction(const char*, const char*) override { return 0; }
     bool ConsumePersistenceDirty() override { return false; }
     int SubmitMidiEndpoints(const synth_browser::MidiEndpointDescriptor*, std::uint32_t) override { return 0; }
+    int SubmitAudioDevices(const synth_browser::AudioDeviceDescriptor*, std::uint32_t) override { return 0; }
     int DequeueMidiAction(synth_browser::MidiActionDescriptor*) override { return 0; }
     int DeliverMidi(std::uint32_t, const std::uint8_t*, std::uint32_t, std::uint64_t) override { return 0; }
     const std::uint8_t* DequeueMidiOutput(synth_browser::MidiOutputDescriptor*) override { return nullptr; }
@@ -1605,6 +1712,57 @@ void TestBrowserRuntimeSuccessfulDeferredAttachStaysConnectedUntilClear()
             "clearing disconnects the successful deferred source exactly once");
 }
 
+// External-input-routed signal (sar-33): the browser derivation. No granted
+// capture is not routed (including a fresh, just-started runtime); a granted
+// source (SetAudioInputSource, the grant point BrowserRuntimeAbi.cpp's
+// synth_browser_set_audio_input_source calls through to,
+// BrowserRuntime.hpp's SetAudioInputSource) routes it with a callback;
+// clearing that source (the revoke point, ClearAudioInputSource) un-routes it
+// with another callback. Identical semantic to the JUCE side
+// (RuntimeShellSessionTests.cpp's CheckInputRoutedSignal): "a user-chosen
+// input source is open and delivering." The browser host has no ThreadId
+// tagging to assert against (unlike the JUCE side), so this instead pins the
+// weaker but still load-bearing contract directly: the callback runs
+// synchronously on the calling thread (this test's thread, standing in for
+// the browser message/main thread that SetAudioInputSource/
+// ClearAudioInputSource are always invoked from), by comparing
+// std::this_thread::get_id() captured at test start against the id observed
+// inside the callback.
+void TestBrowserRuntimeInputRoutedSignalTracksCaptureGrantAndRevoke()
+{
+    using synth_browser::BrowserAudioInputStatus;
+    const auto online = static_cast<std::uint32_t>(BrowserAudioInputStatus::Online);
+    const auto streamEnded = static_cast<std::uint32_t>(BrowserAudioInputStatus::StreamEnded);
+    const std::thread::id callingThreadId = std::this_thread::get_id();
+
+    synth_browser::Runtime<InputCountApp<4>> runtime;
+    runtime.Start();
+
+    synth::AppContext& context = runtime.Engine().Context();
+    Require(!context.InputRouted(), "a freshly started runtime with no granted capture is not routed");
+
+    std::vector<bool> notifications;
+    std::vector<std::thread::id> notificationThreadIds;
+    context.SetInputRoutedChangedCallback([&](bool routed) {
+        notifications.push_back(routed);
+        notificationThreadIds.push_back(std::this_thread::get_id());
+    });
+
+    Require(runtime.SetAudioInputSource(91, 4, online), "a granted capture source publishes");
+    Require(context.InputRouted(), "a granted capture routes the signal");
+    Require(notifications.size() == 1 && notifications[0] == true,
+            "the change callback fires exactly once on the granting edge");
+    Require(notificationThreadIds[0] == callingThreadId,
+            "the granting-edge callback runs synchronously on the calling thread");
+
+    Require(runtime.ClearAudioInputSource(streamEnded), "revoking the granted capture clears it");
+    Require(!context.InputRouted(), "revoking capture un-routes the signal");
+    Require(notifications.size() == 2 && notifications[1] == false,
+            "the change callback fires exactly once on the revoking edge");
+    Require(notificationThreadIds[1] == callingThreadId,
+            "the revoking-edge callback runs synchronously on the calling thread");
+}
+
 // The rule the runtime path depends on, asserted directly: a source that was
 // only ever pending is never handed to `disconnect`.
 void TestBrowserAudioInputPublicationNeverDisconnectsANeverAttachedSource()
@@ -1714,9 +1872,11 @@ void TestBrowserAbiCarriesAudioInputSourceLifecycle()
                 runtime,
                 static_cast<std::uint32_t>(synth_browser::BrowserAudioInputStatus::StreamEnded)) == 0,
             "browser ABI forwards input source clear status");
-    Require(synth_browser_consume_audio_input_retry(runtime) == 1 &&
-                capture.retryConsumeCount == 1,
-            "browser ABI forwards audio input retry consumption");
+    std::uint32_t consumedControl = 7;  // poisoned: only a real write proves the ABI touched it
+    Require(synth_browser_consume_pending_audio_request(runtime, &consumedControl) == 1 &&
+                capture.retryConsumeCount == 1 &&
+                consumedControl == static_cast<std::uint32_t>(synth_browser::BrowserAudioDeviceKind::Input),
+            "browser ABI forwards pending audio request consumption and its control");
     Require(capture.observedSources.size() == 1 &&
                 capture.observedSources[0].handle == 91 &&
                 capture.observedSources[0].physicalChannels == 4 &&
@@ -2042,6 +2202,7 @@ int main()
     static_assert(synth::SynthApplication<ValidApp>);
     static_assert(synth::SynthApplication<InputCountApp<4>>);
     static_assert(synth::SynthApplication<BrowserCallbackProbeApp>);
+    static_assert(synth::SynthApplication<ExtentAwareContractApp>);
     static_assert(synth_browser::BrowserApplication<ValidApp>);
     static_assert(!synth_browser::BrowserApplication<MissingSurface>);
     static_assert(!synth::SynthApplication<MissingSurface>);
@@ -2054,6 +2215,7 @@ int main()
     TestBrowserAudioInputPublicationBlocksNewConnectionsUntilTheOldSourceIsGone();
     TestBrowserAudioInputPublicationRollsBackAFailedConnectWithoutBlocking();
     TestBrowserAudioInputPublicationNeverDisconnectsANeverAttachedSource();
+    TestBrowserRuntimeInputRoutedSignalTracksCaptureGrantAndRevoke();
     TestBrowserRuntimeDefersPreWorkletInputConnectionAndRecoversFromItsFailure();
     TestBrowserRuntimeDeferredAttachFailureKeepsOutputUiAndMidiLive();
     TestBrowserRuntimeSuccessfulDeferredAttachStaysConnectedUntilClear();
@@ -2068,6 +2230,7 @@ int main()
     TestBrowserRuntimeAdapterRejectsIncompatibleRuntimeConfigVersion();
     TestBrowserPersistenceIdentityDerivesSharedAndIsolatedRoots();
     TestBrowserRuntimeUsesSharedFrameAndActionRouting();
+    TestBrowserRuntimeMainComponentSidebarTracksResolvedAppWidth();
     TestBrowserPrepareFeedsNegotiatedAudioPageAndRejectsOversizedBlocks();
     TestNativeBuildRejectsBrowserAudioWorkletStart();
     TestSharedBrowserNavigationReplacesAndRestoresEveryRuntimePage();

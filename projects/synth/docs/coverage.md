@@ -275,8 +275,7 @@ There is no per-descendant offset loop and no auto-flow anywhere in the path.
   geometry and portable encoder arc commands.
 - [`miniapp-smoke.spec.ts`](../browser/tests/miniapp-smoke.spec.ts):
   `real miniapp shared shell scales as one non-overlapping narrow surface`
-  verifies all seven encoder canvases retain nontrivial pixels, and the desktop
-  and narrow smoke tests write the reviewed runtime-shell screenshots.
+  verifies all seven encoder canvases retain nontrivial pixels.
 
 ### `sprs-6` (modified) - One Resolved Browser Coordinate System
 
@@ -393,9 +392,6 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
   action/commit simulation while rendering the real `ControllersPageSurface`
   through `synth_juce::PortableComponent` and comparing containment in common
   surface coordinates.
-- [`ControllersHarnessApp.cpp`](../juce/ControllersHarnessApp.cpp): the
-  standalone visual harness uses `synth_juce::PortableComponent` over the same
-  production `ControllersPageSurface` path.
 
 ### `sru-1` (modified) - Main Pane, Sidebar, And Content Host
 

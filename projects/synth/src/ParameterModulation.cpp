@@ -2665,6 +2665,17 @@ void Bank::HandleSetAbsolute(PhysicalEncoderId encoderId, const SceneState& scen
     cell->parameter->HandleSetAbsolute(scene, normalizedTarget);
 }
 
+// Same shape as HandleSetAbsolute above, but resolves against topLevel_
+// instead of visible_, so the write reaches the real parameter even when
+// this bank's visible_ has been swapped out for a modulation-depth view.
+void Bank::HandleSetAbsoluteOnTopLevel(PhysicalEncoderId encoderId, const SceneState& scene, float normalizedTarget) {
+    Cell* cell = FindTopLevelCell(encoderId);
+    if (cell == nullptr || cell->parameter == nullptr) {
+        return;
+    }
+    cell->parameter->HandleSetAbsolute(scene, normalizedTarget);
+}
+
 void Bank::ApplyModifierToTopLevel(Modifier modifier, const SceneState& scene) {
     std::vector<Parameter*> visited;
     visited.reserve(topLevel_.size());
@@ -2766,6 +2777,15 @@ Bank::Cell* Bank::FindVisibleCell(PhysicalEncoderId encoderId) {
 
 const Bank::Cell* Bank::FindVisibleCell(PhysicalEncoderId encoderId) const {
     for (const Cell& cell : visible_) {
+        if (cell.encoderId == encoderId) {
+            return &cell;
+        }
+    }
+    return nullptr;
+}
+
+Bank::Cell* Bank::FindTopLevelCell(PhysicalEncoderId encoderId) {
+    for (Cell& cell : topLevel_) {
         if (cell.encoderId == encoderId) {
             return &cell;
         }
@@ -3013,6 +3033,22 @@ ParameterMessageOut ParameterMessageOut::ParameterStorageBatchNeeded(ParameterGr
     message.group = &group;
     message.minimumAdditionalParameters = minimumAdditionalParameters;
     message.requestedParameters = requestedParameters;
+    return message;
+}
+
+ParameterMessageOut ParameterMessageOut::AppAction(std::size_t appActionIx, float value) {
+    ParameterMessageOut message;
+    message.type = Type::AppAction;
+    message.appActionIx = appActionIx;
+    message.value = value;
+    return message;
+}
+
+ParameterMessageOut ParameterMessageOut::AppEncoderPress(std::size_t slotIx, std::size_t position) {
+    ParameterMessageOut message;
+    message.type = Type::AppEncoderPress;
+    message.slotIx = slotIx;
+    message.position = position;
     return message;
 }
 
@@ -3487,6 +3523,27 @@ void ParameterManager::HandleSetAbsolute(std::size_t slotIx, std::size_t positio
     }
 }
 
+// Writes to bankIx directly instead of through slotIx's own bank selection:
+// no modifier gate (this write did not come from an operator's encoder, so
+// a held modifier must not silently swallow it, unlike HandleSetAbsolute
+// above), and no call into BankSlot::SelectBank/Owns/selectedBank_, so the
+// slot's current selection is left exactly as it was. slotIx is consulted
+// only for its encoder layout (to resolve position) and its epoch
+// bookkeeping, recorded the same way the slot-addressed path records it.
+void ParameterManager::HandleSetAbsoluteOnBank(std::size_t bankIx, std::size_t slotIx, std::size_t position,
+                                               float normalizedTarget, std::uint64_t absoluteEpoch) {
+    BankSlot* slot = BankSlotAt(slotIx);
+    Bank* bank = BankAt(bankIx);
+    if (slot == nullptr || bank == nullptr) {
+        return;
+    }
+    PhysicalEncoderId encoderId = 0;
+    if (slot->ResolvePosition(position, encoderId)) {
+        bank->HandleSetAbsoluteOnTopLevel(encoderId, scene_, normalizedTarget);
+        slot->RecordProcessedAbsoluteEpoch(position, absoluteEpoch);
+    }
+}
+
 bool ParameterManager::SelectBankForSlot(std::size_t slotIx, std::size_t bankIx) {
     BankSlot* slot = BankSlotAt(slotIx);
     Bank* bank = BankAt(bankIx);
@@ -3795,6 +3852,20 @@ MessageIn MessageIn::ParamSetAbsolute(std::uint64_t timestamp, std::size_t slotI
     return message;
 }
 
+MessageIn MessageIn::ParamSetAbsoluteOnBank(std::uint64_t timestamp, std::size_t bankIx, std::size_t slotIx,
+                                            std::size_t position, float normalizedValue,
+                                            std::uint64_t absoluteEpoch) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::ParamSetAbsoluteOnBank;
+    message.bankIx = bankIx;
+    message.slotIx = slotIx;
+    message.position = position;
+    message.value = normalizedValue;
+    message.absoluteEpoch = absoluteEpoch;
+    return message;
+}
+
 MessageIn MessageIn::ParamPush(std::uint64_t timestamp, std::size_t slotIx, std::size_t position) {
     MessageIn message;
     message.timestamp = timestamp;
@@ -3988,6 +4059,24 @@ MessageIn MessageIn::SelectGrid(std::uint64_t timestamp, std::size_t gridSlotIx,
     return message;
 }
 
+MessageIn MessageIn::AppAction(std::uint64_t timestamp, std::size_t appActionIx, float value) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::AppAction;
+    message.appActionIx = appActionIx;
+    message.value = value;
+    return message;
+}
+
+MessageIn MessageIn::HoldDrill(std::uint64_t timestamp, bool held) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::HoldDrill;
+    message.boolValue = held;
+    message.hasBoolValue = true;
+    return message;
+}
+
 MessageInBus::MessageInBus(ParameterManager* manager, std::size_t capacity)
     : manager_(manager),
       queue_(capacity == 0 ? 1 : capacity) {}
@@ -4032,8 +4121,16 @@ void MessageInBus::Apply(const MessageIn& message) {
         // apply-or-reject decision for this absolute event.
         manager_->HandleSetAbsolute(message.slotIx, message.position, message.value, message.absoluteEpoch);
         break;
-    case MessageIn::Type::ParamPush:
+    case MessageIn::Type::ParamSetAbsoluteOnBank:
         if (manager_ != nullptr) {
+            manager_->HandleSetAbsoluteOnBank(message.bankIx, message.slotIx, message.position, message.value,
+                                              message.absoluteEpoch);
+        }
+        break;
+    case MessageIn::Type::ParamPush:
+        if (appActionOut_ != nullptr && forwardEncoderPress_) {
+            appActionOut_->Push(ParameterMessageOut::AppEncoderPress(message.slotIx, message.position));
+        } else if (manager_ != nullptr) {
             manager_->HandlePress(message.slotIx, message.position);
         }
         break;
@@ -4133,6 +4230,14 @@ void MessageInBus::Apply(const MessageIn& message) {
         if (gridManager_ != nullptr) {
             gridManager_->SelectGridForSlot(message.gridSlotIx, message.gridIx);
         }
+        break;
+    case MessageIn::Type::AppAction:
+        if (appActionOut_ != nullptr) {
+            appActionOut_->Push(ParameterMessageOut::AppAction(message.appActionIx, message.value));
+        }
+        break;
+    case MessageIn::Type::HoldDrill:
+        // Consumed by the MIDI processors before it reaches this bus.
         break;
     }
 }

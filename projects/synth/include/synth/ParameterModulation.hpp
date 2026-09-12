@@ -616,6 +616,10 @@ public:
     void HandlePress(PhysicalEncoderId encoderId, std::span<const PhysicalEncoderId> physicalLayout);
     void HandleTick(PhysicalEncoderId encoderId, const SceneState& scene, float delta);
     void HandleSetAbsolute(PhysicalEncoderId encoderId, const SceneState& scene, float normalizedTarget);
+    // Resolves the encoder against this bank's own top-level mapping rather
+    // than whatever page it currently has visible, so the write reaches the
+    // parameter even while this bank is drilled into a modulation view.
+    void HandleSetAbsoluteOnTopLevel(PhysicalEncoderId encoderId, const SceneState& scene, float normalizedTarget);
     void ApplyModifierToTopLevel(Modifier modifier, const SceneState& scene);
     void Deselect();
     bool ShowingModulation() const;
@@ -640,6 +644,7 @@ private:
     void AssociateSlot(BankSlot& slot);
     Cell* FindVisibleCell(PhysicalEncoderId encoderId);
     const Cell* FindVisibleCell(PhysicalEncoderId encoderId) const;
+    Cell* FindTopLevelCell(PhysicalEncoderId encoderId);
     Parameter* EnsureModulationDepthParameter(Parameter& parameter, std::size_t modIx);
     bool CanOpenModulationView(const Parameter& parameter) const;
     std::size_t MissingModulationDepthCount(const Parameter& parameter) const;
@@ -700,16 +705,24 @@ private:
 struct ParameterMessageOut {
     enum class Type {
         ParameterStorageBatchNeeded,
+        AppAction,
+        AppEncoderPress,
     };
 
     Type type = Type::ParameterStorageBatchNeeded;
     ParameterGroup* group = nullptr;
     std::size_t minimumAdditionalParameters = 0;
     std::size_t requestedParameters = 0;
+    std::size_t appActionIx = 0;
+    float value = 0.0f;
+    std::size_t slotIx = 0;
+    std::size_t position = 0;
 
     static ParameterMessageOut ParameterStorageBatchNeeded(ParameterGroup& group,
                                                            std::size_t minimumAdditionalParameters,
                                                            std::size_t requestedParameters);
+    static ParameterMessageOut AppAction(std::size_t appActionIx, float value);
+    static ParameterMessageOut AppEncoderPress(std::size_t slotIx, std::size_t position);
 };
 
 class ParameterMessageOutBus {
@@ -842,6 +855,13 @@ public:
     void HandleTick(std::size_t slotIx, std::size_t position, float delta);
     void HandleSetAbsolute(std::size_t slotIx, std::size_t position, float normalizedTarget,
                            std::uint64_t absoluteEpoch = 0);
+    // Writes to the bank at bankIx directly, bypassing the addressed slot's
+    // bank selection entirely: never calls BankSlot::SelectBank, never
+    // touches selectedBank_, never goes through BankSlot::Owns. slotIx is
+    // consulted only to resolve position to a physical encoder through that
+    // slot's own layout, and to record absoluteEpoch on that slot.
+    void HandleSetAbsoluteOnBank(std::size_t bankIx, std::size_t slotIx, std::size_t position,
+                                 float normalizedTarget, std::uint64_t absoluteEpoch = 0);
     bool SelectBankForSlot(std::size_t slotIx, std::size_t bankIx);
     bool NavigateBankForSlot(std::size_t slotIx, BankDirection direction);
 
@@ -950,6 +970,12 @@ struct MessageIn {
         SelectGrid,
         NextParamBank,
         PrevParamBank,
+        // Appended rather than inserted alongside ParamSetAbsolute so every
+        // existing enumerator keeps its ordinal (see SystemMessageSortKey's
+        // declaration-order dependency in MidiConfigBlocks.hpp).
+        ParamSetAbsoluteOnBank,
+        AppAction,
+        HoldDrill,
     };
 
     std::uint64_t timestamp = 0;
@@ -961,6 +987,7 @@ struct MessageIn {
     std::size_t gestureIx = 0;
     std::size_t bankIx = 0;
     std::size_t sceneIx = 0;
+    std::size_t appActionIx = 0;
     std::uint64_t absoluteEpoch = 0;
     float value = 0.0f;
     float delta = 0.0f;
@@ -975,6 +1002,13 @@ struct MessageIn {
     static MessageIn ParamIncDec(std::uint64_t timestamp, std::size_t slotIx, std::size_t position, float delta);
     static MessageIn ParamSetAbsolute(std::uint64_t timestamp, std::size_t slotIx, std::size_t position,
                                       float normalizedValue, std::uint64_t absoluteEpoch = 0);
+    // Addressed to bankIx directly rather than to whatever bank slotIx's
+    // BankSlot currently has selected; slotIx still supplies the encoder
+    // layout used to resolve position, exactly as it does for
+    // ParamSetAbsolute.
+    static MessageIn ParamSetAbsoluteOnBank(std::uint64_t timestamp, std::size_t bankIx, std::size_t slotIx,
+                                            std::size_t position, float normalizedValue,
+                                            std::uint64_t absoluteEpoch = 0);
     static MessageIn ParamPush(std::uint64_t timestamp, std::size_t slotIx, std::size_t position);
     static MessageIn ToggleReset(std::uint64_t timestamp);
     static MessageIn SetReset(std::uint64_t timestamp, bool held);
@@ -1006,6 +1040,8 @@ struct MessageIn {
                                         int gridX, int gridY, std::uint8_t pressure);
     static MessageIn SelectGrid(std::uint64_t timestamp, std::size_t gridSlotIx,
                                 std::size_t gridIx);
+    static MessageIn AppAction(std::uint64_t timestamp, std::size_t appActionIx, float value);
+    static MessageIn HoldDrill(std::uint64_t timestamp, bool held);
 };
 
 class MessageInBus {
@@ -1015,6 +1051,10 @@ public:
     void SetParameterManager(ParameterManager* manager) { manager_ = manager; }
     void SetGridManager(GridManager* manager) { gridManager_ = manager; }
     void SetManager(ParameterManager* manager) { SetParameterManager(manager); }
+    void SetAppActionOut(ParameterMessageOutBus* out, bool forwardEncoderPress) {
+        appActionOut_ = out;
+        forwardEncoderPress_ = forwardEncoderPress;
+    }
     bool Push(const MessageIn& message);
     bool Pop(MessageIn& message, std::uint64_t timestamp);
     void Apply(const MessageIn& message);
@@ -1025,6 +1065,8 @@ public:
 private:
     ParameterManager* manager_ = nullptr;
     GridManager* gridManager_ = nullptr;
+    ParameterMessageOutBus* appActionOut_ = nullptr;
+    bool forwardEncoderPress_ = false;
     std::vector<MessageIn> queue_;
     std::atomic<std::size_t> head_{0};
     std::atomic<std::size_t> tail_{0};

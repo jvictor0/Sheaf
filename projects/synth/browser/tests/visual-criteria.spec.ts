@@ -67,6 +67,18 @@ export const VISUAL_CRITERIA = [
 // rather than the three-item happy case.
 const FIXTURE_CONTROLLER_COUNT = 12;
 
+// Viewport widths the Controllers row's driven-state check re-renders at.
+// COMPOSITE_SURFACE_WIDTH (736, above) is where the composite surface's
+// shrink-only scale transform first engages; this sweep runs from well below
+// that -- deep in the scaled-down range -- up through it and on to 1280, the
+// file's own standard unscaled viewport. The overflow and overlap criteria
+// compare `getBoundingClientRect()` rectangles against a fixed CSS-pixel
+// TOLERANCE, and that rectangle IS affected by the scale transform, so a
+// rounding artifact introduced at one scale is invisible at any other -- the
+// single fixed viewport every other test in this file renders at cannot see
+// one either way.
+const CONTROLLER_WIDTH_SWEEP: readonly number[] = [480, 560, 640, 720, 800, 880, 960, 1040, 1120, 1200, 1280];
+
 type SurfaceName = "audio" | "controllers" | "sync" | "file";
 const ALL_SURFACES: readonly SurfaceName[] = ["audio", "controllers", "sync", "file"];
 // The form grid whose row count does not depend on the host. The Controllers
@@ -108,15 +120,12 @@ type CaptionException = { id: string; reason: string };
 
 function controllerCaptionExceptions(rows: number): CaptionException[] {
   const exceptions: CaptionException[] = [
-    { id: "runtime.controllers.add_name", reason: "add-row name field; the add row publishes no column headings" },
-    { id: "runtime.controllers.add_kind", reason: "add-row kind selector; same, via the retired ComboBox::label (design.md OQ5)" },
   ];
   for (let ix = 0; ix < rows; ix += 1) {
     const row = `controller row ${ix}`;
     exceptions.push(
       { id: `runtime.controllers.row.${ix}.input`, reason: `${row} MIDI input selector; a table cell whose column has no heading` },
       { id: `runtime.controllers.row.${ix}.output`, reason: `${row} MIDI output selector; a table cell whose column has no heading` },
-      { id: `runtime.controllers.row.${ix}.rename_draft`, reason: `${row} rename field; the adjacent Rename button is the only thing naming it` },
     );
   }
   return exceptions;
@@ -181,6 +190,7 @@ const SPACING_METRIC_VALUES = [
   8, // synth::ui::kSpacing.gap and .labelGap; ControllersLayout::kEndpointBoxGap, ::kAvailableControlGap
   10, // runtime_ui::Layout::kFilePanelPadding
   12, // synth::ui::kSpacing.padding
+  16, // ControllersLayout::kStatusLegendPairGap
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -191,6 +201,9 @@ const SPACING_METRIC_VALUES = [
 
 type CriteriaHelpers = {
   TOLERANCE: number;
+  // Far smaller than TOLERANCE: see the comment beside its definition in
+  // `installCriteriaHelpers` for why the two must not share a value.
+  TEXT_FIT_TOLERANCE: number;
   nodes(): HTMLElement[];
   nodeId(el: HTMLElement): string;
   parentNodeOf(el: HTMLElement): HTMLElement | null;
@@ -201,6 +214,13 @@ type CriteriaHelpers = {
   badgeTargetOf(id: string): string;
   intersects(a: DOMRect, b: DOMRect): boolean;
   describeRect(rect: DOMRect): string;
+  // The sub-pixel width a text-bearing element's own content needs, and the
+  // sub-pixel width it actually has to give it, at the element's own computed
+  // font. Both integer DOM properties the text-fit criterion used to compare
+  // (`scrollWidth`, `clientWidth`) round to the nearest CSS pixel, which is
+  // exactly how a label needing 58.3px in a 58px box reads as "58 fits in 58".
+  textNeededWidth(el: HTMLElement): number;
+  textAvailableWidth(el: HTMLElement): number;
   contrastRatio(el: HTMLElement):
     | { ratio: number; painted: string; background: string; alpha: number }
     | null;
@@ -221,6 +241,16 @@ declare global {
 async function installCriteriaHelpers(page: Page): Promise<void> {
   await page.addInitScript((badges: ReadonlyArray<{ id: string; target: string }>) => {
     const TOLERANCE = 0.5;
+    // `scrollWidth` and `clientWidth` are both integers -- the DOM rounds them
+    // to the nearest CSS pixel -- so TOLERANCE=0.5 is exactly wide enough to
+    // absorb that rounding without masking a real one-pixel shortfall.
+    // `textNeededWidth`/`textAvailableWidth` below are NOT rounded, so reusing
+    // 0.5 here would swallow the sub-pixel shortfall this measurement exists
+    // to catch (a label needing 0.3px more than it was given). 0.1 keeps
+    // comfortable room below that shortfall while still absorbing the
+    // sub-hundredth-pixel disagreement between canvas text shaping and CSS
+    // text layout for the same font.
+    const TEXT_FIT_TOLERANCE = 0.1;
     const nodes = () => [...document.querySelectorAll<HTMLElement>("[data-node-id]")];
     const nodeId = (el: HTMLElement) => el.dataset.nodeId!;
     const parentNodeOf = (el: HTMLElement) =>
@@ -261,6 +291,44 @@ async function installCriteriaHelpers(page: Page): Promise<void> {
       a.top + TOLERANCE < b.bottom && b.top + TOLERANCE < a.bottom;
     const describeRect = (rect: DOMRect) =>
       `(${rect.left.toFixed(2)},${rect.top.toFixed(2)} ${rect.width.toFixed(2)}x${rect.height.toFixed(2)})`;
+
+    // One canvas, reused for every measurement: `nodes()` is walked once per
+    // criterion per surface, so a fresh canvas per element would be an O(n)
+    // allocation for what only needs an O(1) one, paid once and read many
+    // times.
+    const measureCanvas = document.createElement("canvas");
+    const measureCtx = measureCanvas.getContext("2d")!;
+    // The text actually ON SCREEN for this element. A combo box wraps a
+    // `<select>`; `el.textContent` there is the concatenation of every
+    // OPTION's label, not what is shown -- only the selected option is
+    // rendered, so that is what a width measurement has to read.
+    const displayedText = (el: HTMLElement) => {
+      const select = el.querySelector("select");
+      if (!select) return (el.textContent ?? "").trim();
+      const selected = select.options[select.selectedIndex];
+      return (selected ? selected.text : select.value).trim();
+    };
+    // The width the element's own text needs, measured at the element's own
+    // computed font rather than read off the rounded-to-the-nearest-pixel
+    // `scrollWidth`. `getComputedStyle(el).font` is the resolved shorthand --
+    // style, variant, weight, size/line-height and family -- so this is the
+    // same font the browser itself laid the text out with.
+    const textNeededWidth = (el: HTMLElement) => {
+      measureCtx.font = getComputedStyle(el).font;
+      return measureCtx.measureText(displayedText(el)).width;
+    };
+    // The width actually available to that text: the element's own content
+    // box. NOT its content box minus padding -- a button or toggle centres
+    // its caption (the browser's own default rendering for `<button>`) over a
+    // padded hit-target, so the padding sizes the clickable area rather than
+    // reserving a text-exclusion inset the way it would for left-aligned flow
+    // text. That distinction is invisible for every label and status-text
+    // node in this app, because none of them carry any padding at all -- so
+    // comparing against the padded box changes nothing for the kinds this
+    // measurement exists to catch, and fixes a false positive on a 22px
+    // disclosure button (11px of padding on each side) that renders exactly
+    // as intended.
+    const textAvailableWidth = (el: HTMLElement) => el.clientWidth;
 
     // What the eye actually sees, composited the way the browser paints it.
     //
@@ -354,8 +422,9 @@ async function installCriteriaHelpers(page: Page): Promise<void> {
     };
 
     window.__visualCriteria = {
-      TOLERANCE, nodes, nodeId, parentNodeOf, contentRectOf, childrenOf,
-      matchesAny, underlayTargetOf, badgeTargetOf, intersects, describeRect, contrastRatio,
+      TOLERANCE, TEXT_FIT_TOLERANCE, nodes, nodeId, parentNodeOf, contentRectOf, childrenOf,
+      matchesAny, underlayTargetOf, badgeTargetOf, intersects, describeRect,
+      textNeededWidth, textAvailableWidth, contrastRatio,
     };
   }, DECLARED_BADGES.map((badge) => ({ id: badge.id, target: badge.target })));
 }
@@ -366,11 +435,12 @@ async function openSurface(page: Page, surface: SurfaceName): Promise<void> {
 }
 
 // The named fixture state: twelve controllers added through the page's own add
-// row, so the state is produced by the real surface rather than injected.
+// row, so the state is produced by the real surface rather than injected. The
+// add row offers a preset and an Add button; the preset combo already holds the
+// first entry, so a press is the whole gesture.
 async function seedControllers(page: Page, count: number): Promise<void> {
   await openSurface(page, "controllers");
   for (let index = 0; index < count; index += 1) {
-    await page.locator(`${synthNode("runtime.controllers.add_name")} input`).fill(`fixture-${index}`);
     await page.locator(synthNode("runtime.controllers.add_button")).click();
     await expect(page.locator(synthNode(`runtime.controllers.row.${index}`))).toHaveCount(1);
   }
@@ -382,8 +452,9 @@ async function seedControllers(page: Page, count: number): Promise<void> {
 // re-navigating for each one.
 async function evaluateStructuralCriteria(page: Page) {
   return page.evaluate(([outOfFlow, textKinds]: readonly [string[], string[]]) => {
-    const { TOLERANCE, nodes, nodeId, parentNodeOf, contentRectOf, childrenOf, matchesAny,
-            underlayTargetOf, badgeTargetOf, intersects, describeRect, contrastRatio } = window.__visualCriteria;
+    const { TOLERANCE, TEXT_FIT_TOLERANCE, nodes, nodeId, parentNodeOf, contentRectOf, childrenOf, matchesAny,
+            underlayTargetOf, badgeTargetOf, intersects, describeRect,
+            textNeededWidth, textAvailableWidth, contrastRatio } = window.__visualCriteria;
     const overflows: string[] = [];
     const overlaps: string[] = [];
     const silentText: string[] = [];
@@ -409,8 +480,10 @@ async function evaluateStructuralCriteria(page: Page) {
           silentText.push(`${nodeId(el)} reserves ${describeRect(rect)} and renders no text`);
       }
       if (textKinds.includes(kind) && el.textContent?.trim()) {
-        if (el.scrollWidth > el.clientWidth + TOLERANCE)
-          tooTight.push(`${nodeId(el)} needs ${el.scrollWidth} in ${el.clientWidth}`);
+        const neededWidth = textNeededWidth(el);
+        const availableWidth = textAvailableWidth(el);
+        if (neededWidth > availableWidth + TEXT_FIT_TOLERANCE)
+          tooTight.push(`${nodeId(el)} needs ${neededWidth.toFixed(2)} in ${availableWidth.toFixed(2)}`);
         const contrast = contrastRatio(el);
         if (contrast && contrast.ratio < 4.5)
           lowContrast.push(`${nodeId(el)} ${contrast.ratio.toFixed(2)}:1 (${contrast.painted} on ${contrast.background})`);
@@ -756,15 +829,18 @@ test.describe("sru-48 named visual criteria", () => {
     for (const surface of ALL_SURFACES) {
       await openSurface(page, surface);
       const report = await page.evaluate((textKinds: string[]) => {
-        const { TOLERANCE, nodes, nodeId } = window.__visualCriteria;
+        const { TOLERANCE, TEXT_FIT_TOLERANCE, nodes, nodeId, textNeededWidth, textAvailableWidth } =
+          window.__visualCriteria;
         const violations: string[] = [];
         let measured = 0;
         for (const el of nodes()) {
           if (!textKinds.includes(el.dataset.nodeKind!)) continue;
           if (!el.textContent || !el.textContent.trim()) continue;
           measured += 1;
-          if (el.scrollWidth > el.clientWidth + TOLERANCE)
-            violations.push(`${nodeId(el)} needs ${el.scrollWidth} in ${el.clientWidth}: "${el.textContent.trim()}"`);
+          const neededWidth = textNeededWidth(el);
+          const availableWidth = textAvailableWidth(el);
+          if (neededWidth > availableWidth + TEXT_FIT_TOLERANCE)
+            violations.push(`${nodeId(el)} needs ${neededWidth.toFixed(2)} in ${availableWidth.toFixed(2)}: "${el.textContent.trim()}"`);
           if (el.scrollHeight > el.clientHeight + TOLERANCE)
             violations.push(`${nodeId(el)} needs ${el.scrollHeight} high in ${el.clientHeight}: "${el.textContent.trim()}"`);
         }
@@ -831,12 +907,14 @@ test.describe("sru-48 named visual criteria", () => {
       if (report.total > 0 && surface !== "controllers")
         expect(report.examined, `${surface}: caption check examined no form control`).toBeGreaterThan(0);
       if (surface === "controllers") {
-        // 12 rows x {input, output, rename_draft} plus the two add-row fields.
-        // A control the page grows moves this number and fails here by name,
-        // which is what the old suffix class could not do.
+        // Each collapsed row carries an input and an output selector; the add
+        // row carries its preset combo. The rename field belongs to a row's
+        // expanded editor and is not on this surface. A control the page grows
+        // moves this number and fails here by name, which is what the old
+        // suffix class could not do.
         expect(report.total,
           "controllers: the page carries a different number of form controls than the fixture declares")
-          .toBe(FIXTURE_CONTROLLER_COUNT * 3 + 2);
+          .toBe(FIXTURE_CONTROLLER_COUNT * 2 + 1);
       }
     }
   });
@@ -902,14 +980,17 @@ test.describe("sru-48 named visual criteria", () => {
     await openSurface(page, "sync");
 
     const textFit = await page.evaluate(() => {
-      const { TOLERANCE, nodes, nodeId } = window.__visualCriteria;
+      const { TEXT_FIT_TOLERANCE, nodes, nodeId, textNeededWidth, textAvailableWidth } = window.__visualCriteria;
       const label = nodes().find((el) => el.dataset.nodeKind === "label" && !!el.textContent?.trim());
       if (!label) return { injected: false, caught: [] as string[] };
       const width = label.style.width;
       // Squeeze the reservation, exactly as a too-tight metrics entry would.
       label.style.width = "4px";
       const caught: string[] = [];
-      if (label.scrollWidth > label.clientWidth + TOLERANCE) caught.push(nodeId(label));
+      // The sub-pixel measurement, not the retired integer one: this must
+      // stay proof that the CURRENT text-fit code can fail, not proof that a
+      // superseded reimplementation of it can.
+      if (textNeededWidth(label) > textAvailableWidth(label) + TEXT_FIT_TOLERANCE) caught.push(nodeId(label));
       label.style.width = width;
       return { injected: true, caught };
     });
@@ -1069,6 +1150,65 @@ test.describe("sru-48 named visual criteria", () => {
     await expect(argument).toHaveCount(1);
     await argument.scrollIntoViewIfNeeded();
     await expect(argument).toBeInViewport();
+  });
+
+  // `seedControllers` adds rows but never opens one, so no criterion in this
+  // file had ever seen a controller row's own editor -- its disclosure
+  // toggle, a section toggle, or the mapping-group header underneath an open
+  // section. That header is exactly where a too-tight column reservation
+  // (the "Start Pos" column) shipped: nothing here had ever rendered it.
+  // Driven through the row's own disclosure and section-toggle controls, the
+  // same pattern the wizard chooser/form test above uses for its own driven
+  // state.
+  //
+  // This state is also re-checked across CONTROLLER_WIDTH_SWEEP instead of at
+  // the single fixed viewport every other structural check in this file
+  // uses; see the comment on that constant for what the range covers and why.
+  test("the controller row's Encoders group header meets the structural criteria across a range of widths", async ({ page }) => {
+    await openSurface(page, "controllers");
+    // The add row's Preset combo already defaults to the library's own
+    // registered wizard descriptor (MIDI Fighter Twister) -- Add needs no
+    // other input to produce a row with an Encoders section.
+    await page.locator(synthNode("runtime.controllers.add_button")).click();
+    await expect(page.locator(synthNode("runtime.controllers.row.0"))).toHaveCount(1);
+
+    await page.locator(synthNode("runtime.controllers.row.0.disclosure")).click();
+    const encodersToggle = page.locator(synthNode("runtime.controllers.row.0.section.0.toggle"));
+    await expect(encodersToggle).toBeVisible({ timeout: 10_000 });
+    await encodersToggle.click();
+
+    // The state actually arrived, not just that nothing threw: the Encoders
+    // Turn and Push group headers each carry one "Start Pos" column -- the
+    // exact label whose reservation this suite could not previously see.
+    await expect(page.getByText("Start Pos", { exact: true })).toHaveCount(2);
+
+    // Resize, then wait for `fitSurface`'s own shrink transform to actually
+    // settle at the scale this width implies, rather than assuming a fixed
+    // delay is enough -- the same "assert the premise" rule the scale-1 test
+    // above applies to the file's default viewport.
+    const waitForScaleAtWidth = async (width: number) => {
+      await page.setViewportSize({ width, height: VERIFICATION_VIEWPORT.height });
+      const expectedScale = Math.min(1, width / COMPOSITE_SURFACE_WIDTH);
+      await page.waitForFunction((expected: number) => {
+        const root = document.querySelector<HTMLElement>('[data-synth-node-id="runtime.main.root"]');
+        if (!root) return false;
+        const transform = getComputedStyle(root).transform;
+        const match = transform.match(/matrix\(([-\d.]+),/);
+        const scale = transform === "none" ? 1 : match ? Number(match[1]) : 1;
+        return Math.abs(scale - expected) < 0.01;
+      }, expectedScale);
+    };
+
+    for (const width of CONTROLLER_WIDTH_SWEEP) {
+      await waitForScaleAtWidth(width);
+      const report = await evaluateStructuralCriteria(page);
+      expect(report.overflows, `width ${width}: ${report.overflows.join("; ")}`).toEqual([]);
+      expect(report.overlaps, `width ${width}: ${report.overlaps.join("; ")}`).toEqual([]);
+      expect(report.silentText, `width ${width}: ${report.silentText.join("; ")}`).toEqual([]);
+      expect(report.tooTight, `width ${width}: ${report.tooTight.join("; ")}`).toEqual([]);
+      expect(report.lowContrast, `width ${width}: ${report.lowContrast.join("; ")}`).toEqual([]);
+      expect(report.checked, `width ${width}: examined no nodes`).toBeGreaterThan(5);
+    }
   });
 
   // sru-48 asks for a rendered re-render at a second root extent, asserting
