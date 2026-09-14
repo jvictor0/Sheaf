@@ -45,6 +45,12 @@ skill says so; this is a harness constraint, not a missing install step.
 make xagent-plugin-install-global
 ```
 
+The plugin Make targets provision `plugins/xagent/.venv` from
+`scripts/requirements.txt`, including PyYAML for the Codex plugin validator.
+They use that environment for packaging, tests, and installation; no global
+Python package installation is required. Install xagent's Node dependencies
+with `make -C projects/xagent install` before building or installing the plugin.
+
 After installation, open a new conversation in each harness so it reloads the
 skill and MCP metadata. To confirm, ask the harness to list its tools and look
 for `xagent_start_non_sdd`; on Codex you can also check `codex plugin list` reports

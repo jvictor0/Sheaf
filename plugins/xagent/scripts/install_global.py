@@ -372,6 +372,7 @@ def register_harness_hooks(
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 HELPER_NAMES = (
+    "identifier_validation.py",
     "create_basic_plugin.py",
     "update_plugin_cachebuster.py",
     "read_marketplace_name.py",

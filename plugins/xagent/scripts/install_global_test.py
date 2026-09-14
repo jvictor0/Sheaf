@@ -28,6 +28,7 @@ PLUGIN_CREATOR_SCRIPTS = (
     Path.home() / ".codex" / "skills" / ".system" / "plugin-creator" / "scripts"
 )
 HELPER_NAMES = (
+    "identifier_validation.py",
     "create_basic_plugin.py",
     "update_plugin_cachebuster.py",
     "read_marketplace_name.py",

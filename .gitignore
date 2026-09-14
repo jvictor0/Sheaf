@@ -10,6 +10,7 @@ __pycache__/
 
 # Node packages and build/test output
 node_modules/
+plugins/xagent/.venv/
 !projects/agents/vendor/**/node_modules/
 !projects/agents/vendor/**/node_modules/**
 projects/conductor/node_modules/

@@ -3,6 +3,9 @@ MAKEFLAGS += --warn-undefined-variables
 PROJECTS := conductor web quest-runner dictator realtime-agent sheaf-chat agents xagent synth
 CODEX_HOME ?= $(HOME)/.codex
 PLUGIN_CREATOR_VALIDATOR := $(CODEX_HOME)/skills/.system/plugin-creator/scripts/validate_plugin.py
+XAGENT_PLUGIN_VENV := plugins/xagent/.venv
+XAGENT_PLUGIN_PYTHON := $(XAGENT_PLUGIN_VENV)/bin/python
+XAGENT_PLUGIN_REQUIREMENTS := plugins/xagent/scripts/requirements.txt
 TOOL ?=
 REF ?=
 FORCE ?=
@@ -171,17 +174,22 @@ xagent-test:
 xagent-clean:
 	$(MAKE) -C projects/xagent clean
 
-xagent-plugin-build:
-	python3 plugins/xagent/scripts/package_xagent.py
+$(XAGENT_PLUGIN_VENV)/.ready: $(XAGENT_PLUGIN_REQUIREMENTS)
+	python3 -m venv $(XAGENT_PLUGIN_VENV)
+	$(XAGENT_PLUGIN_PYTHON) -m pip install -r $(XAGENT_PLUGIN_REQUIREMENTS)
+	touch $@
 
-xagent-plugin-test:
-	python3 -m unittest plugins/xagent/scripts/install_global_test.py
-	python3 -m unittest plugins/xagent/scripts/controller_stop_hook_test.py
-	python3 plugins/xagent/scripts/package_xagent.py --check
-	python3 $(PLUGIN_CREATOR_VALIDATOR) plugins/xagent
+xagent-plugin-build: $(XAGENT_PLUGIN_VENV)/.ready
+	$(XAGENT_PLUGIN_PYTHON) plugins/xagent/scripts/package_xagent.py
 
-xagent-plugin-install-global:
-	python3 plugins/xagent/scripts/install_global.py install
+xagent-plugin-test: $(XAGENT_PLUGIN_VENV)/.ready
+	$(XAGENT_PLUGIN_PYTHON) -m unittest plugins/xagent/scripts/install_global_test.py
+	$(XAGENT_PLUGIN_PYTHON) -m unittest plugins/xagent/scripts/controller_stop_hook_test.py
+	$(XAGENT_PLUGIN_PYTHON) plugins/xagent/scripts/package_xagent.py --check
+	$(XAGENT_PLUGIN_PYTHON) $(PLUGIN_CREATOR_VALIDATOR) plugins/xagent
+
+xagent-plugin-install-global: $(XAGENT_PLUGIN_VENV)/.ready
+	$(XAGENT_PLUGIN_PYTHON) plugins/xagent/scripts/install_global.py install
 
 xagent-service-run:
 	$(MAKE) -C projects/xagent service-run
