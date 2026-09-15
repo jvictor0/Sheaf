@@ -1,0 +1,8 @@
+id: responding-to-agent-review
+name: responding-to-agent-review
+description: Act on agent review findings by fixing verified local correctness issues cleanly and escalating major refactors, broader redesigns, and side quests to the user.
+targets:
+  - claude
+  - cursor
+  - pi
+  - codex

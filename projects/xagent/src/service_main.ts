@@ -7,11 +7,6 @@ import {
   reconciliationWarning,
 } from "./service/reconciliation.js";
 import { XagentRunManager } from "./service/run_manager.js";
-import {
-  AsSddRunManagerPort,
-  CreateSddManager,
-} from "./service/sdd_manager.js";
-import { CreateSddAgentStore } from "./service/sdd_store.js";
 import { createTestAdapterFactory, isTestAdapterEnabled } from "./service/test_hooks.js";
 import {
   createShutdownController,
@@ -37,13 +32,6 @@ async function main(): Promise<void> {
       : {}),
   });
 
-  const sddStore = CreateSddAgentStore(config.logRoot);
-  const sddManager = CreateSddManager({
-    store: sddStore,
-    runManager: AsSddRunManagerPort(runManager),
-    repoRoot: config.repoRoot,
-  });
-
   // Last-resort guard against an unhandled error taking down the whole
   // service before owned provider process groups are cleaned up. The
   // supervisor runs in-process with every active run, so an uncaught
@@ -58,10 +46,6 @@ async function main(): Promise<void> {
   const shutdownController: XagentShutdownController = createShutdownController({
     closeRuns: async () => {
       await runManager.closeAll();
-      // Close the ledger after provider sessions purely to release the file
-      // handle — v2 has no close-time write to commit.
-      //
-      sddStore.Close();
     },
     closeServer: async () => {
       await server?.close();
@@ -96,7 +80,6 @@ async function main(): Promise<void> {
     bindHost: config.bindHost,
     bindPort: config.bindPort,
     runManager,
-    sddManager,
     shutdownController,
     // Hold `/health` (`healthy: false`) and reject `/mcp` with 503 until
     // startup reconciliation resolves. Without this gate, the skill's
@@ -143,9 +126,6 @@ async function main(): Promise<void> {
   //
   logReconciliationResults(reconciliationResults);
   server.setWarning(reconciliationWarning(reconciliationResults));
-
-  // No ledger reconciliation exists in v2: sdd_agents has no mutable state to
-  // repair. Run-phase reconciliation above is the whole startup contract.
 
   // Reconciliation has finished (or there was nothing to reconcile): flip
   // the ready gate so `/health` reports `healthy: true` and `/mcp` starts

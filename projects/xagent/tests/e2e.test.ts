@@ -1,21 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { parseArgs } from "../src/cli.js";
 import type { OutputEvent } from "../src/events.js";
-import { startMcpService, structuredToolBody } from "./support/mcp_service.js";
-
-// The v1 full-lifecycle MCP SDD test was deleted in Task 4: report binding and
-// the sdd await/close facade are gone, so Followup cannot clear open turns and
-// closed_at / report_text assertions no longer hold. Task 9 rebuilds e2e
-// coverage against the v2 model.
-//
-
-const x_MutableArtifactText = "DISK_ARTIFACT_MUST_NOT_BECOME_REPORT_TEXT";
 
 test("public parser rejects fake harness", () => {
   assert.throws(
@@ -147,117 +138,4 @@ function parseJsonl(text: string): OutputEvent[] {
     .filter(Boolean)
     .map((line) => JSON.parse(line) as OutputEvent);
 }
-
-test("two agents, four submissions, two immutable rows, reports only in the log", async () => {
-  const service = await startMcpService();
-  try {
-    // Concurrent SDD sessions: start the fixer while the implementer is still
-    // live, each with its own adapter and distinct agent id.
-    //
-    const implementer = await service.startSddImplementer({ task: 4 });
-    const fixer = await service.startSddFixer({ task: 4 });
-    assert.notEqual(implementer.run_id, fixer.run_id);
-
-    // Same path startSddImplementer wrote; overwrite before await so a
-    // regression that re-reads the report file would surface the disk text.
-    //
-    const implementerReportPath = service.artifact("implementer-task-4-report.md");
-    await writeFile(implementerReportPath, x_MutableArtifactText, "utf8");
-
-    const implementerFirst = await service.awaitTurn(
-      implementer.run_id,
-      implementer.sequence,
-    );
-    assert.equal(implementerFirst.event, "turn.completed");
-    // FakeHarnessAdapter reports `fake response to ${submitted text}`.
-    //
-    const implementerStartReport = "fake response to Rendered implementer prompt.\n";
-    assert.equal(
-      (implementerFirst.report as { text: string }).text,
-      implementerStartReport,
-    );
-    assert.equal(
-      await readFile(implementerReportPath, "utf8"),
-      x_MutableArtifactText,
-      "the report file must remain the distinctive disk artifact",
-    );
-
-    await service.awaitTurn(fixer.run_id, fixer.sequence);
-
-    const fix = await service.sddFollowup({
-      kind: "fix",
-      run_id: implementer.run_id,
-      round: 1,
-      findings: service.artifact("task-4-findings.md"),
-      findings_text: "Finding 1: the gate is missing.",
-      tests: ["npm test"],
-      report_out: implementerReportPath,
-    });
-    const implementerFix = await service.awaitTurn(implementer.run_id, fix.sequence);
-    assert.equal(implementerFix.event, "turn.completed");
-    assert.match(
-      (implementerFix.report as { text: string }).text,
-      /^fake response to /,
-    );
-    assert.notEqual(
-      (implementerFix.report as { text: string }).text,
-      x_MutableArtifactText,
-    );
-
-    // xsvc-5: generic await/message/close serve SDD-owned runs identically.
-    //
-    const nudgeText = "controller nudge after the fix turn";
-    const nudged = await service.message(implementer.run_id, nudgeText);
-    const implementerNudge = await service.awaitTurn(
-      implementer.run_id,
-      nudged.sequence,
-    );
-    assert.equal(implementerNudge.event, "turn.completed");
-    assert.equal(
-      (implementerNudge.report as { text: string }).text,
-      `fake response to ${nudgeText}`,
-    );
-
-    await service.closeRun(implementer.run_id);
-    const afterClose = await service.sddFollowupResult({
-      kind: "fix",
-      run_id: implementer.run_id,
-      round: 2,
-      findings: service.artifact("task-4-findings-after-close.md"),
-      findings_text: "must not land on a closed agent",
-      tests: ["npm test"],
-      report_out: implementerReportPath,
-    });
-    assert.equal(afterClose.isError, true);
-    assert.equal(structuredToolBody(afterClose).error, "sdd_agent_not_live");
-
-    const rows = service.ledger().ListAll();
-    assert.equal(rows.length, 2);
-    assert.deepEqual(rows.map((row) => row.role), ["implementer", "fixer"]);
-    assert.deepEqual(rows.map((row) => row.task), [4, 4]);
-    assert.equal(rows[0]!.plan_path, rows[1]!.plan_path);
-
-    const implementerEvents = await service.normalizedEvents(implementer.run_id);
-    const fixerEvents = await service.normalizedEvents(fixer.run_id);
-    assert.equal(
-      implementerEvents.filter((event) => event.type === "turn.submitted").length,
-      3,
-    );
-    assert.equal(
-      fixerEvents.filter((event) => event.type === "turn.submitted").length,
-      1,
-    );
-    assert.equal(
-      implementerEvents.filter((event) => event.type === "turn.completed").length,
-      3,
-    );
-    for (const event of implementerEvents.filter((e) => e.type === "turn.completed")) {
-      const reportText = (event.payload as { report: { text: string } }).report.text;
-      assert.match(reportText, /^fake response to /);
-      assert.notEqual(reportText, x_MutableArtifactText);
-    }
-  } finally {
-    await service.close();
-  }
-});
 

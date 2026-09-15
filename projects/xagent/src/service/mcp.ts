@@ -10,7 +10,6 @@ import {
   x_AwaitLivenessPingIntervalMs,
 } from "./await_liveness.js";
 import type { XagentRunManager } from "./run_manager.js";
-import type { SddManager } from "./sdd_manager.js";
 import {
   parseToolInput,
   structuredErrorFromUnknown,
@@ -21,10 +20,6 @@ import {
   XagentInterruptInputSchema,
   XagentListInputSchema,
   XagentMessageInputSchema,
-  XagentSddFollowupAdvertisedSchema,
-  XagentSddFollowupInputSchema,
-  XagentSddStartAdvertisedSchema,
-  XagentSddStartInputSchema,
   XagentStartInputSchema,
   type StructuredToolError,
 } from "./tool_schemas.js";
@@ -41,7 +36,6 @@ export type XagentMcpHandler = {
 
 export type XagentMcpHandlerOptions = {
   readonly runManager: XagentRunManager;
-  readonly sddManager?: SddManager;
   // DNS rebinding protection: the transport rejects any request whose Host
   // or Origin header is not in the allow list. The lists are provided as
   // getters because the actual listen port is unknown until `listen()`
@@ -58,7 +52,7 @@ export type XagentMcpHandlerOptions = {
 };
 
 export function createXagentMcpHandler(options: XagentMcpHandlerOptions): XagentMcpHandler {
-  const { runManager, sddManager, getAllowedHosts, getAllowedOrigins } = options;
+  const { runManager, getAllowedHosts, getAllowedOrigins } = options;
   const awaitLivenessPingIntervalMs =
     options.awaitLivenessPingIntervalMs ?? x_AwaitLivenessPingIntervalMs;
   const sessions = new Map<string, SessionEntry>();
@@ -96,7 +90,6 @@ export function createXagentMcpHandler(options: XagentMcpHandlerOptions): Xagent
 
       const server = createConfiguredMcpServer(
         runManager,
-        sddManager,
         awaitLivenessPingIntervalMs,
       );
       let transport!: StreamableHTTPServerTransport;
@@ -159,7 +152,6 @@ export function createXagentMcpHandler(options: XagentMcpHandlerOptions): Xagent
 
 function createConfiguredMcpServer(
   runManager: XagentRunManager,
-  sddManager: SddManager | undefined,
   awaitLivenessPingIntervalMs: number,
 ): McpServer {
   const server = new McpServer({
@@ -168,13 +160,12 @@ function createConfiguredMcpServer(
   });
 
   server.registerTool(
-    "xagent_start_non_sdd",
+    "xagent_start",
     {
-      title: "Start supervised run (non-SDD)",
+      title: "Start supervised run",
       description:
         "Validate an absolute working directory, start a service-owned supervised run, and submit the initial prompt. "
-        + "For generic delegation only — reviews, workers, one-off passes. Superpowers SDD turns MUST use xagent_sdd_start, "
-        + "which renders the role template and records the dispatch in the SDD ledger; starting an SDD turn here produces an untracked run.",
+        + "Use for reviews, implementation, fixes, and other delegated work.",
       inputSchema: XagentStartInputSchema,
     },
     async (args) => {
@@ -236,15 +227,12 @@ function createConfiguredMcpServer(
     {
       title: "List supervised runs",
       description:
-        "List service-owned runs, newest first, for recovery — use it when a start response was lost and its run id is unknown. SDD-owned runs carry an `sdd` block naming their role, plan, task, and cwd. This is not a progress-polling tool.",
+        "List service-owned runs, newest first, for recovery — use it when a start response was lost and its run id is unknown. This is not a progress-polling tool.",
       inputSchema: XagentListInputSchema,
     },
     async (args) => {
       return runTool(async () => {
         const input = parseToolInput(XagentListInputSchema, args);
-        if (sddManager !== undefined) {
-          return sddManager.ListGeneric(input);
-        }
         return runManager.listOwnedRuns(input);
       });
     },
@@ -294,44 +282,6 @@ function createConfiguredMcpServer(
       });
     },
   );
-
-  if (sddManager !== undefined) {
-    server.registerTool(
-      "xagent_sdd_start",
-      {
-        title: "Start SDD supervised turn",
-        description:
-          "Render a Superpowers SDD role prompt, reserve the ledger row, and start the owned provider session.",
-        // Advertised schema only (xsvc-15) — a superset of the union, because
-        // registerTool cannot publish a discriminated union. The handler below
-        // still parses against the union, which does the rejecting.
-        inputSchema: XagentSddStartAdvertisedSchema,
-      },
-      async (args) => {
-        return runTool(async () => {
-          const input = parseToolInput(XagentSddStartInputSchema, args);
-          return sddManager.Start(input);
-        });
-      },
-    );
-
-    server.registerTool(
-      "xagent_sdd_followup",
-      {
-        title: "Follow up on SDD supervised turn",
-        description:
-          "Submit a same-session SDD fix or re-review turn without restating stored assignment metadata.",
-        // Advertised schema only (xsvc-15); see xagent_sdd_start above.
-        inputSchema: XagentSddFollowupAdvertisedSchema,
-      },
-      async (args) => {
-        return runTool(async () => {
-          const input = parseToolInput(XagentSddFollowupInputSchema, args);
-          return sddManager.Followup(input);
-        });
-      },
-    );
-  }
 
   return server;
 }

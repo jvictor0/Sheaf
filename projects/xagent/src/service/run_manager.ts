@@ -75,15 +75,6 @@ export type InspectRunResult = {
   };
 };
 
-export type XagentSddListFields = {
-  readonly role: string;
-  readonly plan: string;
-  readonly task?: number;
-  readonly cwd: string;
-  readonly brief_path: string;
-  readonly dispatched_at: string;
-};
-
 export type XagentListRow = {
   readonly run_id: string;
   readonly harness: string;
@@ -95,19 +86,10 @@ export type XagentListRow = {
   readonly supervised: boolean;
   readonly created_at: string;
   readonly updated_at: string;
-  readonly sdd?: XagentSddListFields;
 };
-
-export type XagentSddTombstoneRow = {
-  readonly run_id: string;
-  readonly run_missing: true;
-  readonly sdd: XagentSddListFields;
-};
-
-export type XagentListEntry = XagentListRow | XagentSddTombstoneRow;
 
 export type ListRunsResult = {
-  readonly runs: readonly XagentListEntry[];
+  readonly runs: readonly XagentListRow[];
 };
 
 export type AwaitRunResult = {

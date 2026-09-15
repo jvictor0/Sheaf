@@ -1,0 +1,8 @@
+id: communicating-with-user
+name: communicating-with-user
+description: Write progress updates, explanations, and final reports with specific component names, purpose, relevant surrounding context, and evidence sufficient for the user to understand the work and its implications.
+targets:
+  - claude
+  - cursor
+  - pi
+  - codex

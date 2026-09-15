@@ -22,9 +22,7 @@ MCP_NAMESPACE_PREFIX = "mcp__xagent__"
 TERMINAL_PHASES = frozenset({"completed", "failed", "cancelled", "abandoned"})
 START_TOOLS = frozenset(
     {
-        "xagent_start_non_sdd",
-        "xagent_sdd_start",
-        "xagent_sdd_followup",
+        "xagent_start",
         "xagent_message",
     }
 )
@@ -36,9 +34,7 @@ SUPPORTED_TOOLS = START_TOOLS | frozenset(
     }
 )
 START_FIELDS = {
-    "xagent_start_non_sdd": ("run_id", "sequence"),
-    "xagent_sdd_start": ("agent_id", "sequence"),
-    "xagent_sdd_followup": ("agent_id", "sequence"),
+    "xagent_start": ("run_id", "sequence"),
     "xagent_message": ("run_id", "sequence"),
     "xagent_interrupt": ("run_id", "sequence"),
     "xagent_await": ("run_id", "sequence"),

@@ -14,7 +14,7 @@
     "mode": "subagent",
     "prompt": "<PROMPT>"
   },
-  "tool_name": "mcp__xagent__xagent_start_non_sdd",
+  "tool_name": "mcp__xagent__xagent_start",
   "tool_response": "{\"run_id\":\"run-claude-1\",\"sequence\":7,\"phase\":\"running\"}",
   "tool_use_id": "<TOOL_USE_ID>",
   "transcript_path": "<TRANSCRIPT_PATH>"

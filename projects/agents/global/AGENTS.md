@@ -6,8 +6,15 @@ this repository.
 ## Agentic Infrastructure
 
 If a harness, skill, CLI, installer, or other agentic infrastructure is broken,
-stop the current task and escalate to a human. Never work around broken agentic
-infrastructure.
+do a minimal investigation before stopping: inspect the relevant error and
+immediate health or configuration evidence to identify the likely cause.
+Then stop the affected task and escalate to the user with what failed, what
+you checked, and what is known or still uncertain. Do not turn unrelated work
+into an infrastructure repair project or work around the broken infrastructure.
+
+This stop-and-escalate rule does not apply when the task itself is to develop,
+debug, or repair agent infrastructure. In that case, investigate and fix it
+within the authorized scope.
 
 ## Worktrees
 

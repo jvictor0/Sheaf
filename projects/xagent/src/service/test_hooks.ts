@@ -10,9 +10,9 @@ export function isTestAdapterEnabled(): boolean {
   return process.env.XAGENT_TEST_ADAPTER === "fake";
 }
 
-function ParseSddReportTexts(): readonly string[]
+function ParseReportTexts(): readonly string[]
 {
-  const raw = process.env.XAGENT_TEST_SDD_REPORTS;
+  const raw = process.env.XAGENT_TEST_REPORTS;
   if (raw === undefined || raw.trim().length === 0)
   {
     return ["complete final assistant message"];
@@ -78,7 +78,7 @@ export function createTestAdapterFactory(): (harness: HarnessName) => HarnessAda
   return () => {
     const delayMs = parsePositiveInteger(process.env.XAGENT_TEST_DELAY_MS);
     const spawnOwnedChild = process.env.XAGENT_TEST_OWNED_CHILD === "1";
-    const reportTexts = ParseSddReportTexts();
+    const reportTexts = ParseReportTexts();
     let ownedChild: ChildProcess | undefined;
     let processIdentity = undefined as ReturnType<typeof captureOwnedProcessIdentity>;
 

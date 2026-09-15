@@ -1,0 +1,8 @@
+id: explaining-pull-requests
+name: explaining-pull-requests
+description: Write or explain pull requests with the surrounding system context, motivation, affected components, behavior changes, capabilities enabled, and bugs fixed.
+targets:
+  - claude
+  - cursor
+  - pi
+  - codex

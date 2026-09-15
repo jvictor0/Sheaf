@@ -57,7 +57,6 @@ class BlockTomlImports:
 sys.meta_path.insert(0, BlockTomlImports())
 sys.path.insert(0, __SCRIPTS_DIR__)
 import install
-import install_superpowers
 import vendor_sync
 """.replace("__SCRIPTS_DIR__", repr(str(SCRIPT_DIR)))
         completed = subprocess.run(
@@ -184,46 +183,6 @@ class SyncRefuseToClobberTests(unittest.TestCase):
                         force=False,
                     )
                 sync_openspec.assert_not_called()
-
-
-class CheckoutGitRefTests(unittest.TestCase):
-    def test_checkout_git_ref_accepts_commit_sha(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            upstream = root / "upstream"
-            upstream.mkdir()
-            init_repo(upstream)
-            (upstream / "package.json").write_text(
-                '{"name":"superpowers","version":"9.9.9"}\n',
-                encoding="utf-8",
-            )
-            (upstream / "skills").mkdir()
-            (upstream / "skills" / "demo").mkdir()
-            (upstream / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
-            commit_all(upstream, "initial")
-            sha = subprocess.run(
-                ["git", "-C", str(upstream), "rev-parse", "HEAD"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-
-            dest = root / "checkout"
-            vendor_sync.checkout_git_ref(
-                url=str(upstream),
-                dest=dest,
-                ref=sha,
-            )
-            self.assertEqual(
-                sha,
-                subprocess.run(
-                    ["git", "-C", str(dest), "rev-parse", "HEAD"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip(),
-            )
-            self.assertTrue((dest / "package.json").is_file())
 
 
 class OpenspecLockfileReuseTests(unittest.TestCase):

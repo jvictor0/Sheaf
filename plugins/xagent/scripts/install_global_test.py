@@ -20,7 +20,6 @@ from pathlib import Path
 from unittest import mock
 
 from plugins.xagent.scripts import install_global, package_xagent
-from projects.agents.scripts.install_test import assert_xagent_subagents_sdd_guidance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -32,6 +31,7 @@ HELPER_NAMES = (
     "update_plugin_cachebuster.py",
     "read_marketplace_name.py",
     "validate_plugin.py",
+    "identifier_validation.py",
 )
 FIXED_CACHEBUSTER = "test-20260725"
 XAGENT_MCP_URL = "http://127.0.0.1:9005/mcp"
@@ -43,9 +43,7 @@ EXPECTED_MCP_TOOL_NAMES = (
     "xagent_interrupt",
     "xagent_list",
     "xagent_message",
-    "xagent_sdd_followup",
-    "xagent_sdd_start",
-    "xagent_start_non_sdd",
+    "xagent_start",
 )
 
 
@@ -105,50 +103,6 @@ def create_isolated_sheaf_root(parent: Path) -> Path:
     return sheaf_root
 
 
-def create_sdd_capable_sheaf_root(parent: Path) -> tuple[Path, Path, Path]:
-    sheaf_root = create_isolated_sheaf_root(parent)
-    projects_link = sheaf_root / "projects"
-    if not projects_link.exists():
-        projects_link.symlink_to(REPO_ROOT / "projects", target_is_directory=True)
-    templates_root = parent / "superpowers-templates" / "6.2.0" / "skills"
-    implementer_template = templates_root / "subagent-driven-development" / "implementer-prompt.md"
-    implementer_template.parent.mkdir(parents=True, exist_ok=True)
-    implementer_template.write_text(
-        "\n".join(
-            [
-                "# Implementer",
-                "",
-                "```",
-                "Subagent (general-purpose):",
-                '  description: "Do the thing"',
-                "  model: [MODEL — REQUIRED: choose per SKILL.md]",
-                "  prompt: |",
-                "    You are implementing Task N: [task name]",
-                "    Read your task brief first: [BRIEF_FILE]",
-                "    [Scene-setting: where this fits, dependencies, architectural context]",
-                "    Work from: [directory]",
-                "    Write your full report to [REPORT_FILE]",
-                "```",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    work = parent / "work"
-    work.mkdir()
-    plan = work / "plan.md"
-    brief = work / "brief.md"
-    report = work / "report.md"
-    plan.write_text("# Plan\n\n## Task 1: Smoke\n\nDo it.\n", encoding="utf-8")
-    brief.write_text("Packaged SDD brief for smoke.\n", encoding="utf-8")
-    report.write_text("mutable artifact must not be stored\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=work, check=True)
-    subprocess.run(["git", "config", "user.email", "xagent@test"], cwd=work, check=True)
-    subprocess.run(["git", "config", "user.name", "xagent"], cwd=work, check=True)
-    (work / "seed.txt").write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=work, check=True)
-    subprocess.run(["git", "commit", "-qm", "seed"], cwd=work, check=True)
-    return sheaf_root, work, templates_root
 
 
 def spawn_isolated_xagent_service(
@@ -291,7 +245,7 @@ const transport = new StreamableHTTPClientTransport(new URL({service_url!r}));
 const client = new Client({{ name: "xagent-plugin-cleanup-test", version: "0.0.0" }});
 await client.connect(transport);
 const started = await client.callTool({{
-  name: "xagent_start_non_sdd",
+  name: "xagent_start",
   arguments: {{ cwd: {str(cwd)!r}, prompt: "owned child cleanup", harness: "codex" }},
 }});
 const body = started.structuredContent ?? started.content?.[0]?.text;
@@ -349,14 +303,14 @@ const client = new Client({{ name: "xagent-plugin-await-test", version: "0.0.0" 
 await client.connect(transport);
 
 const started = await client.callTool({{
-  name: "xagent_start_non_sdd",
+  name: "xagent_start",
   arguments: {{ cwd: {str(cwd)!r}, prompt: "packaged await smoke", harness: "codex" }},
 }});
 const startBody = started.structuredContent ?? started.content?.[0]?.text;
 const startParsed = typeof startBody === "string" ? JSON.parse(startBody) : startBody;
 const runId = startParsed.run_id;
 if (typeof runId !== "string" || runId.length === 0) {{
-  throw new Error(`xagent_start_non_sdd did not return a run_id: ${{JSON.stringify(startParsed)}}`);
+  throw new Error(`xagent_start did not return a run_id: ${{JSON.stringify(startParsed)}}`);
 }}
 
 const inspected = await client.callTool({{
@@ -405,92 +359,6 @@ console.log(JSON.stringify({{ event: awaitParsed.event, run_id: runId, sequence:
         raise RuntimeError(f"await probe did not deliver turn.completed: {payload!r}")
 
 
-def run_packaged_sdd_probe(
-    service_url: str,
-    log_root: Path,
-    cwd: Path,
-    *,
-    plan_path: Path,
-    brief_path: Path,
-    report_path: Path,
-) -> None:
-    probe = f"""
-import {{ join }} from "node:path";
-import Database from "better-sqlite3";
-import {{ Client }} from "@modelcontextprotocol/sdk/client/index.js";
-import {{ StreamableHTTPClientTransport }} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-
-const transport = new StreamableHTTPClientTransport(new URL({service_url!r}));
-const client = new Client({{ name: "xagent-plugin-sdd-test", version: "0.0.0" }});
-await client.connect(transport);
-
-const started = await client.callTool({{
-  name: "xagent_sdd_start",
-  arguments: {{
-    role: "implementer",
-    cwd: {str(cwd)!r},
-    plan: {str(plan_path)!r},
-    model: "fake-model",
-    harness: "codex",
-    effort: "high",
-    task: 1,
-    name: "packaged-sdd-smoke",
-    brief: {str(brief_path)!r},
-    report_out: {str(report_path)!r},
-  }},
-}});
-const startBody = started.structuredContent ?? started.content?.[0]?.text;
-const startParsed = typeof startBody === "string" ? JSON.parse(startBody) : startBody;
-const runId = startParsed.run_id;
-if (typeof runId !== "string" || runId.length === 0) {{
-  throw new Error(`xagent_sdd_start did not return a run_id: ${{JSON.stringify(startParsed)}}`);
-}}
-if (typeof startParsed.sequence !== "number") {{
-  throw new Error(`xagent_sdd_start did not return a sequence: ${{JSON.stringify(startParsed)}}`);
-}}
-
-const database = new Database(join({str(log_root)!r}, "sdd.sqlite"), {{ readonly: true }});
-const row = database.prepare(
-  "SELECT role, task FROM sdd_agents WHERE agent_id = ?",
-).get(runId);
-database.close();
-if (row?.role !== "implementer" || row?.task !== 1) {{
-  throw new Error(`expected immutable sdd_agents row: ${{JSON.stringify(row)}}`);
-}}
-
-const expectedReport = "packaged sanitized SDD report";
-const awaited = await client.callTool({{
-  name: "xagent_await",
-  arguments: {{
-    run_id: runId,
-    after_sequence: startParsed.sequence,
-  }},
-}});
-const awaitBody = awaited.structuredContent ?? awaited.content?.[0]?.text;
-const awaitParsed = typeof awaitBody === "string" ? JSON.parse(awaitBody) : awaitBody;
-if (awaitParsed.event !== "turn.completed") {{
-  throw new Error(`xagent_await did not settle on turn.completed: ${{JSON.stringify(awaitParsed)}}`);
-}}
-if (awaitParsed.report?.text !== expectedReport) {{
-  throw new Error(`unexpected SDD report: ${{JSON.stringify(awaitParsed.report)}}`);
-}}
-
-await client.callTool({{ name: "xagent_close", arguments: {{ run_id: runId }} }});
-await client.close();
-console.log(JSON.stringify({{ event: awaitParsed.event, run_id: runId }}));
-"""
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", probe],
-        cwd=REPO_ROOT / "projects" / "xagent",
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-        timeout=60,
-    )
-    payload = json.loads(result.stdout.strip())
-    if payload.get("event") != "turn.completed":
-        raise RuntimeError(f"sdd probe did not deliver turn.completed: {payload!r}")
 
 
 class PackageXagentOutputTests(unittest.TestCase):
@@ -852,37 +720,6 @@ class PackageXagentOutputTests(unittest.TestCase):
                     cwd,
                 )
 
-    def test_packaged_mcp_sdd_smoke_delivers_report_via_generic_await(self) -> None:
-        # Exercise xagent_sdd_start plus generic xagent_await over the plugin
-        # MCP path. The v2 ledger stores identity only; the report lives in
-        # turn.completed and is delivered by xagent_await with run_id.
-        #
-        with tempfile.TemporaryDirectory(prefix="xagent-package-sdd-test-") as tempdir:
-            destination = Path(tempdir) / "package"
-            package_xagent.build_package(destination)
-
-            sheaf_root, work, templates_root = create_sdd_capable_sheaf_root(Path(tempdir))
-            log_root = sheaf_root / "data" / "xagent"
-            plan_path = work / "plan.md"
-            brief_path = work / "brief.md"
-            report_path = work / "report.md"
-            with isolated_xagent_service(
-                sheaf_root,
-                extra_env={
-                    "XAGENT_TEST_ADAPTER": "fake",
-                    "XAGENT_TEST_DELAY_MS": "800",
-                    "XAGENT_TEST_SDD_REPORTS": "packaged sanitized SDD report",
-                    "SUPERPOWERS_TEMPLATES_ROOT": str(templates_root),
-                },
-            ) as (_service_process, port):
-                run_packaged_sdd_probe(
-                    f"http://127.0.0.1:{port}/mcp",
-                    log_root,
-                    work,
-                    plan_path=plan_path,
-                    brief_path=brief_path,
-                    report_path=report_path,
-                )
 
 
 class GlobalPluginInstallTests(unittest.TestCase):
@@ -1128,13 +965,9 @@ if args == ["plugin", "list"]:
         packaged_skill = (
             self.destination / "skills" / "xagent-subagents" / "SKILL.md"
         ).read_text(encoding="utf-8")
-        assert_xagent_subagents_sdd_guidance(self, packaged_skill)
-        self.assertIn("xagent_sdd_start", packaged_skill)
-        self.assertIn("xagent_sdd_followup", packaged_skill)
         self.assertNotIn("xagent_sdd_await", packaged_skill)
         self.assertNotIn("xagent_sdd_close", packaged_skill)
-        for role in ("implementer", "reviewer", "fixer", "re-reviewer"):
-            self.assertIn(role, packaged_skill)
+        self.assertIn("xagent_start", packaged_skill)
         self.assertIn("report", packaged_skill.lower())
         self.assertIn("deadline_seconds", packaged_skill)
         self.assertIn("no longer", packaged_skill.lower())
@@ -1465,7 +1298,7 @@ class AllHarnessDistributionTests(unittest.TestCase):
             content = path.read_text(encoding="utf-8")
             self.assertTrue(content.startswith("---\n"), "frontmatter must stay first")
             self.assertIn(install_global.SKILL_MARKER, content)
-            self.assertIn("## Superpowers SDD", content)
+            self.assertIn("## Generic Delegation", content)
             self.assertIn(source.split("---\n", 2)[2].strip()[:60], content)
 
     def test_skill_install_is_idempotent(self) -> None:

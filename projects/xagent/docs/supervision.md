@@ -38,92 +38,17 @@ Returns `{ "exiting": true }`, stops accepting new connections, closes every own
 | `/exit` | `POST` | Orderly shutdown |
 | `/mcp` | `POST` | Streamable HTTP MCP |
 
-The control plane is unauthenticated: `/mcp` has no token, no peer-credential check, and no unix-socket option. The bind host and DNS-rebinding guards mitigate the LAN and browser vectors, but loopback is not the same as same-user trust — any local account on the host can POST to `127.0.0.1:9005/mcp` and start a fully unsandboxed agent (`xagent_start_non_sdd` accepts any absolute existing `cwd`, and the Codex adapter passes `--dangerously-bypass-approvals-and-sandbox`) running as the service's user. This is an acceptable posture on a single-user dev machine and is the explicit trust assumption of the current design; a shared-token or unix-socket transport is the cheap hardening if that assumption ever breaks (review I3).
+The control plane is unauthenticated: `/mcp` has no token, no peer-credential check, and no unix-socket option. The bind host and DNS-rebinding guards mitigate the LAN and browser vectors, but loopback is not the same as same-user trust — any local account on the host can POST to `127.0.0.1:9005/mcp` and start a fully unsandboxed agent (`xagent_start` accepts any absolute existing `cwd`, and the Codex adapter passes `--dangerously-bypass-approvals-and-sandbox`) running as the service's user. This is an acceptable posture on a single-user dev machine and is the explicit trust assumption of the current design; a shared-token or unix-socket transport is the cheap hardening if that assumption ever breaks (review I3).
 
-The nine MCP tools exposed by the service:
+The seven MCP tools exposed by the service:
 
-1. `xagent_start_non_sdd` — create a run from an absolute existing `cwd`, a `prompt`, a `harness`, and an optional `mode`/`policy`.
+1. `xagent_start` — create a run from an absolute existing `cwd`, a `prompt`, a `harness`, and an optional `mode`/`policy`.
 2. `xagent_message` — send a new user message to a running worker.
 3. `xagent_await` — block until the next deliverable event after `after_sequence`.
 4. `xagent_inspect` — return the compact phase/sequence snapshot for a run without blocking.
 5. `xagent_list` — list service-owned runs newest first (recovery, not progress polling).
 6. `xagent_interrupt` — request a cooperative interrupt of the active turn.
 7. `xagent_close` — close the run and release owned process resources.
-8. `xagent_sdd_start` — render a Superpowers SDD role prompt, reserve the ledger row, and start the owned provider session.
-9. `xagent_sdd_followup` — submit a fix or re-review follow-up on an existing SDD session.
-
-Dedicated `xagent_sdd_await` and `xagent_sdd_close` tools are deleted; controllers await and close SDD runs with the generic `xagent_await` / `xagent_close` tools keyed by `run_id`.
-
-## Superpowers SDD facade
-
-Superpowers subagent-driven development (SDD) uses two facade tools on top of the generic supervision stack. Controllers MUST use these tools for implementer, reviewer, fixer, and re-reviewer turns instead of assembling raw prompts. Use `xagent_sdd_followup` (or a fresh `fixer` / `re-reviewer` start) for work dispatch; `xagent_message` is legal on SDD runs for unstructured answers only.
-
-### Tool contracts
-
-#### `xagent_sdd_start`
-
-Input (discriminated by `role`):
-
-- Common fields: absolute existing `cwd`, absolute `plan`, `model`, `harness`, `effort`, optional `policy`, optional `note`.
-- `implementer`: `task`, `name`, absolute `brief`, absolute `report_out` (path the agent writes), optional `context`.
-- `reviewer` with `task` (task-scoped): absolute `brief`, absolute `implementer_report` (implementer's existing report the reviewer reads), `base`, `head`, optional absolute `constraints`, and `diff` unless the plan workspace already holds the derivable `review-<base>..<head>.diff`.
-- `reviewer` without `task` (whole-branch): absolute `brief`, `description`, `base`, `head`. Whole-branch reviewer sessions are single-turn (`start` → await → `close`) with no follow-up.
-- `fixer`: `task`, absolute `brief`, absolute `findings`, `findings_text`, non-empty `tests` array, absolute `report_out` (path the agent writes), optional `round` (default 1).
-- `re-reviewer`: `task`, absolute `brief`, absolute `findings`, absolute `fixer_report` (fixer's existing report the re-reviewer reads), `base`, `head`, optional `round` (default 1), and `diff` unless the derivable review-package file exists.
-
-Success output:
-
-```json
-{
-  "run_id": "<stable xagent run id>",
-  "sequence": <pre-turn cursor>,
-  "brief_path": "<absolute brief path>",
-  "report_out_path": "<absolute resolved report path when the role writes one>",
-  "prompt_path": "<absolute rendered prompt path when the role uses one>",
-  "renderer_path": "<absolute dispatch-prompt path when the role uses one>"
-}
-```
-
-`fixer` omits `prompt_path` and `renderer_path`. Roles that do not write a report omit `report_out_path`. The result never includes copied brief text, findings text, or rendered prompt bodies.
-
-#### `xagent_sdd_followup`
-
-Input (discriminated by `kind`):
-
-- `fix` (implementer or fixer sessions): `run_id`, `round`, absolute `findings`, `findings_text`, non-empty `tests` array, absolute `report_out`.
-- `re-review` (reviewer or re-reviewer sessions): `run_id`, `round`, absolute `findings`, absolute `fixer_report`, `base`, `head`, and `diff` unless the derivable review-package file exists.
-
-Success output:
-
-```json
-{
-  "run_id": "<same run id>",
-  "sequence": <pre-turn cursor>
-}
-```
-
-Await and close with the generic tools: `xagent_await({ "run_id", "after_sequence" })` and `xagent_close({ "run_id" })`. On successful completion, consume the sanitized final assistant report from `report.text` in the await result.
-
-### Prompt rendering prerequisites
-
-SDD start and re-review follow-ups render prompts through the trusted Python executable at `<service repoRoot>/projects/agents/utils/dispatch-prompt`. The renderer subprocess uses the canonicalized `cwd` from the start request as its working directory; the controller's own cwd is not consulted.
-
-Rendering also requires an installed Superpowers template tree. By default `dispatch-prompt` reads templates from the installed Superpowers plugin cache; operators may pin templates with `SUPERPOWERS_TEMPLATES_ROOT` or the renderer's `--templates-root` flag (surfaced through the SDD prompt layer for tests). Missing Python 3, a missing trusted renderer, or missing templates fail before any ledger row or provider process is created, with structured MCP codes `sdd_python_missing`, `sdd_renderer_missing`, `sdd_renderer_failed`, `sdd_renderer_bad_input`, `sdd_renderer_output_invalid`, or `sdd_prompt_unreadable` rather than a generic `tool_failed`.
-
-### SDD ledger database
-
-- Path: `<service logRoot>/sdd.sqlite` where `logRoot` is `resolveXagentLogRoot(repoRoot)` (typically `<sheafRoot>/data/xagent`).
-- Schema version: `user_version = 2` with a single immutable `sdd_agents` table. The ledger column for the run identity remains `agent_id`; the public MCP tools name that same value `run_id`.
-- Permissions: the log root directory and `sdd.sqlite` (+ WAL sidecars) are owner-only (`0700` directory, `0600` files).
-- Rows are written once at dispatch and never updated or deleted. Mutable state — phase, delivered reports, submitted prompts, failures — lives in the supervisor-owned run directory at `<log_root>/<run_id>/`, not in SQLite.
-- A v1 ledger file is refused outright; there is no migration path from `sdd_sessions` / `sdd_turns`.
-
-### Generic-tool behavior on SDD runs
-
-- `xagent_message` is legal on SDD-owned `run_id`s for unstructured answers; work dispatch (fix / re-review) still goes through `xagent_sdd_followup` or a fresh start.
-- Controllers await and close SDD runs with `xagent_await` and `xagent_close` keyed by `run_id`.
-- Consume the sanitized final assistant report from `report.text` in the await result (`turn.completed`); do not treat the mutable Superpowers report file on disk as the delivered report.
-
 ## Final envelope
 
 A successful `xagent_await` returns the complete sanitized final assistant report inline:

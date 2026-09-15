@@ -19,16 +19,15 @@ There are two client surfaces, and which one you have depends on your harness:
 
 | Surface | Available when | Covers |
 |---|---|---|
-| HTTP MCP tools (`xagent_*`) | your harness has the `xagent` MCP server attached at `http://127.0.0.1:9005/mcp` | everything, including Superpowers SDD |
-| Packaged CLI (`xagent`) | always, once the plugin is installed | generic delegation only — the CLI has no SDD verbs |
+| HTTP MCP tools (`xagent_*`) | your harness has the `xagent` MCP server attached at `http://127.0.0.1:9005/mcp` | all supervised delegation |
+| Packaged CLI (`xagent`) | always, once the plugin is installed | all supervised delegation |
 
 Confirm the MCP tools before relying on them: list your available tools and
-look for `xagent_start_non_sdd`. The packaged launcher lives at
+look for `xagent_start`. The packaged launcher lives at
 `$HOME/.agents/plugins/plugins/xagent/scripts/xagent`.
 
 **Pi ships without built-in MCP by design.** On Pi, use the packaged CLI for
-generic delegation, and do not attempt Superpowers SDD through this service —
-escalate instead.
+delegation.
 
 If the service is unhealthy or unreachable, or the MCP tools are missing on a
 harness that should have them, surface broken agentic infrastructure and
@@ -42,126 +41,9 @@ Packaged xagent defaults persisted logs to the Sheaf central log root;
 set `XAGENT_LOG_ROOT` only when intentionally validating or isolating logs
 somewhere else.
 
-## Superpowers SDD
-
-Superpowers subagent-driven development (SDD) dispatches through the xagent SDD
-MCP facade, then awaits, messages, and closes like any other supervised run.
-The dedicated SDD await and close facade tools are deleted: a late watchdog
-event once landed after `turn.completed`, the v1 turn row stayed `running`,
-followup said "await it", that SDD await returned without resolving it, and
-message said "await it before messaging" — naming the tool that had just
-failed. The agent was alive, idle, and permanently unreachable, with no repair
-tool. Controllers use `xagent_await` / `xagent_close` with the `run_id`
-returned by the dispatch tools — the same name the generic lifecycle tools
-take, unchanged. `deadline_seconds` is no longer an agent-facing await input.
-
-For every implementer, reviewer, fixer, re-reviewer, and whole-branch reviewer
-turn, use:
-
-```text
-xagent_sdd_start
-→ independent controller work
-→ one long xagent_await(run_id, after_sequence)
-→ consume report.text
-→ xagent_sdd_followup for same-agent fix or re-review when the agent is live
-→ one long xagent_await
-→ xagent_close(run_id) when finished
-```
-
-`xagent_sdd_start` accepts exactly four start roles: `implementer`, `reviewer`
-(with `task` for a task review, without for a whole-branch review), `fixer`,
-and `re-reviewer`. The role is the role the agent *starts* as and never
-changes — a later fix follow-up on an implementer does not rewrite the ledger
-row to `fixer`. Pass `model` (not a retired `agent` field) for the provider
-model. Report paths are named by direction: `report_out` for `implementer`
-and `fixer` (the path the agent writes); `implementer_report` for a
-task-scoped `reviewer` (the implementer's existing report it reads);
-`fixer_report` for a `re-reviewer` (the fixer's existing report it reads).
-A whole-branch `reviewer` takes no report path. The start call renders the
-role prompt through the trusted `dispatch-prompt` executable in the service
-checkout, inserts one immutable `sdd_agents` row, and returns `run_id`,
-`sequence`, `brief_path`, and — when the role writes a report —
-`report_out_path`, plus `prompt_path` / `renderer_path` when the role uses
-them (fixer omits those two). The call returns once the turn is durably
-started, not when it completes — awaiting completion is `xagent_await`'s job.
-Record the returned `run_id` and `sequence` cursor. The returned `sequence`
-is the pre-turn supervision cursor; it is not a provider JSONL position.
-Pass it to `xagent_await` as `after_sequence` with that same `run_id`.
-
-`xagent_sdd_followup` is a same-agent convenience: it renders and submits, writes
-nothing to the ledger, and returns `{ run_id, sequence }`. Kind `fix`
-requires `report_out` (the path the agent appends to); kind `re-review`
-requires `fixer_report` (the fixer's existing report it reads). While the agent
-is live, use followup for fix or re-review rounds — do not start a fresh agent
-merely to send that follow-up. A whole-branch `reviewer` (no `task`) is
-single-turn: `xagent_sdd_start` → await → `xagent_close`; a later whole-branch
-review round means a new `xagent_sdd_start`.
-
-### Recovery when the agent is not live
-
-When `xagent_sdd_followup` returns `sdd_agent_not_live`, dispatch a fresh agent
-with `xagent_sdd_start` for the same plan and task, passing the original brief:
-role `fixer` when the dead agent started as `implementer` or `fixer`, and role
-`re-reviewer` when it started as `reviewer` or `re-reviewer`. When followup
-returns `sdd_agent_busy`, call `xagent_await` — the agent is mid-turn.
-`xagent_list` shows dispatches that never became runs as `run_missing: true`
-tombstones.
-
-### Reports, messages, and retention
-
-After `xagent_sdd_start` or `xagent_sdd_followup`, do independent controller
-work until it is exhausted, then enter one long `xagent_await` with the latest
-`sequence`. Healthy provider deltas, tools, raw events, status, and healthy
-watchdog verdicts never complete an await and never enter the leader context.
-An await ends on news, not on a clock: while the supervisor vouches for the run,
-progress pings keep one await holding indefinitely.
-
-On successful completion, consume the sanitized final assistant report from
-`report.text` in the await result — that text lives in the durable
-`turn.completed` event, not in a ledger column. Do not read the intermediate
-transcript, tail logs, summarize progress for the leader, or read the mutable
-Superpowers report file on disk. If the service completes without final text,
-treat that as `missing_final_report` and escalate.
-
-`xagent_message` is legal on SDD runs and is recorded like any other submission
-(as a `turn.submitted` event). Use it for unstructured answers and chit-chat —
-for example answering a worker that stopped with `NEEDS_CONTEXT`. It is *not*
-how you dispatch work: a fix or re-review round must go through
-`xagent_sdd_followup` (or a fresh `fixer` / `re-reviewer` start when the agent
-is not live).
-
-`<log_root>/<run_id>/` is the only copy of that agent's reports and submitted
-prompts. Deleting a run directory referenced by the ledger destroys evidence;
-treat ledger-referenced run directories as evidence, not cache.
-
-`renderer_path` names the `dispatch-prompt` that rendered the turn. It is
-always the service checkout's copy, never the run cwd's: a worktree's own
-renderer is worker-writable and is deliberately not trusted. If your branch
-changes the renderer or the Superpowers templates, those changes do not affect
-dispatch until they land on the service's checkout.
-
-Worker-facing text is worker-facing. `context`, `name`, `description`, and
-`findings_text` are rendered straight into the subagent's prompt, and the
-service rejects any of them containing an `xrun_...` run id — a dispatched
-worker has no xagent access and cannot act on your session bookkeeping.
-
-While a Superpowers SDD agent is healthy and the controller has no independent
-work, do not poll at a short fixed interval. Specifically, do not poll
-`write_stdin`, `xagent_list`, xagent logs, terminal status, or unchanged MCP
-inspect output merely to observe progress. Inspect supervision state only after
-attention, a supervision stop-vouching wakeup, or an explicit user status
-request.
-
-If the xagent SDD MCP facade, Conductor-managed xagent service, trusted
-`dispatch-prompt` renderer, or required Superpowers templates are unavailable,
-surface broken agentic infrastructure. Do not fall back to native subagents,
-generic `xagent_start_non_sdd` as a work dispatch, quiet `xagent supervise`, or
-terminal polling for Superpowers SDD turns.
-
 ## Generic Delegation
 
-Use the sections below for review, worker, and other delegation outside
-Superpowers SDD.
+Use the sections below for reviews, implementation, fixes, and other delegation.
 
 ### Supervision Flow
 
@@ -169,7 +51,7 @@ The controller flow is:
 
 ```text
 verify Conductor reports xagent healthy
-→ xagent_start_non_sdd(cwd, prompt, harness/model/policy)
+→ xagent_start(cwd, prompt, harness/model/policy)
 → perform independent boss work
 → one xagent_await(run_id, after_sequence)
 → consume report.text, or handle compact attention
@@ -178,7 +60,7 @@ verify Conductor reports xagent healthy
 
 Record the returned `run_id` and `after_sequence` cursor.
 
-After `xagent_start_non_sdd`, do independent controller work until it is exhausted.
+After `xagent_start`, do independent controller work until it is exhausted.
 Then enter one long `xagent_await` with the latest cursor. Healthy provider
 deltas, tools, raw events, status, and healthy watchdog verdicts never
 complete an await and never enter the leader context.
@@ -192,14 +74,10 @@ When await returns compact attention instead of completion, read the attention
 payload, act only at the controller layer, and call `xagent_await` again with
 the returned cursor only when continuing supervision.
 
-`xagent_message` sends unstructured user input to a run. On SDD runs it is
-legal and durable (see Superpowers SDD). It is still not how you dispatch work.
-
-Anything the templates have no slot for — "the tree has uncommitted work from
-a cancelled sibling run", "ignore the stray build output" — goes in the
-optional `note` on any `xagent_sdd_start` role or `xagent_sdd_followup` kind.
-It is appended verbatim under a `## Controller Note` heading. Do not smuggle
-it into a findings list or a constraints file.
+Use `xagent_message` to submit follow-up work or answer a worker on the same
+run. Pass the complete instructions in `text`, including any review findings,
+fix requirements, and context. Record the returned `sequence`, then await that
+turn with `xagent_await`. Close the run with `xagent_close` when finished.
 
 ### Long Awaits Need a Patient HTTP Client
 
@@ -216,9 +94,8 @@ the supervisor was still vouching, the run is still alive: recover it with
 
 `xagent_list` returns service-owned runs newest first. Use it when a start
 response was lost, a client died mid-await, or you need to find an orphaned
-run to close. SDD-owned rows carry an `sdd` block naming their role, plan,
-task, cwd, and agent, so a row identifies itself. This is a recovery tool,
-not a progress-polling tool.
+run to close. Rows identify the run and its provider, phase, and timestamps.
+This is a recovery tool, not a progress-polling tool.
 
 ### Reading a Failure
 
@@ -259,7 +136,7 @@ Issue one application-level blocking await per wait cycle. The quiet client may
 reissue shorter HTTP MCP request chunks under the hood (≤240 seconds) until that
 deadline; treat those as an implementation detail, not a polling loop. Surface
 the MCP discovery failure rather than hiding it. Use this fallback only when the
-Conductor-managed service is healthy and the work is outside Superpowers SDD.
+Conductor-managed service is healthy.
 
 ### Watchdog Boundary
 
@@ -274,7 +151,7 @@ interrupts, kills, restarts, edits for, or otherwise steers the worker.
 
 ### Review Routing
 
-For review tasks, prefer a Claude-backed reviewer through `xagent_start_non_sdd`
+For review tasks, prefer a Claude-backed reviewer through `xagent_start`
 with the `claude_code` harness:
 
 - `opus`: strongest reviewer for subtle architecture, security, correctness,

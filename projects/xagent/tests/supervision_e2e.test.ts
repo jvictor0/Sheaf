@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -24,27 +22,7 @@ import type {
   WatchdogVerdict,
 } from "../src/supervision/types.js";
 import { Supervisor } from "../src/supervision/supervisor.js";
-import {
-  startMcpService,
-  structuredToolBody,
-} from "./support/mcp_service.js";
 
-function DigestLedgerDurable(logRoot: string): string
-{
-  // Hash the durable WAL pair. Exclude -shm (non-deterministic). Leaving the
-  // first store open after killAbruptly keeps frames in -wal; a write during
-  // reopen changes db or wal and fails this digest.
-  //
-  const databasePath = path.join(logRoot, "sdd.sqlite");
-  const hash = createHash("sha256");
-  hash.update(readFileSync(databasePath));
-  const walPath = `${databasePath}-wal`;
-  if (existsSync(walPath))
-  {
-    hash.update(readFileSync(walPath));
-  }
-  return hash.digest("hex");
-}
 
 const x_FixtureDir = path.join(process.cwd(), "tests", "fixtures", "watchdog");
 const x_PackagedMcpPath = path.join(
@@ -295,7 +273,7 @@ test("complete fake-provider service lifecycle through packaged MCP declaration"
   try {
     const cwd = await mkdtemp(path.join(tmpdir(), "xagent-e2e-cwd-"));
     const startResult = asBody(await firstClient.callTool({
-      name: "xagent_start_non_sdd",
+      name: "xagent_start",
       arguments: { cwd, prompt: "implement the task", harness: "codex" },
     }));
     assert.equal(startResult.isError ?? false, false);
@@ -434,7 +412,7 @@ test("silence attention is delivered to a controller through xagent_await", asyn
   try {
     const cwd = await mkdtemp(path.join(tmpdir(), "xagent-e2e-attention-cwd-"));
     const startResult = asBody(await client.callTool({
-      name: "xagent_start_non_sdd",
+      name: "xagent_start",
       arguments: { cwd, prompt: "work then go silent", harness: "codex" },
     }));
     const runId = startResult.body.run_id as string;
@@ -505,7 +483,7 @@ test("cursor deduplication: a second await after the completion sequence does no
   try {
     const cwd = await mkdtemp(path.join(tmpdir(), "xagent-e2e-dedup-cwd-"));
     const startResult = asBody(await client.callTool({
-      name: "xagent_start_non_sdd",
+      name: "xagent_start",
       arguments: { cwd, prompt: "produce a final report", harness: "codex" },
     }));
     const runId = startResult.body.run_id as string;
@@ -614,100 +592,3 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   const promise = new Promise<T>((res) => { resolve = res; });
   return { promise, resolve };
 }
-
-test("a run-create failure after the insert surfaces as a tombstone in xagent_list", async () => {
-  const service = await startMcpService({ failRunCreate: true });
-  try {
-    await assert.rejects(
-      () => service.startSddImplementer({ task: 4 }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /run create failed/);
-        return true;
-      },
-    );
-    const body = await service.listRuns();
-    const runs = body.runs as Array<Record<string, unknown>>;
-    const tombstone = runs.find((entry) => entry.run_missing === true);
-    assert.ok(tombstone, "the failed dispatch must be visible as a tombstone");
-    assert.equal((tombstone.sdd as { role: string }).role, "implementer");
-    assert.equal(service.ledger().ListAll().length, 1);
-  } finally {
-    await service.close();
-  }
-});
-
-test("a run-start failure after create leaves a run record, not a tombstone", async () => {
-  const service = await startMcpService({ failRunStart: true });
-  try {
-    await assert.rejects(
-      () => service.startSddImplementer({ task: 4 }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /run start failed/);
-        return true;
-      },
-    );
-    assert.equal(service.ledger().ListAll().length, 1);
-    const body = await service.listRuns();
-    const runs = body.runs as Array<Record<string, unknown>>;
-    const row = runs.find(
-      (entry) => (entry.sdd as { role?: string } | undefined)?.role === "implementer",
-    );
-    assert.ok(row, "the failed dispatch must remain listable with its sdd block");
-    assert.equal(row.run_missing, undefined);
-    assert.equal(typeof row.phase, "string");
-  } finally {
-    await service.close();
-  }
-});
-
-test("a service restart leaves the ledger byte-identical and steers the controller to a fresh fixer", async () => {
-  const logRoot = await mkdtemp(path.join(tmpdir(), "sdd-e2e-"));
-  try {
-    const first = await startMcpService({ logRoot });
-    const implementer = await first.startSddImplementer({ task: 4 });
-    // killAbruptly skips sddStore.Close so a populated -wal remains. Digest
-    // the durable db+wal pair after the second service has closed, so any
-    // reopen write is folded into the comparison rather than hidden in WAL.
-    //
-    await first.killAbruptly();
-    // Pin the invariant DigestLedgerDurable depends on. Its existsSync(-wal)
-    // guard degrades silently to hashing the main file alone, which is exactly
-    // the weakness this test was fixed for — so assert the abrupt teardown
-    // really did leave frames in the WAL. If a future change re-closes the
-    // store on the abrupt path, this fails loudly instead of the digest
-    // quietly asserting less.
-    //
-    const walPath = path.join(logRoot, "sdd.sqlite-wal");
-    assert.ok(existsSync(walPath), "abrupt teardown must leave a WAL behind");
-    assert.ok(statSync(walPath).size > 0, "the surviving WAL must contain frames");
-    const digestBefore = DigestLedgerDurable(logRoot);
-
-    const second = await startMcpService({ logRoot });
-    try {
-      const result = await second.sddFollowupResult({
-        kind: "fix",
-        run_id: implementer.run_id,
-        round: 1,
-        findings: second.artifact("task-4-findings.md"),
-        findings_text: "x",
-        tests: ["npm test"],
-        report_out: second.artifact("task-4-report.md"),
-      });
-      assert.equal(result.isError, true);
-      const body = structuredToolBody(result);
-      assert.equal(body.error, "sdd_agent_not_live");
-      assert.deepEqual(
-        (body.details as { recovery: unknown }).recovery,
-        { tool: "xagent_sdd_start", role: "fixer" },
-      );
-    } finally {
-      await second.close();
-    }
-    const digestAfter = DigestLedgerDurable(logRoot);
-    assert.equal(digestAfter, digestBefore);
-  } finally {
-    await rm(logRoot, { recursive: true, force: true });
-  }
-});

@@ -1,0 +1,8 @@
+id: fixing-bugs
+name: fixing-bugs
+description: Fix bugs by first observing a reproducing test fail, understanding and explaining the causal fix, then implementing a clean correction and verifying it. Only explicit user instructions can override this sequence.
+targets:
+  - claude
+  - cursor
+  - pi
+  - codex

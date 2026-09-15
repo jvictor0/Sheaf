@@ -111,9 +111,8 @@ comparison report), plus the per-candidate artifacts from step 2/3
 (candidate definition files and their `estimate.py` results) — all three
 are legitimate outputs of a run, not just the first two, so do not delete
 the per-candidate files once you've written them. You do not modify
-`openspec-superpowers-workflow` or any other workflow file, you do not write
+any workflow file, you do not write
 to the database, and you do not dispatch any implementation work — your job
 ends at the comparison report and the chosen annotation file, with the
 per-candidate artifacts left alongside them as supporting evidence. A human
-(or, in a future change, `openspec-superpowers-workflow` itself) is the
-consumer of your output.
+is the consumer of your output.

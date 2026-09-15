@@ -36,8 +36,7 @@ never overwritten — the installer fails and tells you to move it aside.
 Pi ships without built-in MCP on purpose ("It intentionally does not include
 built-in MCP, sub-agents, permission popups…" — pi `docs/usage.md`). There is
 no registry to write, so a Pi controller reaches xagent through the packaged
-CLI only, and cannot drive Superpowers SDD (the SDD facade is MCP-only). The
-skill says so; this is a harness constraint, not a missing install step.
+CLI for the same supervised delegation workflow.
 
 ## Installing
 
@@ -47,7 +46,7 @@ make xagent-plugin-install-global
 
 After installation, open a new conversation in each harness so it reloads the
 skill and MCP metadata. To confirm, ask the harness to list its tools and look
-for `xagent_start_non_sdd`; on Codex you can also check `codex plugin list` reports
+for `xagent_start`; on Codex you can also check `codex plugin list` reports
 xagent installed and enabled at `$HOME/.agents/plugins/plugins/xagent`.
 
 For recovery, rerun `make xagent-plugin-install-global`. If the installed
@@ -96,31 +95,10 @@ or any effective group change that can invalidate positional trust, run
 `/hooks` in Codex, approve the xagent observer and stop commands, then verify
 activation in a disposable `$CODEX_HOME` (never by editing live trust blindly):
 
-1. Dispatch `xagent_start_non_sdd` or an SDD start/follow-up and confirm a
+1. Dispatch `xagent_start` or `xagent_message` and confirm a
    pending state file appears under the state root for that session.
 2. First Stop blocks with the exact run id and `after_sequence`.
 3. Unchanged second Stop for the same revision passes.
 4. An attention/cursor advance re-arms a new blockable revision.
 5. Completion or close clears pending state for that run.
 6. Native-subagent PostToolUse events leave the parent session state unchanged.
-
-## One-time SDD ledger reprovision (schema v2)
-
-The SDD ledger was redesigned as an insert-only per-agent dispatch index at
-schema version 2. There is no migration: v1 rows were already inconsistent and
-their forensic content survives in the run directories they point at.
-
-Once, before starting a service build that includes the v2 ledger:
-
-1. Stop the xagent service.
-2. Delete `<log_root>/sdd.sqlite`, `<log_root>/sdd.sqlite-wal`, and
-   `<log_root>/sdd.sqlite-shm`.
-3. Start the service. It provisions schema v2 on first open.
-
-A service that finds a ledger whose `user_version` is not 2 refuses to start the
-SDD manager and names the files to delete, stating that v1 data is not migrated.
-
-**Run directories are the system of record.** Reports and submitted prompts for
-SDD agents live only in `<log_root>/<run_id>/normalized.jsonl`. Any cleanup,
-retention, or garbage-collection tooling must treat a run directory whose
-`run_id` appears in `sdd_agents.agent_id` as evidence, not cache.

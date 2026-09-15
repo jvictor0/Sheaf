@@ -1,0 +1,8 @@
+id: single-provider-code-review
+name: single-provider-code-review
+description: Run one native code review through xagent with the additional checks from multi-provider-code-review, defaulting to Astra, without cross-checking or reviewer debate.
+targets:
+  - claude
+  - cursor
+  - pi
+  - codex

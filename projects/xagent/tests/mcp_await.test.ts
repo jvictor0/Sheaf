@@ -13,8 +13,6 @@ import {
 import {
   x_DefaultAwaitDeadlineSeconds,
   x_MaxAwaitDeadlineSeconds,
-  FixFollowupSchema,
-  ImplementerStartSchema,
   XagentAwaitInputSchema,
   XagentMessageInputSchema,
   XagentStartInputSchema,
@@ -50,33 +48,6 @@ test("await deadline defaults to 7000 seconds and rejects larger values", async 
     deadline_seconds: 7001,
   });
   assert.equal(rejected.success, false);
-});
-
-test("awaiting an SDD run delivers report text from the event log with no ledger write", async () => {
-  async function* scriptedTurn(): AsyncIterable<AdapterEvent> {
-    yield {
-      type: "message.completed",
-      message_id: "message_sdd_await",
-      role: "assistant",
-      text: "event-log report text",
-    };
-    yield {
-      type: "turn.completed",
-      final_text: "event-log report text",
-      provider_thread_id: "fake-thread-sdd-await",
-    };
-  }
-  const service = await startMcpService({
-    adapterFactory: () => new FakeHarnessAdapter({ scriptedEvents: [scriptedTurn()] }),
-  });
-  try {
-    const started = await service.startSddImplementer();
-    const result = await service.await(started.run_id, started.sequence, 30);
-    assert.equal(result.event, "turn.completed");
-    assert.equal(typeof (result as { report?: { text: string } }).report?.text, "string");
-  } finally {
-    await service.close();
-  }
 });
 
 test("routine deltas and tool events do not settle an await; completion does", async () => {
@@ -607,81 +578,13 @@ function deferred<T = void>(): {
   };
 }
 
-test("worker-facing prompt text rejects embedded controller run ids", () => {
-  const leaked = ImplementerStartSchema.safeParse({
-    role: "implementer",
-    cwd: "/tmp/worktree",
-    plan: "/tmp/plan.md",
-    model: "grok-4.5",
-    harness: "cursor",
-    effort: "high",
-    task: 4,
-    name: "Superpowers managed plugins",
-    brief: "/tmp/brief.md",
-    report_out: "/tmp/report.md",
-    context: "Keep the reviewer session xrun_20260727192847117_b30af348 open for re-review.",
-  });
-  assert.equal(leaked.success, false);
-  assert.match(
-    leaked.error?.issues.map((issue) => issue.message).join("; ") ?? "",
-    /xrun_20260727192847117_b30af348/,
-  );
-
-  const clean = ImplementerStartSchema.safeParse({
-    role: "implementer",
-    cwd: "/tmp/worktree",
-    plan: "/tmp/plan.md",
-    model: "grok-4.5",
-    harness: "cursor",
-    effort: "high",
-    task: 4,
-    name: "Superpowers managed plugins",
-    brief: "/tmp/brief.md",
-    report_out: "/tmp/report.md",
-    context: "Task 3 is complete. Implement Task 4 only.",
-  });
-  assert.equal(clean.success, true);
-});
-
-test("fix follow-up findings text rejects embedded controller run ids", () => {
-  const leaked = FixFollowupSchema.safeParse({
-    kind: "fix",
-    run_id: "xrun_20260726000000000_00000001",
-    round: 1,
-    findings: "/tmp/findings.md",
-    findings_text: "Resume against xrun_20260727192847117_b30af348 when done.",
-    tests: ["npm test"],
-    report_out: "/tmp/report.md",
-  });
-  assert.equal(leaked.success, false);
-
-  const clean = FixFollowupSchema.safeParse({
-    kind: "fix",
-    run_id: "xrun_20260726000000000_00000001",
-    round: 1,
-    findings: "/tmp/findings.md",
-    findings_text: "Important #1: the marker must follow the frontmatter.",
-    tests: ["npm test"],
-    report_out: "/tmp/report.md",
-  });
-  assert.equal(clean.success, true);
-});
-
 test("the run-id guard exempts backtick-quoted ids and covers message and prompt", () => {
   // Quoting xagent's own run ids is legitimate when xagent is the subject.
   assert.equal(
-    ImplementerStartSchema.safeParse({
-      role: "implementer",
+    XagentStartInputSchema.safeParse({
       cwd: "/tmp/worktree",
-      plan: "/tmp/plan.md",
-      model: "grok-4.5",
-      harness: "cursor",
-      effort: "high",
-      task: 4,
-      name: "Superpowers managed plugins",
-      brief: "/tmp/brief.md",
-      report_out: "/tmp/report.md",
-      note: "A cancelled sibling `xrun_20260727192847117_b30af348` left work in the tree.",
+      harness: "codex",
+      prompt: "A cancelled sibling `xrun_20260727192847117_b30af348` left work in the tree.",
     }).success,
     true,
   );

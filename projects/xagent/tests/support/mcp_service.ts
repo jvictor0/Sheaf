@@ -12,13 +12,6 @@ import type { HarnessAdapter } from "../../src/adapters/types.js";
 import { createXagentMcpHandler } from "../../src/service/mcp.js";
 import { XagentRunManager } from "../../src/service/run_manager.js";
 import {
-  AsSddRunManagerPort,
-  CreateSddManager,
-  type SddManager,
-  type SddRunManagerPort,
-} from "../../src/service/sdd_manager.js";
-import { CreateSddAgentStore } from "../../src/service/sdd_store.js";
-import {
   createShutdownController,
   createXagentServer,
   type XagentServer,
@@ -73,25 +66,13 @@ export type McpServiceContext = {
   readonly runManager: XagentRunManager;
   readonly client: Client;
   readonly logRoot: string;
-  readonly ledger: () => ReturnType<typeof CreateSddAgentStore>;
 };
 
 export type WithMcpServiceOptions = {
-  readonly includeSddManager?: boolean;
   readonly repoRoot?: string;
   readonly logRoot?: string;
   readonly policy?: SupervisionPolicy;
   readonly adapterFactory?: () => HarnessAdapter;
-  readonly sddManager?: SddManager;
-  readonly sddStore?: ReturnType<typeof CreateSddAgentStore>;
-  readonly createSddManager?: (deps: {
-    readonly runManager: XagentRunManager;
-    readonly repoRoot: string;
-    readonly logRoot: string;
-  }) => {
-    readonly manager: SddManager;
-    readonly store: ReturnType<typeof CreateSddAgentStore>;
-  };
   readonly clientName?: string;
   readonly awaitLivenessPingIntervalMs?: number;
 };
@@ -104,32 +85,6 @@ export type NormalizedLogEvent = {
 
 export type StartedMcpService = {
   startRun(prompt: string): Promise<{ run_id: string; sequence: number }>;
-  startSddImplementer(options?: { readonly task?: number }): Promise<{
-    run_id: string;
-    sequence: number;
-  }>;
-  startSddFixer(options?: { readonly task?: number }): Promise<{
-    run_id: string;
-    sequence: number;
-  }>;
-  sddFollowup(input: {
-    readonly kind: "fix";
-    readonly run_id: string;
-    readonly round: number;
-    readonly findings: string;
-    readonly findings_text: string;
-    readonly tests: readonly string[];
-    readonly report_out: string;
-  }): Promise<{ run_id: string; sequence: number }>;
-  sddFollowupResult(input: {
-    readonly kind: "fix";
-    readonly run_id: string;
-    readonly round: number;
-    readonly findings: string;
-    readonly findings_text: string;
-    readonly tests: readonly string[];
-    readonly report_out: string;
-  }): Promise<ToolCallResult>;
   listRuns(): Promise<Record<string, unknown>>;
   await(
     runId: string,
@@ -149,7 +104,6 @@ export type StartedMcpService = {
   killAbruptly(): Promise<void>;
   ensureClient(): Promise<Client>;
   close(): Promise<void>;
-  ledger(): ReturnType<typeof CreateSddAgentStore>;
   readonly runManager: XagentRunManager;
   readonly logRoot: string;
 };
@@ -159,8 +113,6 @@ export type StartMcpServiceOptions = {
   readonly logRoot?: string;
   readonly policy?: SupervisionPolicy;
   readonly adapterFactory?: () => HarnessAdapter;
-  readonly failRunCreate?: boolean;
-  readonly failRunStart?: boolean;
   readonly awaitLivenessPingIntervalMs?: number;
 };
 
@@ -178,7 +130,7 @@ export async function startMcpService(
   const ownsLogRoot = options.logRoot === undefined;
   const logRoot = options.logRoot ?? await mkdtemp(path.join(tmpdir(), "xagent-await-filter-"));
   const cwd = await mkdtemp(path.join(tmpdir(), "xagent-await-cwd-"));
-  const artifactsDir = await mkdtemp(path.join(tmpdir(), "xagent-sdd-artifacts-"));
+  const artifactsDir = await mkdtemp(path.join(tmpdir(), "xagent-test-artifacts-"));
   const repoRoot = options.repoRoot ?? process.cwd();
   const runManager = new XagentRunManager({
     repoRoot,
@@ -190,73 +142,11 @@ export async function startMcpService(
     },
   });
 
-  const sddStore = CreateSddAgentStore(logRoot);
-  const basePort = AsSddRunManagerPort(runManager);
-  const sddRunPort: SddRunManagerPort = (options.failRunCreate === true
-    || options.failRunStart === true)
-    ? {
-      allocateRunId: () => basePort.allocateRunId(),
-      async create(createOptions)
-      {
-        if (options.failRunCreate === true)
-        {
-          // Fail after the ledger insert and before a run record exists so the
-          // row surfaces as an xsvc-13 run_missing tombstone.
-          //
-          throw new Error("run create failed");
-        }
-        return basePort.create(createOptions);
-      },
-      async start(runId)
-      {
-        if (options.failRunStart === true)
-        {
-          throw new Error("run start failed");
-        }
-        return basePort.start(runId);
-      },
-      submit: (runId, text) => basePort.submit(runId, text),
-      inspect: (runId) => basePort.inspect(runId),
-      close: (runId) => basePort.close(runId),
-      has: (runId) => basePort.has(runId),
-      listOwnedRuns: (input) => basePort.listOwnedRuns(input),
-    }
-    : basePort;
-  const sddManager = CreateSddManager({
-    store: sddStore,
-    runManager: sddRunPort,
-    repoRoot,
-    async canonicalizeCwd(candidate: string): Promise<string>
-    {
-      return candidate;
-    },
-    async renderPrompt(input)
-    {
-      const promptPath = path.join(cwd, `dispatch-${input.role}.md`);
-      return {
-        prompt: {
-          path: promptPath,
-          text: `Rendered ${input.role} prompt.\n`,
-        },
-        metadata: {
-          promptPath,
-          rendererPath: path.join(repoRoot, "projects", "agents", "utils", "dispatch-prompt"),
-        },
-      };
-    },
-  });
-
-  const planPath = path.join(cwd, "plan.md");
-  const briefPath = path.join(cwd, "brief.md");
-  await writeFile(planPath, "# plan\n", "utf8");
-  await writeFile(briefPath, "Implement await without ledger report binding.\n", "utf8");
-
   let server: XagentServer | undefined;
   let client: Client | undefined;
   let transport: StreamableHTTPClientTransport | undefined;
   let mcpReady: Promise<void> | undefined;
   let closed = false;
-  let storeClosed = false;
 
   async function EnsureMcp(): Promise<Client>
   {
@@ -272,11 +162,6 @@ export async function startMcpService(
           closeRuns: async () =>
           {
             await runManager.closeAll();
-            if (!storeClosed)
-            {
-              sddStore.Close();
-              storeClosed = true;
-            }
           },
           closeServer: async () =>
           {
@@ -299,7 +184,6 @@ export async function startMcpService(
         ]);
         const mcpHandler = createXagentMcpHandler({
           runManager,
-          sddManager,
           getAllowedHosts: () => [...allowedHosts],
           getAllowedOrigins: () => [...allowedOrigins],
           ...(options.awaitLivenessPingIntervalMs === undefined
@@ -401,15 +285,6 @@ export async function startMcpService(
       await server.close().catch(() => {});
     }
     await runManager.closeAll().catch(() => {});
-    // Genuine abrupt: leave the store handle open so a populated -wal remains
-    // for the next open to recover. Clean shutdown checkpoints and would make
-    // the restart test exercise only the settled-file case.
-    //
-    if (!options.abrupt && !storeClosed)
-    {
-      sddStore.Close();
-      storeClosed = true;
-    }
     // cwd / artifactsDir are not the durability surface under test.
     //
     await rm(cwd, { recursive: true, force: true });
@@ -431,88 +306,6 @@ export async function startMcpService(
         prompt,
         harness: "codex",
         mode: "subagent",
-      });
-    },
-    async startSddImplementer(startOptions = {})
-    {
-      const task = startOptions.task ?? 4;
-      const reportPath = Artifact(`implementer-task-${task}-report.md`);
-      await EnsureArtifact(reportPath, "");
-      const body = await CallToolOrThrow("xagent_sdd_start", {
-        role: "implementer",
-        cwd,
-        plan: planPath,
-        model: "fake-model",
-        harness: "codex",
-        effort: "high",
-        task,
-        name: "await-no-ledger-write",
-        brief: briefPath,
-        report_out: reportPath,
-      });
-      return {
-        run_id: String(body.run_id),
-        sequence: Number(body.sequence),
-      };
-    },
-    async startSddFixer(startOptions = {})
-    {
-      const task = startOptions.task ?? 4;
-      const findingsPath = Artifact(`fixer-task-${task}-findings.md`);
-      const reportPath = Artifact(`fixer-task-${task}-report.md`);
-      await EnsureArtifact(findingsPath, "Finding 1: the gate is missing.\n");
-      await EnsureArtifact(reportPath, "");
-      const body = await CallToolOrThrow("xagent_sdd_start", {
-        role: "fixer",
-        cwd,
-        plan: planPath,
-        model: "fake-model",
-        harness: "codex",
-        effort: "high",
-        task,
-        brief: briefPath,
-        findings: findingsPath,
-        findings_text: "Finding 1: the gate is missing.",
-        tests: ["npm test"],
-        report_out: reportPath,
-      });
-      return {
-        run_id: String(body.run_id),
-        sequence: Number(body.sequence),
-      };
-    },
-    async sddFollowup(input)
-    {
-      await EnsureArtifact(input.findings, `${input.findings_text}\n`);
-      const body = await CallToolOrThrow("xagent_sdd_followup", {
-        kind: input.kind,
-        run_id: input.run_id,
-        round: input.round,
-        findings: input.findings,
-        findings_text: input.findings_text,
-        tests: [...input.tests],
-        report_out: input.report_out,
-      });
-      return {
-        run_id: String(body.run_id),
-        sequence: Number(body.sequence),
-      };
-    },
-    async sddFollowupResult(input)
-    {
-      await EnsureArtifact(input.findings, `${input.findings_text}\n`);
-      if (!existsSync(input.report_out))
-      {
-        await EnsureArtifact(input.report_out, "");
-      }
-      return CallTool("xagent_sdd_followup", {
-        kind: input.kind,
-        run_id: input.run_id,
-        round: input.round,
-        findings: input.findings,
-        findings_text: input.findings_text,
-        tests: [...input.tests],
-        report_out: input.report_out,
       });
     },
     async listRuns()
@@ -567,10 +360,6 @@ export async function startMcpService(
     {
       await Teardown({ abrupt: true });
     },
-    ledger()
-    {
-      return sddStore;
-    },
     async close()
     {
       await Teardown({ abrupt: false });
@@ -583,7 +372,6 @@ export async function withMcpService(
   options: WithMcpServiceOptions = {},
 ): Promise<void>
 {
-  const includeSddManager = options.includeSddManager ?? true;
   const repoRoot = options.repoRoot ?? process.cwd();
   const ownsLogRoot = options.logRoot === undefined;
   const logRoot = options.logRoot ?? await mkdtemp(path.join(tmpdir(), "xagent-mcp-"));
@@ -596,27 +384,11 @@ export async function withMcpService(
       watchdog: {},
     },
   });
-  let sddStore: ReturnType<typeof CreateSddAgentStore> | undefined = options.sddStore;
-  let sddManager: SddManager | undefined = includeSddManager ? options.sddManager : undefined;
-  if (includeSddManager && sddManager === undefined && options.createSddManager !== undefined)
-  {
-    const created = options.createSddManager({ runManager, repoRoot, logRoot });
-    sddManager = created.manager;
-    sddStore = created.store;
-  }
-  if (includeSddManager && sddManager === undefined && options.createSddManager === undefined)
-  {
-    throw new Error(
-      "withMcpService requires sddManager or createSddManager when includeSddManager is true.",
-    );
-  }
-
   let server: XagentServer | undefined;
   const shutdownController = createShutdownController({
     closeRuns: async () =>
     {
       await runManager.closeAll();
-      sddStore?.Close();
     },
     closeServer: async () =>
     {
@@ -639,7 +411,6 @@ export async function withMcpService(
   ]);
   const mcpHandler = createXagentMcpHandler({
     runManager,
-    ...(sddManager === undefined ? {} : { sddManager }),
     getAllowedHosts: () => [...allowedHosts],
     getAllowedOrigins: () => [...allowedOrigins],
     ...(options.awaitLivenessPingIntervalMs === undefined
@@ -674,11 +445,6 @@ export async function withMcpService(
       runManager,
       client,
       logRoot,
-      ledger()
-      {
-        assert.ok(sddStore !== undefined, "SDD ledger was not constructed");
-        return sddStore;
-      },
     });
   }
   finally
@@ -690,7 +456,6 @@ export async function withMcpService(
       await server.close();
     }
     await runManager.closeAll();
-    sddStore?.Close();
     if (ownsLogRoot)
     {
       await rm(logRoot, { recursive: true, force: true });

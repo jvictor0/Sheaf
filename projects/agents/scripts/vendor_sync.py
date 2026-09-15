@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync vendored OpenSpec and Superpowers trees under projects/agents/vendor."""
+"""Sync vendored OpenSpec under projects/agents/vendor."""
 
 from __future__ import annotations
 
@@ -19,9 +19,8 @@ REQUIRED_PIN_FIELDS = ("url", "revision", "version", "retrieved_at")
 
 OPENSPEC_NPM_PACKAGE = "@fission-ai/openspec"
 OPENSPEC_URL = "https://github.com/Fission-AI/OpenSpec.git"
-SUPERPOWERS_URL = "https://github.com/obra/superpowers.git"
 
-TOOLS = ("openspec", "superpowers")
+TOOLS = ("openspec",)
 
 
 class VendorDirtyError(RuntimeError):
@@ -173,42 +172,11 @@ def resolve_openspec_pin(ref: str) -> dict[str, str]:
     }
 
 
-def resolve_superpowers_pin(tree_dir: Path) -> dict[str, str]:
-    package_json = tree_dir / "package.json"
-    if not package_json.is_file():
-        raise RuntimeError(f"missing package.json in Superpowers tree: {tree_dir}")
-    data = json.loads(package_json.read_text(encoding="utf-8"))
-    version = str(data.get("version", "")).strip()
-    if not version:
-        raise RuntimeError(f"Superpowers package.json missing version: {package_json}")
-
-    revision = run_checked(
-        ["git", "-C", str(tree_dir), "rev-parse", "HEAD"]
-    ).strip()
-    return {
-        "url": SUPERPOWERS_URL,
-        "revision": revision,
-        "version": version,
-        "retrieved_at": utc_now_iso(),
-    }
-
-
 def replace_directory(destination: Path, source: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination)
-
-
-def checkout_git_ref(*, url: str, dest: Path, ref: str) -> None:
-    """Fetch an explicit git revision (tag, branch, or commit SHA) into dest."""
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-    run_checked(["git", "init"], cwd=dest)
-    run_checked(["git", "remote", "add", "origin", url], cwd=dest)
-    run_checked(["git", "fetch", "--depth", "1", "origin", ref], cwd=dest)
-    run_checked(["git", "checkout", "--force", "FETCH_HEAD"], cwd=dest)
 
 
 def package_json_version(path: Path) -> str:
@@ -290,24 +258,6 @@ def sync_openspec(repo_root: Path, ref: str) -> dict[str, str]:
     return pin
 
 
-def sync_superpowers(repo_root: Path, ref: str) -> dict[str, str]:
-    vendor_dir = vendor_tool_dir(repo_root, "superpowers")
-    tree_dir = vendor_dir / "tree"
-
-    with tempfile.TemporaryDirectory(prefix="sheaf-superpowers-vendor-") as tempdir:
-        staging_tree = Path(tempdir) / "tree"
-        checkout_git_ref(url=SUPERPOWERS_URL, dest=staging_tree, ref=ref)
-        pin = resolve_superpowers_pin(staging_tree)
-        shutil.rmtree(staging_tree / ".git")
-        nested_gitignore = staging_tree / ".gitignore"
-        if nested_gitignore.exists():
-            nested_gitignore.unlink()
-        replace_directory(tree_dir, staging_tree)
-
-    write_vendor_toml(vendor_dir / "VENDOR.toml", pin)
-    return pin
-
-
 def sync_tool(
     *,
     repo_root: Path,
@@ -322,14 +272,12 @@ def sync_tool(
             f"vendor tree for {tool} has local modifications; "
             "re-run with --force to clobber"
         )
-    if tool == "openspec":
-        return sync_openspec(repo_root, ref)
-    return sync_superpowers(repo_root, ref)
+    return sync_openspec(repo_root, ref)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Sync vendored OpenSpec or Superpowers trees."
+        description="Sync vendored OpenSpec."
     )
     parser.add_argument(
         "--tool",
@@ -340,10 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ref",
         required=True,
-        help=(
-            "Upstream pin: npm version/dist-tag for openspec, or git "
-            "tag/branch/commit SHA for superpowers"
-        ),
+        help="Upstream pin: npm version/dist-tag for openspec",
     )
     parser.add_argument(
         "--force",

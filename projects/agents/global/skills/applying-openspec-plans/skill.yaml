@@ -1,0 +1,8 @@
+id: applying-openspec-plans
+name: applying-openspec-plans
+description: Plan and apply an OpenSpec change as coarse, independently testable work units with detailed implementation briefs, alternating Codex and Claude implementers, and multi-provider reviews or single-provider reviews when requested.
+targets:
+  - claude
+  - cursor
+  - pi
+  - codex

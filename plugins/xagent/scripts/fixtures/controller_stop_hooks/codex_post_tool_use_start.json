@@ -10,7 +10,7 @@
     "mode": "subagent",
     "prompt": "<PROMPT>"
   },
-  "tool_name": "mcp__xagent__xagent_start_non_sdd",
+  "tool_name": "mcp__xagent__xagent_start",
   "tool_response": {
     "content": [
       {

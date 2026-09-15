@@ -11,8 +11,14 @@ initiative, or perform adjacent helpful work.
 If there is an obvious next follow-up, mention it in the report instead of doing
 it automatically.
 
-Skip test-driven development rules in this mode. Do not add, change, or run
-tests unless explicitly asked.
+When the user explicitly requests incremental mode or keyboard mode, skip
+test-driven development rules and do not add, change, or run tests unless
+explicitly asked. That request counts as an explicit override of `fixing-bugs`'
+test-first and test-running requirements for the requested edits. It does not
+waive understanding and explaining a bug fix.
+
+Merely inferring this mode from a small or precisely worded edit is not an
+explicit override: `fixing-bugs` still applies to bug corrections in that case.
 
 Do not build unless explicitly asked.
 

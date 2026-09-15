@@ -1,8 +1,0 @@
-id: openspec-superpowers-workflow
-name: openspec-superpowers-workflow
-description: Convert an OpenSpec change into a Superpowers implementation plan and optionally execute it with subagent-driven development; use when replacing openspec apply with a Superpowers plan-and-execute workflow.
-targets:
-  - claude
-  - cursor
-  - pi
-  - codex

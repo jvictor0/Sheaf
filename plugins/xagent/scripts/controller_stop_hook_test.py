@@ -121,7 +121,7 @@ class PayloadContractTests(unittest.TestCase):
             payload = {
                 "hook_event_name": "PostToolUse",
                 "session_id": "session-1",
-                "tool_name": "xagent_start_non_sdd",
+                "tool_name": "xagent_start",
                 "tool_response": direct_string_error,
             }
 
@@ -165,7 +165,7 @@ class ObserverStateTests(unittest.TestCase):
             root = Path(tempdir)
             hook.observe(
                 response_payload(
-                    tool_name="mcp__xagent__xagent_start_non_sdd",
+                    tool_name="mcp__xagent__xagent_start",
                     result={"run_id": "run-1", "sequence": 7},
                 ),
                 "codex",
@@ -173,8 +173,8 @@ class ObserverStateTests(unittest.TestCase):
             )
             hook.observe(
                 response_payload(
-                    tool_name="xagent_sdd_followup",
-                    result={"agent_id": "run-1", "sequence": 8},
+                    tool_name="xagent_message",
+                    result={"run_id": "run-1", "sequence": 8},
                 ),
                 "codex",
                 root,
@@ -224,7 +224,7 @@ class ObserverStateTests(unittest.TestCase):
             for run_id, sequence in (("run-a", 4), ("run-b", 2), ("run-c", 9)):
                 hook.observe(
                     response_payload(
-                        tool_name="xagent_start_non_sdd",
+                        tool_name="xagent_start",
                         result={"run_id": run_id, "sequence": sequence},
                     ),
                     "codex",
@@ -248,7 +248,7 @@ class ObserverStateTests(unittest.TestCase):
             hook.observe(
                 response_payload(
                     session_id="shared",
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "claude-run", "sequence": 1},
                 ),
                 "claude",
@@ -257,7 +257,7 @@ class ObserverStateTests(unittest.TestCase):
             hook.observe(
                 response_payload(
                     session_id="shared",
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "codex-run", "sequence": 2},
                 ),
                 "codex",
@@ -266,7 +266,7 @@ class ObserverStateTests(unittest.TestCase):
             hook.observe(
                 response_payload(
                     session_id="other",
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "other-run", "sequence": 3},
                 ),
                 "codex",
@@ -282,7 +282,7 @@ class ObserverStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             payload = response_payload(
-                tool_name="xagent_start_non_sdd",
+                tool_name="xagent_start",
                 result={"run_id": "run-1", "sequence": 7},
             )
             payload["agent_id"] = "native-agent"
@@ -297,7 +297,7 @@ class ObserverStateTests(unittest.TestCase):
             root = Path(tempdir)
             hook.observe(
                 response_payload(
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "run-1", "sequence": 7},
                 ),
                 "codex",
@@ -327,8 +327,8 @@ class ObserverStateTests(unittest.TestCase):
             for run_id in ("run-1", "run-2"):
                 hook.observe(
                     response_payload(
-                        tool_name="xagent_sdd_start",
-                        result={"agent_id": run_id, "sequence": 1},
+                        tool_name="xagent_start",
+                        result={"run_id": run_id, "sequence": 1},
                     ),
                     "codex",
                     root,
@@ -349,7 +349,7 @@ class ObserverStateTests(unittest.TestCase):
                 hook.observe(
                     response_payload(
                         session_id=session,
-                        tool_name="xagent_start_non_sdd",
+                        tool_name="xagent_start",
                         result={"run_id": f"run-{phase}", "sequence": 1},
                     ),
                     "codex",
@@ -374,7 +374,7 @@ class StopGuardTests(unittest.TestCase):
             for run_id, sequence in (("run-1", 7), ("run-2", 99)):
                 hook.observe(
                     response_payload(
-                        tool_name="xagent_start_non_sdd",
+                        tool_name="xagent_start",
                         result={"run_id": run_id, "sequence": sequence},
                     ),
                     "codex",
@@ -396,7 +396,7 @@ class StopGuardTests(unittest.TestCase):
             root = Path(tempdir)
             hook.observe(
                 response_payload(
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "run-1", "sequence": 7},
                 ),
                 "codex",
@@ -412,7 +412,7 @@ class StopGuardTests(unittest.TestCase):
             root = Path(tempdir)
             hook.observe(
                 response_payload(
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "run-1", "sequence": 7},
                 ),
                 "codex",
@@ -439,7 +439,7 @@ class StopGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             start = response_payload(
-                tool_name="xagent_start_non_sdd",
+                tool_name="xagent_start",
                 result={"run_id": "run-1", "sequence": 1},
             )
             hook.observe(start, "codex", root)
@@ -481,7 +481,7 @@ class StopGuardTests(unittest.TestCase):
                 ],
                 input=json.dumps(
                     response_payload(
-                        tool_name="xagent_start_non_sdd",
+                        tool_name="xagent_start",
                         result={"run_id": "run-1", "sequence": 7},
                     )
                 ),
@@ -570,7 +570,7 @@ class ConcurrencyTests(unittest.TestCase):
             root = Path(tempdir)
             hook.observe(
                 response_payload(
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "run-1", "sequence": 1},
                 ),
                 "codex",
@@ -582,7 +582,7 @@ class ConcurrencyTests(unittest.TestCase):
                 hook.observe(
                     response_payload(
                         session_id=session_id,
-                        tool_name="xagent_start_non_sdd",
+                        tool_name="xagent_start",
                         result={"run_id": "run-1", "sequence": 1},
                     ),
                     "codex",
@@ -593,7 +593,7 @@ class ConcurrencyTests(unittest.TestCase):
                     args=(
                         response_payload(
                             session_id=session_id,
-                            tool_name="xagent_start_non_sdd",
+                            tool_name="xagent_start",
                             result={"run_id": "run-2", "sequence": 2},
                         ),
                         "codex",
@@ -625,7 +625,7 @@ class ConcurrencyTests(unittest.TestCase):
             hook.observe(
                 response_payload(
                     session_id="locked",
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "run-1", "sequence": 1},
                 ),
                 "codex",
@@ -659,7 +659,7 @@ class ConcurrencyTests(unittest.TestCase):
             hook.observe(
                 response_payload(
                     session_id="cleanup",
-                    tool_name="xagent_start_non_sdd",
+                    tool_name="xagent_start",
                     result={"run_id": "run-1", "sequence": 1},
                 ),
                 "codex",

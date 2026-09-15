@@ -32,11 +32,6 @@ CLIENT_SERVICE_FILES = frozenset(
         "config.d.ts.map",
         "config.js",
         "config.js.map",
-        "dispatch_manifest.d.ts",
-        "dispatch_manifest.d.ts.map",
-        "dispatch_manifest.generated.json",
-        "dispatch_manifest.js",
-        "dispatch_manifest.js.map",
         "tool_schemas.d.ts",
         "tool_schemas.d.ts.map",
         "tool_schemas.js",
@@ -109,7 +104,6 @@ def copy_packaged_dependencies(asset_root: Path) -> None:
 
 
 def build_package(destination: Path) -> None:
-    generate_dispatch_manifest()
     destination = destination.resolve()
     if destination.exists():
         if not destination.is_dir():
@@ -174,35 +168,7 @@ def describe_snapshot_drift(
     return lines
 
 
-def check_dispatch_manifest() -> None:
-    script = XAGENT_ROOT / "scripts" / "generate_dispatch_manifest.ts"
-    if not script.is_file():
-        raise RuntimeError(
-            f"dispatch manifest generator missing at {script}; "
-            "cannot verify the checked-in manifest"
-        )
-    run(
-        ["npx", "tsx", str(script), "--check"],
-        cwd=XAGENT_ROOT,
-    )
-
-
-def generate_dispatch_manifest() -> None:
-    # Install/package smoke fixtures copy only dist/ + package.json into a
-    # scratch repo. There is no TypeScript source or generator there — the
-    # checked-in JSON already shipped in dist is the artifact to package.
-    #
-    script = XAGENT_ROOT / "scripts" / "generate_dispatch_manifest.ts"
-    if not script.is_file():
-        return
-    run(
-        ["npx", "tsx", str(script)],
-        cwd=XAGENT_ROOT,
-    )
-
-
 def check_tracked_assets_current(*, validate: bool = False) -> None:
-    check_dispatch_manifest()
     with tempfile.TemporaryDirectory(prefix="xagent-plugin-check-") as tempdir:
         package_root = Path(tempdir) / "package"
         build_package(package_root)
@@ -223,7 +189,6 @@ def check_tracked_assets_current(*, validate: bool = False) -> None:
 
 
 def stage_runtime() -> None:
-    generate_dispatch_manifest()
     copy_runtime(ASSET_ROOT)
 
 

@@ -268,10 +268,9 @@ prints `valid` and exits 0 otherwise.
 
 ## Persistent agents and the spanning-session split
 
-The `openspec-superpowers-workflow` skill's "Provider and model rules" now
-deliberately keep an implementer's and a reviewer's session **open and
-resumed** across fix/re-review rounds, rather than spawning a fresh session
-per round (cheaper, keeps context). That broke a session-granularity
+The retired `openspec-superpowers-workflow` skill kept implementer and
+reviewer sessions **open and resumed** across fix/re-review rounds. Those
+historical sessions broke a session-granularity
 assumption the original cost model (D5) depended on: a "round-0" implementer
 session can, in practice, still contain turns performed *after* the task's
 first review verdict — pure session-level apportionment would misattribute
@@ -375,9 +374,8 @@ weight.
 ## Not yet integrated
 
 The decomposer (`prompts/decomposer.md`) is usable today only via **manual
-subagent dispatch** — there is no automated hook into
-`openspec-superpowers-workflow` or any other planning flow. Wiring the
-decomposer into that workflow (so a plan's task list and its
+subagent dispatch** — there is no automated hook into a planning flow. Wiring the
+decomposer into a planning workflow (so a plan's task list and its
 `.assignments.yaml` sibling are generated together, instead of the
 decomposer being invoked by hand against an already-written plan) is
 explicitly deferred to a future change (design.md's Migration Plan, step 3).

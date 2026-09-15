@@ -27,7 +27,7 @@ from vendor_manifest import loads as load_vendor_manifest
 
 SUPPORTED_TARGETS = ("claude", "cursor", "pi", "codex")
 SCOPES = ("repo", "global", "all")
-RETIRED_REPO_SKILL_IDS = ("xagent-subagents",)
+RETIRED_REPO_SKILL_IDS = ("xagent-subagents", "openspec-superpowers-workflow")
 # Owned by plugins/xagent, which installs it globally for Claude, Cursor, and
 # Pi (Codex receives it inside the plugin package). This installer never
 # renders it. It still prunes STALE copies this installer wrote in the past —
@@ -36,7 +36,7 @@ RETIRED_REPO_SKILL_IDS = ("xagent-subagents",)
 # not as an unmanaged obstacle.
 PLUGIN_OWNED_GLOBAL_SKILL_IDS = ("xagent-subagents",)
 PLUGIN_OWNED_MARKER = "sheaf-xagent-managed: DO NOT EDIT"
-OBSOLETE_GLOBAL_SKILL_IDS = ("smoke-test", "xagent-subagents")
+OBSOLETE_GLOBAL_SKILL_IDS = ("smoke-test", "xagent-subagents", "openspec-superpowers-workflow")
 REPO_TARGET_DIRS = {
     "claude": Path(".claude/skills"),
     "cursor": Path(".cursor/skills"),

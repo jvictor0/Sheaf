@@ -8,8 +8,7 @@
     "xagent": "./dist/src/main.js"
   },
   "scripts": {
-    "build": "tsc && cp src/service/dispatch_manifest.generated.json dist/src/service/",
-    "generate:dispatch-manifest": "npx tsx scripts/generate_dispatch_manifest.ts",
+    "build": "tsc",
     "start": "node dist/src/main.js",
     "service-run": "node dist/src/service_main.js",
     "test": "npm run build && node --test dist/tests/*.test.js",
@@ -19,14 +18,11 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.21",
-    "tsx": "^4.23.1",
     "typescript": "^5.8.3"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^11.10.0",
     "zod": "^3.25.76"
   }
 }

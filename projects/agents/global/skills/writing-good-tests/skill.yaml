@@ -1,0 +1,8 @@
+id: writing-good-tests
+name: writing-good-tests
+description: Write meaningful tests that catch concrete defects, derive expectations independently, exercise real behavior, and use mocks at appropriate boundaries.
+targets:
+  - claude
+  - cursor
+  - pi
+  - codex
