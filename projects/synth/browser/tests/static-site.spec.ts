@@ -67,7 +67,7 @@ test("normal generic browser flows make no backend or WebSocket requests beyond 
       filesystems: { IDBFS: "idbfs" }, mkdir() {}, mount() {}, syncfs(_populate: boolean, complete: () => void) { complete(); },
     };
     const worker = new BrowserRuntimeWorker(async () => ({
-      abiVersion: 4, uiProtocolVersion: 2, runtimeConfigVersion: 1,
+      abiVersion: 6, uiProtocolVersion: 2, runtimeConfigVersion: 1,
       filesystem,
       create: () => 1, audioOutputChannels: () => 2, initialize: () => 0, prepare: () => 0, process: () => 0, messageTick: () => 0,
       buildUiFrame: () => new ArrayBuffer(0), dispatchAction: () => 0, submitMidiEndpoints: () => 0,
@@ -99,9 +99,11 @@ for (const app of [
     page.on("request", (request) => requested.push(new URL(request.url()).pathname));
 
     await page.goto("http://127.0.0.1:4175/");
+    // Launcher rows sort by display name (mergeCatalogs): "1 Second Delay",
+    // "Braid 4", "Mini App".
     await expect.poll(() => page.locator(".synth-launcher__app").evaluateAll((rows) =>
       rows.map((element) => (element as HTMLElement).dataset.synthAppId)))
-      .toEqual(["sheaf/braid-4", "sheaf/miniapp"]);
+      .toEqual(["sheaf/one-second-delay", "sheaf/braid-4", "sheaf/miniapp"]);
 
     const discoveryRequests = requested.filter((pathname) =>
       pathname.endsWith(".json") || pathname.includes("/packages/") || pathname.includes("/rollback/"));
