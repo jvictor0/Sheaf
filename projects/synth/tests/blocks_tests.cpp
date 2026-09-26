@@ -50,6 +50,7 @@ using synth::BlockableMessage;
 using synth::ComputeSystemMessageSortKey;
 using synth::EncoderBlock;
 using synth::EncoderMidiMapping;
+using synth::EncoderShiftedJob;
 using synth::ExpandAnalogBlock;
 using synth::ExpandEncoderBlock;
 using synth::ExpandGridBlock;
@@ -108,6 +109,9 @@ bool MessageInFullyEquivalent(const MessageIn& a, const MessageIn& b) {
             return a.slotIx == b.slotIx && a.position == b.position && a.delta == b.delta;
         case MessageIn::Type::ParamSetAbsolute:
             return a.slotIx == b.slotIx && a.position == b.position && a.value == b.value;
+        case MessageIn::Type::ParamSetAbsoluteOnBank:
+            return a.bankIx == b.bankIx && a.slotIx == b.slotIx && a.position == b.position &&
+                   a.value == b.value;
         case MessageIn::Type::ParamPush:
             return a.slotIx == b.slotIx && a.position == b.position;
         case MessageIn::Type::ToggleReset:
@@ -143,6 +147,17 @@ bool MessageInFullyEquivalent(const MessageIn& a, const MessageIn& b) {
             return a.gridSlotIx == b.gridSlotIx && a.gridX == b.gridX && a.gridY == b.gridY;
         case MessageIn::Type::SelectGrid:
             return a.gridSlotIx == b.gridSlotIx && a.gridIx == b.gridIx;
+        case MessageIn::Type::AppAction:
+            return a.appActionIx == b.appActionIx && a.value == b.value;
+        case MessageIn::Type::HoldDrill:
+            return a.hasBoolValue == b.hasBoolValue && (!a.hasBoolValue || a.boolValue == b.boolValue);
+        case MessageIn::Type::Shift:
+            return a.hasBoolValue == b.hasBoolValue && (!a.hasBoolValue || a.boolValue == b.boolValue);
+        case MessageIn::Type::SceneBlendIncDec:
+        case MessageIn::Type::TempoBpmIncDec:
+            return a.delta == b.delta;
+        case MessageIn::Type::SetTempoBpmNormalized:
+            return a.value == b.value;
     }
     return false;
 }
@@ -886,6 +901,32 @@ TEST_CASE(ReconstructGridMappingsDescendingExpansionRoundTripsCanonicalMeaning) 
     REQUIRE_TRUE(actual.pressureInput->mappings == expected.pressureInput->mappings);
 }
 
+// --- D3: BlockLastFromEnd / BlockEndFromLast --------------------------------
+
+TEST_CASE(BlockLastAndEndTranslateEveryRangeBothWays) {
+    // An upward range (every CC range, every x range): end is one past the
+    // last control, and translation round-trips.
+    REQUIRE_TRUE(synth::BlockLastFromEnd(0, 16, false) == 15);
+    REQUIRE_TRUE(synth::BlockEndFromLast(0, 15, false) == 16);
+
+    // A y range that runs downward: (start 3, end 1) reads last 2.
+    REQUIRE_TRUE(synth::BlockLastFromEnd(3, 1, true) == 2);
+    // Reading the other way: a last at or above the start stores last + 1,
+    // one below stores last - 1.
+    REQUIRE_TRUE(synth::BlockEndFromLast(3, 2, true) == 1);
+    REQUIRE_TRUE(synth::BlockEndFromLast(3, 3, true) == 4);
+    REQUIRE_TRUE(synth::BlockEndFromLast(3, 5, true) == 6);
+
+    // Every pair round-trips both ways.
+    const int upwardStart = 0, upwardEnd = 16;
+    REQUIRE_TRUE(synth::BlockEndFromLast(upwardStart, synth::BlockLastFromEnd(upwardStart, upwardEnd, false), false) ==
+                 upwardEnd);
+    for (int last : {2, 3, 5}) {
+        const int end = synth::BlockEndFromLast(3, last, true);
+        REQUIRE_TRUE(synth::BlockLastFromEnd(3, end, true) == last);
+    }
+}
+
 // --- D3: ExpandEncoderBlock --------------------------------------------
 
 TEST_CASE(ExpandEncoderBlockProducesConsecutiveCcToPositionMapping) {
@@ -1555,6 +1596,51 @@ TEST_CASE(ReconstructEncoderBlocksMergesSixteenConsecutiveIntoOneBlock) {
     REQUIRE_TRUE(rows[0].block.slotIx == 0);
     REQUIRE_TRUE(rows[0].block.startPosition == 0);
     REQUIRE_TRUE(rows[0].indices.size() == 16);
+}
+
+TEST_CASE(ReconstructEncoderBlocksKeepsAShiftedTurnOutOfItsBlock) {
+    std::vector<EncoderMidiMapping> mappings;
+    for (std::size_t ix = 0; ix < 16; ++ix) {
+        mappings.push_back({.control = {.channel = 0, .cc = static_cast<std::uint8_t>(ix)}, .slotIx = 0, .position = ix});
+    }
+    mappings.back().shiftedJob = EncoderShiftedJob::SceneBlend;
+
+    const auto rows = ReconstructEncoderBlocks(mappings, false);
+    REQUIRE_TRUE(rows.size() == 2);
+    REQUIRE_TRUE(rows[0].isBlock);
+    REQUIRE_TRUE(rows[0].block.channel == 0);
+    REQUIRE_TRUE(rows[0].block.startCc == 0);
+    REQUIRE_TRUE(rows[0].block.endCc == 15);
+    REQUIRE_TRUE(rows[0].block.slotIx == 0);
+    REQUIRE_TRUE(rows[0].block.startPosition == 0);
+    REQUIRE_TRUE(rows[0].indices.size() == 15);
+    REQUIRE_TRUE(!rows[1].isBlock);
+    REQUIRE_TRUE(rows[1].indices.size() == 1);
+    REQUIRE_TRUE(rows[1].indices[0] == 15);
+}
+
+// A shifted turn never starts a run either, not only mid-run or at the end:
+// the first turn of what would otherwise be a 16-turn run carries a shifted
+// job, so it presents alone and the run starts fresh at the second turn.
+TEST_CASE(ReconstructEncoderBlocksKeepsAShiftedFirstTurnOutOfTheRunItWouldStart) {
+    std::vector<EncoderMidiMapping> mappings;
+    for (std::size_t ix = 0; ix < 16; ++ix) {
+        mappings.push_back({.control = {.channel = 0, .cc = static_cast<std::uint8_t>(ix)}, .slotIx = 0, .position = ix});
+    }
+    mappings.front().shiftedJob = EncoderShiftedJob::SceneBlend;
+
+    const auto rows = ReconstructEncoderBlocks(mappings, false);
+    REQUIRE_TRUE(rows.size() == 2);
+    REQUIRE_TRUE(!rows[0].isBlock);
+    REQUIRE_TRUE(rows[0].indices.size() == 1);
+    REQUIRE_TRUE(rows[0].indices[0] == 0);
+    REQUIRE_TRUE(rows[1].isBlock);
+    REQUIRE_TRUE(rows[1].block.channel == 0);
+    REQUIRE_TRUE(rows[1].block.startCc == 1);
+    REQUIRE_TRUE(rows[1].block.endCc == 16);
+    REQUIRE_TRUE(rows[1].block.slotIx == 0);
+    REQUIRE_TRUE(rows[1].block.startPosition == 1);
+    REQUIRE_TRUE(rows[1].indices.size() == 15);
 }
 
 TEST_CASE(ReconstructEncoderBlocksSplitsBrokenRunAtOutlier) {

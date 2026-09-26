@@ -521,7 +521,7 @@ void TestVariantCarriesNoAppearanceStrings()
     // cannot be written any more, which is the point: with the model field
     // deleted the only remaining way a retired appearance token could reach the
     // wire is the codec inventing one, and that is what the sweep below checks.
-    root.color = synth::Color::Rgb(18, 20, 22);
+    root.color = synth::kSurfaceBackground;
     row.color = synth::Color::Rgb(30, 32, 34);
     row.selected = true;
     tree.nodes.push_back(root);

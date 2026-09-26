@@ -23,9 +23,49 @@ std::vector<SystemAddressField> SystemAddressSchema(MidiProfileKind kind) {
 
 namespace {
 
-// MessageIn::Type's declaration order (ParamIncDec .. PrevParamBank) IS the
-// type ordering component of SystemMessageSortKey -- static_cast the enum
-// directly rather than maintaining a parallel table that could drift.
+// The y direction a 2-D rectangle's rows traverse in, +1 or -1: +1 when the
+// end is above the start, -1 when it is below. Every place that derives a
+// direction from a stored start/end pair -- BlockLastFromEndWide,
+// VisitRectangle, ExpandGridBlock -- goes through this one definition.
+// Reconstruction derives a run's direction from its second row instead of a
+// stored end, so it keeps its own (yDir/rowDir below); BlockEndFromLast
+// picks the write side's direction from the typed last against the start
+// (last >= start), a different comparison for a different question.
+int BlockRowDirection(int start, int end) {
+    return (start < end) ? 1 : -1;
+}
+
+// The last-control translation's one computation, widened to int64_t so it
+// cannot overflow even where int cannot hold the result: RectangleLastCorner
+// calls this for the corner pre-check, which runs before any range
+// validation guarantees a block's stored end fits inside what BlockLastFromEnd's
+// int-typed result can represent.
+std::int64_t BlockLastFromEndWide(int start, int end, bool mayRunDownward) {
+    if (!mayRunDownward) {
+        return static_cast<std::int64_t>(end) - 1;
+    }
+    return static_cast<std::int64_t>(end) - BlockRowDirection(start, end);
+}
+
+}  // namespace
+
+int BlockLastFromEnd(int start, int end, bool mayRunDownward) {
+    return static_cast<int>(BlockLastFromEndWide(start, end, mayRunDownward));
+}
+
+int BlockEndFromLast(int start, int last, bool mayRunDownward) {
+    if (!mayRunDownward) {
+        return last + 1;
+    }
+    return (last >= start) ? last + 1 : last - 1;
+}
+
+namespace {
+
+// MessageIn::Type's declaration order (ParamIncDec .. HoldDrill, Shift,
+// SceneBlendIncDec, 27 kinds) IS the type ordering component of
+// SystemMessageSortKey -- static_cast the enum directly rather than
+// maintaining a parallel table that could drift.
 int TypeOrder(MessageIn::Type type) {
     return static_cast<int>(type);
 }
@@ -90,6 +130,9 @@ SystemMessageSortKey ComputeSystemMessageSortKey(const MidiControllerSystemMessa
             key.arg1 = message.gestureIx;
             break;
         case MessageIn::Type::SetSceneBlend:
+        case MessageIn::Type::SceneBlendIncDec:
+        case MessageIn::Type::TempoBpmIncDec:
+        case MessageIn::Type::SetTempoBpmNormalized:
         case MessageIn::Type::Start:
         case MessageIn::Type::Continue:
         case MessageIn::Type::Stop:
@@ -110,6 +153,19 @@ SystemMessageSortKey ComputeSystemMessageSortKey(const MidiControllerSystemMessa
         case MessageIn::Type::SelectGrid:
             key.arg1 = message.gridSlotIx;
             key.arg2 = message.gridIx;
+            break;
+        case MessageIn::Type::ParamSetAbsoluteOnBank:
+            break;
+        case MessageIn::Type::AppAction:
+            key.arg1 = message.appActionIx;
+            break;
+        case MessageIn::Type::HoldDrill:
+            key.hasBoolValue = message.hasBoolValue;
+            key.boolValue = message.boolValue;
+            break;
+        case MessageIn::Type::Shift:
+            key.hasBoolValue = message.hasBoolValue;
+            key.boolValue = message.boolValue;
             break;
     }
 
@@ -204,36 +260,55 @@ std::size_t RectangleCellCount(int startX, int endX, int startY, int endY) {
     return width * height;
 }
 
-// D3: expansion mirrors the edit rules (ApplyMappingEdit refuses channel
+// The corner farthest from the rectangle's start on each axis, through
+// BlockLastFromEndWide -- the same widened core BlockLastFromEnd calls --
+// which is why this stays correct at the accepted field range's extremes.
+void RectangleLastCorner(int startX, int endX, int startY, int endY, std::int64_t& lastX, std::int64_t& lastY) {
+    lastX = BlockLastFromEndWide(startX, endX, false);
+    lastY = BlockLastFromEndWide(startY, endY, true);
+}
+
+// Whether (x, y) is on the controller's grid. The corner pre-check below
+// calls this for both kinds; WrldBldr's per-cell validation (ExpandSystemBlock's
+// enumeration loop, and BuildGridCell's single-button check) calls it too, so
+// the 0-7 bound has one definition. Launchpad's per-cell validation still
+// calls LaunchpadShapeSupports directly, the same function this Launchpad
+// branch calls, rather than through this function. Coordinates outside int
+// range (only reachable via the corner check's own widened arithmetic) are
+// off the tiny real grid domain by construction.
+bool GridCoordinateOnGrid(MidiProfileKind kind, LaunchpadController controller, std::int64_t x, std::int64_t y) {
+    if (kind == MidiProfileKind::WrldBldr) {
+        return x >= 0 && x <= 7 && y >= 0 && y <= 7;
+    }
+    if (x < std::numeric_limits<int>::min() || x > std::numeric_limits<int>::max() ||
+        y < std::numeric_limits<int>::min() || y > std::numeric_limits<int>::max()) {
+        return false;
+    }
+    return LaunchpadShapeSupports(controller, static_cast<int>(x), static_cast<int>(y));
+}
+
+// Expansion mirrors the edit rules (ApplyMappingEdit refuses channel
 // outside 0-15 for every kind that carries a MIDI channel).
 bool ChannelValid(std::uint8_t channel) {
     return channel <= 15;
 }
 
-// Finding 3: a block's start argument/position/index plus its cell count
-// must stay within a sane domain -- otherwise the per-cell `start + index`
-// arithmetic in the Expand* loops below can wrap std::size_t (SIZE_MAX ->
-// 0), silently producing a small index instead of failing. Reuses the same
-// 2^53 "largest exactly-representable double integer" cap the view model's
-// IsNonNegativeInteger applies to every numeric field edit (see
-// MidiConfigViewModel.cpp) -- any block field wide enough to reach this cap
-// could not have been entered through the numeric field editor anyway, so
-// this is not a tighter restriction in practice, just an explicit guard at
-// the library boundary for blocks constructed directly (as tests, or a
-// future non-UI caller, might).
-constexpr std::size_t kMaxBlockDomain = 9007199254740992ULL;  // 2^53
-
-// True when `start + count` would exceed kMaxBlockDomain OR wrap std::size_t
-// -- the single check that makes every per-cell `start + index` in the
-// Expand* loops below well-defined and within the documented domain cap.
+// True when `start + count` would wrap std::size_t -- the single check that
+// makes every per-cell `start + index` in the Expand* loops below
+// well-defined. The domain is std::size_t's own range, tested without
+// computing `start + count`, the same way ExpandGridBlock tests its cell
+// count and IsWrapSafeSuccessor tests its successor.
+//
+// The 2^53 "largest exactly-representable double integer" bound belongs to
+// the numeric field editor's double domain, where IsNonNegativeInteger
+// applies it (MidiConfigViewModel.cpp) clamped to std::size_t's max. It is
+// not restated here: a std::size_t cannot hold 2^53 on a 32-bit target, so
+// stating it in this type would bound the guard by 0 there.
 bool StartPlusCountExceedsDomain(std::size_t start, std::size_t count) {
-    if (start > kMaxBlockDomain || count > kMaxBlockDomain) {
-        return true;
-    }
-    return kMaxBlockDomain - start < count;
+    return start > std::numeric_limits<std::size_t>::max() - count;
 }
 
-// Finding 3: `cur == prev + 1` computed as written wraps std::size_t
+// `cur == prev + 1` computed as written wraps std::size_t
 // (SIZE_MAX -> 0) when prev == SIZE_MAX, which would make an unrelated
 // `cur == 0` cell look like a consecutive successor. Reconstruction must
 // treat that as a run break, never a match -- so guard the overflow
@@ -263,7 +338,9 @@ bool ExpandEncoderBlock(const EncoderBlock& block, std::vector<EncoderMidiMappin
         return false;
     }
     if (block.endCc <= block.startCc) {
-        SetReason(reason, "encoder block cc range must be non-empty (endCc > startCc)");
+        SetReason(reason, block.controlType == MidiControlType::Note
+                              ? "encoder block's last note is below its start note"
+                              : "encoder block's last cc is below its start cc");
         return false;
     }
     if (block.endCc - 1 > 127 || block.startCc > 127) {
@@ -297,7 +374,7 @@ bool ExpandEncoderBlock(const EncoderBlock& block, std::vector<EncoderMidiMappin
 
 bool ExpandAnalogBlock(const AnalogBlock& block, std::vector<AnalogMidiMapping>& out, std::string* reason) {
     if (block.endCc <= block.startCc) {
-        SetReason(reason, "analog block cc range must be non-empty (endCc > startCc)");
+        SetReason(reason, "analog block's last cc is below its start cc");
         return false;
     }
     if (block.endCc - 1 > 127 || block.startCc > 127) {
@@ -358,14 +435,14 @@ bool VisitRectangle(int startX, int endX, int startY, int endY, bool rowMajor, V
     if (endX <= startX || endY == startY) {
         return false;
     }
-    const int yDir = (startY < endY) ? 1 : -1;
+    const int rowDirection = BlockRowDirection(startY, endY);
     const std::size_t width = static_cast<std::size_t>(endX - startX);
     const std::size_t height = static_cast<std::size_t>(std::abs(endY - startY));
 
     std::size_t cellIndex = 0;
     if (rowMajor) {
         for (std::size_t row = 0; row < height; ++row) {
-            const int y = startY + static_cast<int>(row) * yDir;
+            const int y = startY + static_cast<int>(row) * rowDirection;
             for (std::size_t col = 0; col < width; ++col) {
                 const int x = startX + static_cast<int>(col);
                 visit(x, y, cellIndex);
@@ -376,7 +453,7 @@ bool VisitRectangle(int startX, int endX, int startY, int endY, bool rowMajor, V
         for (std::size_t col = 0; col < width; ++col) {
             const int x = startX + static_cast<int>(col);
             for (std::size_t row = 0; row < height; ++row) {
-                const int y = startY + static_cast<int>(row) * yDir;
+                const int y = startY + static_cast<int>(row) * rowDirection;
                 visit(x, y, cellIndex);
                 ++cellIndex;
             }
@@ -393,14 +470,39 @@ bool ExpandSystemBlock(const SystemBlock& block, std::vector<MidiControllerSyste
         SetReason(reason, "twister system messages never block (single side buttons only)");
         return false;
     }
-    // Finding 2: expansion mirrors the edit rules -- refuse channel > 15
+    // Expansion mirrors the edit rules -- refuse channel > 15
     // all-or-nothing. Launchpad's form carries no channel field at all, so
     // this only applies to WrldBldr and Generic.
     if (block.kind != MidiProfileKind::Launchpad && !ChannelValid(block.channel)) {
         SetReason(reason, "system block channel must be an integer 0-15");
         return false;
     }
-    // Finding 3: startArg + cellIndex can wrap std::size_t across the whole
+    // The 2-D forms check their start and last corner cells against the
+    // controller's grid through the same shape check the per-cell loop below
+    // applies, before computing a cell count or enumerating -- an
+    // astronomically large off-grid rectangle (a typo, or a stray digit) is
+    // refused in O(1) instead of enumerating or reserving for it.
+    if (block.kind == MidiProfileKind::WrldBldr || block.kind == MidiProfileKind::Launchpad) {
+        if (block.endX <= block.startX) {
+            SetReason(reason, "system block's last x is below its start x");
+            return false;
+        }
+        if (block.endY == block.startY) {
+            SetReason(reason, "system block y range must be non-empty (endY != startY)");
+            return false;
+        }
+        std::int64_t lastX = 0, lastY = 0;
+        RectangleLastCorner(block.startX, block.endX, block.startY, block.endY, lastX, lastY);
+        const bool startOnGrid = GridCoordinateOnGrid(block.kind, block.launchpadController, block.startX, block.startY);
+        const bool lastOnGrid = GridCoordinateOnGrid(block.kind, block.launchpadController, lastX, lastY);
+        if (!startOnGrid || !lastOnGrid) {
+            SetReason(reason, block.kind == MidiProfileKind::WrldBldr
+                                  ? "wrldbldr coordinate is outside the 0-7 grid"
+                                  : "launchpad coordinate is outside this controller's grid");
+            return false;
+        }
+    }
+    // startArg + cellIndex can wrap std::size_t across the whole
     // cell range -- refuse up front rather than risk a wrapped arg on some
     // interior cell.
     if (StartPlusCountExceedsDomain(block.startArg, block.CellCount())) {
@@ -421,20 +523,12 @@ bool ExpandSystemBlock(const SystemBlock& block, std::vector<MidiControllerSyste
     };
 
     if (block.kind == MidiProfileKind::WrldBldr || block.kind == MidiProfileKind::Launchpad) {
-        if (block.endX <= block.startX) {
-            SetReason(reason, "system block x range must be non-empty (endX > startX)");
-            return false;
-        }
-        if (block.endY == block.startY) {
-            SetReason(reason, "system block y range must be non-empty (endY != startY)");
-            return false;
-        }
         bool coordinatesValid = true;
         bool visited = VisitRectangle(
             block.startX, block.endX, block.startY, block.endY, block.rowMajor,
             [&](int x, int y, std::size_t cellIndex) {
                 if (block.kind == MidiProfileKind::WrldBldr) {
-                    if (x < 0 || x > 7 || y < 0 || y > 7) {
+                    if (!GridCoordinateOnGrid(block.kind, block.launchpadController, x, y)) {
                         coordinatesValid = false;
                         return;
                     }
@@ -449,7 +543,7 @@ bool ExpandSystemBlock(const SystemBlock& block, std::vector<MidiControllerSyste
                                            .type = block.controlType};
                     result.push_back(std::move(association));
                 } else {
-                    // Finding 4: shape-checked against and stamped with the
+                    // Shape-checked against and stamped with the
                     // block's own launchpadController variant -- previously
                     // hardcoded to LaunchpadX regardless of the block's
                     // actual variant, so e.g. ProMk3-only edge coordinates
@@ -480,7 +574,9 @@ bool ExpandSystemBlock(const SystemBlock& block, std::vector<MidiControllerSyste
     } else {
         // Generic (1-D cc run).
         if (block.endCc <= block.startCc) {
-            SetReason(reason, "system block cc range must be non-empty (endCc > startCc)");
+            SetReason(reason, block.controlType == MidiControlType::Note
+                                  ? "system block's last note is below its start note"
+                                  : "system block's last cc is below its start cc");
             return false;
         }
         if (block.endCc - 1 > 127) {
@@ -533,7 +629,7 @@ bool BuildGridCell(const GridButton& button, MidiControllerSystemMessageAssociat
             SetReason(reason, "grid button channel must be an integer 0-15");
             return false;
         }
-        if (button.x < 0 || button.x > 7 || button.y < 0 || button.y > 7) {
+        if (!GridCoordinateOnGrid(button.kind, button.launchpadController, button.x, button.y)) {
             SetReason(reason, "wrldbldr grid coordinate is outside the 0-7 grid");
             return false;
         }
@@ -618,9 +714,32 @@ bool ExpandGridButton(const GridButton& button, GridMappingExpansion& out, std::
 }
 
 bool ExpandGridBlock(const GridBlock& block, GridMappingExpansion& out, std::string* reason) {
-    if (block.endX <= block.startX || block.endY == block.startY) {
-        SetReason(reason, "grid block rectangle must have non-empty exclusive ranges");
+    if (block.endX <= block.startX) {
+        SetReason(reason, "grid block's last x is below its start x");
         return false;
+    }
+    if (block.endY == block.startY) {
+        SetReason(reason, "grid block y range is empty");
+        return false;
+    }
+    // Check the start and last corner cells against the controller's grid,
+    // through the same shape check BuildGridCell's own per-cell validation
+    // applies, before computing a width/height product or enumerating -- an
+    // astronomically large off-grid rectangle is refused in O(1) instead of
+    // reserving or enumerating for it (this runs ahead of the size_t
+    // overflow guard below, which a huge-but-off-grid rectangle would
+    // otherwise reach first).
+    {
+        std::int64_t lastX = 0, lastY = 0;
+        RectangleLastCorner(block.startX, block.endX, block.startY, block.endY, lastX, lastY);
+        const bool startOnGrid = GridCoordinateOnGrid(block.kind, block.launchpadController, block.startX, block.startY);
+        const bool lastOnGrid = GridCoordinateOnGrid(block.kind, block.launchpadController, lastX, lastY);
+        if (!startOnGrid || !lastOnGrid) {
+            SetReason(reason, block.kind == MidiProfileKind::WrldBldr
+                                  ? "wrldbldr grid coordinate is outside the 0-7 grid"
+                                  : "launchpad grid coordinate is outside this controller's grid");
+            return false;
+        }
     }
     const std::uint64_t width = static_cast<std::uint64_t>(
         static_cast<std::int64_t>(block.endX) - static_cast<std::int64_t>(block.startX));
@@ -640,10 +759,10 @@ bool ExpandGridBlock(const GridBlock& block, GridMappingExpansion& out, std::str
     }
     scratch.systemMessages.reserve(count);
     scratch.pressureMappings.reserve(count);
-    const int yDirection = block.endY > block.startY ? 1 : -1;
+    const int rowDirection = BlockRowDirection(block.startY, block.endY);
     for (std::uint64_t row = 0; row < height; ++row) {
         const int y = static_cast<int>(static_cast<std::int64_t>(block.startY) +
-                                       static_cast<std::int64_t>(row) * yDirection);
+                                       static_cast<std::int64_t>(row) * rowDirection);
         for (std::uint64_t column = 0; column < width; ++column) {
             const int x = static_cast<int>(static_cast<std::int64_t>(block.startX) +
                                            static_cast<std::int64_t>(column));
@@ -902,19 +1021,24 @@ std::vector<ReconstructedEncoderRow> ReconstructEncoderBlocks(const std::vector<
         // Extend the run while slot/channel stay constant and position/cc
         // advance by exactly +1 from the previous cell (D4: "maximal run
         // where slot is constant, positions consecutive (+1), channel
-        // constant, and cc consecutive with constant offset").
+        // constant, and cc consecutive with constant offset"). A turn that
+        // carries a shifted job never joins a run, neither as its start nor
+        // as a cell a run would otherwise extend to include.
         std::size_t runEnd = ix + 1;
-        while (runEnd < mappings.size()) {
-            const EncoderMidiMapping& prev = mappings[runEnd - 1];
-            const EncoderMidiMapping& cur = mappings[runEnd];
-            const bool continues = cur.slotIx == prev.slotIx && cur.control.channel == prev.control.channel &&
-                                   cur.control.type == prev.control.type &&
-                                   IsWrapSafeSuccessor(prev.position, cur.position) &&
-                                   static_cast<int>(cur.control.cc) == static_cast<int>(prev.control.cc) + 1;
-            if (!continues) {
-                break;
+        if (mappings[ix].shiftedJob == EncoderShiftedJob::None) {
+            while (runEnd < mappings.size()) {
+                const EncoderMidiMapping& prev = mappings[runEnd - 1];
+                const EncoderMidiMapping& cur = mappings[runEnd];
+                const bool continues = cur.shiftedJob == EncoderShiftedJob::None &&
+                                       cur.slotIx == prev.slotIx && cur.control.channel == prev.control.channel &&
+                                       cur.control.type == prev.control.type &&
+                                       IsWrapSafeSuccessor(prev.position, cur.position) &&
+                                       static_cast<int>(cur.control.cc) == static_cast<int>(prev.control.cc) + 1;
+                if (!continues) {
+                    break;
+                }
+                ++runEnd;
             }
-            ++runEnd;
         }
 
         const std::size_t runLength = runEnd - ix;
@@ -1025,7 +1149,7 @@ bool ContinuesCandidateRun(const MidiControllerSystemMessageAssociation& prev,
                            const MidiControllerSystemMessageAssociation& cur, BlockableMessage message) {
     const std::size_t prevArg = BlockableArg(prev, message);
     const std::size_t curArg = BlockableArg(cur, message);
-    // Finding 3: guard against `prevArg + 1` wrapping std::size_t (this
+    // Guard against `prevArg + 1` wrapping std::size_t (this
     // path is unreachable through ReconstructSystemBlocks's own defensive
     // sort, which always places a SIZE_MAX arg last, but the guard keeps
     // this shared helper correct independent of caller sort order).
@@ -1157,7 +1281,7 @@ void FitRectangles(const std::vector<MidiControllerSystemMessageAssociation>& so
     auto channelOf = [&](std::size_t ix) -> std::uint8_t {
         return sorted[ix].control.has_value() ? sorted[ix].control->channel : 0;
     };
-    // Finding 4: Launchpad cells also carry a controller variant
+    // Launchpad cells also carry a controller variant
     // (LaunchpadGridPosition::controller); a run/rectangle requires it
     // constant throughout, same as x/y/channel -- mixed variants stay
     // individual. Meaningless (always LaunchpadX, ignored) for WrldBldr.

@@ -1,10 +1,12 @@
-import { AudioBridge, AudioBridgeOptions, BrowserAudioWorker } from "./audio.js";
+import { AudioBridge, AudioBridgeOptions, AudioOutputRouteAction, AudioRequestControl, BrowserAudioWorker, PendingAudioRequest } from "./audio.js";
+import type { AudioBridgeStart } from "./audio.js";
 import { ActivationLease } from "./activation.js";
 import { CatalogClient } from "./catalog-client.js";
 import { runtimeIdentityForCatalogApp, validateBrowserRuntimeIdentity } from "./catalog.js";
 import type { BrowserRuntimeIdentity, CatalogApp } from "./catalog.js";
 import { SheafPatchLauncher } from "./launcher.js";
 import { BrowserMidiManager, BrowserMidiWorkerRuntime } from "./midi.js";
+import type { BrowserMidiStartResult } from "./midi.js";
 import { materializePackage as materializeCatalogPackage } from "./package-loader.js";
 import type { MaterializedPackage, MaterializedRuntimeModule } from "./package-loader.js";
 import { BrowserUiBackend } from "./ui.js";
@@ -21,7 +23,11 @@ export type RuntimeClient = {
   // Unload-safe clear: completes before it returns, so a `pagehide` handler can
   // use it. Only a client sharing the launcher realm can offer one.
   clearAudioInputSourceNow?(statusCode: number): void;
-  consumeAudioInputRetry?(): Promise<boolean>;
+  // index: -1 nothing pending, -2 release/default the armed control,
+  // otherwise a nonnegative index into the device list most recently
+  // submitted through `request({ type: "audio-devices" })`. control: which
+  // control (AudioRequestControl.input or .output) the index applies to.
+  consumePendingAudioRequest?(): Promise<{ index: number; control: number }>;
   onStatus?(handler: (response: RuntimeResponse) => void): void;
   terminate?(): void | Promise<void>;
 };
@@ -111,52 +117,27 @@ export function createDirectRuntimeClient(loadModule: RuntimeModuleLoader = load
       enqueue(() => runtime.setAudioInputSource(source, physicalChannels, statusCode)),
     clearAudioInputSource: (statusCode) => enqueue(() => runtime.clearAudioInputSource(statusCode)),
     clearAudioInputSourceNow: (statusCode) => { runtime.clearAudioInputSourceSync(statusCode); },
-    consumeAudioInputRetry: () => enqueue(() => runtime.consumeAudioInputRetry()),
+    consumePendingAudioRequest: () => enqueue(() => runtime.consumePendingAudioRequest()),
     onStatus: (handler) => { statusHandlers.add(handler); },
     terminate: async () => { await request({ type: "destroy" }); },
   };
 }
 
-export function createWorkerRuntimeClient(workerUrl = new URL("./worker.js", import.meta.url)): RuntimeClient {
-  const worker = new Worker(workerUrl, { type: "module" });
-  const statusHandlers = new Set<(response: RuntimeResponse) => void>();
-  let queue: Promise<void> = Promise.resolve();
-
-  worker.addEventListener("message", (event: MessageEvent<RuntimeResponse>) => {
-    if (event.data.type === "page-status") statusHandlers.forEach((handler) => handler(event.data));
-  });
-
-  const request = (command: RuntimeCommand): Promise<RuntimeResponse> => {
-    const run = () => new Promise<RuntimeResponse>((resolve) => {
-      const receive = (event: MessageEvent<RuntimeResponse>) => {
-        if (event.data.type === "page-status") return;
-        worker.removeEventListener("message", receive);
-        resolve(event.data);
-      };
-      worker.addEventListener("message", receive);
-      worker.postMessage(command);
-    });
-    const response = queue.then(run, run);
-    queue = response.then(() => {}, () => {});
-    return response;
-  };
-
-  return {
-    request,
-    onStatus: (handler) => { statusHandlers.add(handler); },
-    terminate: async () => {
-      await request({ type: "destroy" });
-      worker.terminate();
-    },
-  };
-}
+// Mirrors `synth::runtime_ui::Actions::kSidebarControllers` (RuntimePages.hpp):
+// the action name `startUserActivation` gates the MIDI request on. Checked
+// against the C++ literal by version-drift.test.mjs rather than kept in sync
+// by hand.
+const SidebarControllersAction = "runtime.sidebar.controllers" as const;
 
 export class SynthBrowserApp {
   private readonly ui: BrowserUiBackend;
   private audio: AudioBridge | undefined;
   private readonly midi: BrowserMidiManager;
   private frameTimer: ReturnType<typeof setInterval> | undefined;
-  private activationStarted = false;
+  // Governs only whether the audio half of startUserActivation re-runs; the
+  // MIDI half's own call is gated on the dispatched action's name instead, so
+  // it stays reachable regardless of this flag (see startUserActivation).
+  private audioActivationStarted = false;
   private frameInFlight = false;
   private frameRequested = false;
   private stopped = false;
@@ -173,10 +154,13 @@ export class SynthBrowserApp {
   ) {
     this.ui = new BrowserUiBackend(root, (action) => {
       void this.dispatchAction(action);
-      void this.startUserActivation();
+      void this.startUserActivation(action.name);
     });
     this.midi = new BrowserMidiManager(new BrowserMidiWorkerRuntime((command) => this.runtime.request(command)));
-    this.runtime.onStatus?.((status) => this.renderStatus(status));
+    this.runtime.onStatus?.((status) => {
+      if (status.type === "file-export") this.offerDownload(status);
+      else this.renderStatus(status);
+    });
   }
 
   async start(): Promise<void> {
@@ -196,7 +180,7 @@ export class SynthBrowserApp {
     if (audioConfig.type !== "audio-config") throw new Error("runtime did not return audio configuration");
     // The application's input request is discovered here -- after the module is
     // loaded, the runtime created, and the application initialized -- so capture
-    // can never precede the application that asks for it (sbw-4).
+    // can never precede the application that asks for it.
     const audioWorker: BrowserAudioWorker = { audioInputChannels: async () => audioConfig.inputChannels };
     if (this.runtime.startAudioWorklet)
       audioWorker.startAudioWorklet = (context) => this.runtime.startAudioWorklet!(context);
@@ -207,9 +191,27 @@ export class SynthBrowserApp {
       audioWorker.clearAudioInputSource = (statusCode) => this.runtime.clearAudioInputSource!(statusCode);
     if (this.runtime.clearAudioInputSourceNow)
       audioWorker.clearAudioInputSourceNow = (statusCode) => { this.runtime.clearAudioInputSourceNow!(statusCode); };
+    // Device submission is plain data, so every client offers it through the
+    // generic `request`, unlike the AudioNode-carrying methods above.
+    audioWorker.submitAudioDevices = async (devices) => {
+      const response = await this.runtime.request({ type: "audio-devices", devices });
+      if (response.type !== "ok") throw new Error("runtime rejected audio device snapshot");
+    };
+    // Both ride the same dispatch-action channel a real UI action does, so a
+    // route failure or routing-unsupported report also repaints the Audio
+    // page immediately and drains any pending request the same way every
+    // other dispatch already does.
+    audioWorker.reportOutputRouteFailed = (label) =>
+      this.dispatchAction({ name: AudioOutputRouteAction.routeFailed, value: label });
+    audioWorker.reportOutputRoutingUnsupported = () =>
+      this.dispatchAction({ name: AudioOutputRouteAction.routingUnsupported, value: "" });
     this.audio = new AudioBridge(audioWorker, this.options.audioOptions);
+    // Scoped to the app's own root rather than a global target: the gesture
+    // only needs to reach this instrument, and a root-scoped listener needs
+    // no explicit teardown when the app stops.
+    installBrowserAudioActivation(this.root, this.audio);
     if (this.options.midiAccess) {
-      this.activationStarted = true;
+      this.audioActivationStarted = true;
       const [audio, midi] = await Promise.all([
         this.audio.startFromUserActivation(),
         this.midi.startWithAccess(this.options.midiAccess),
@@ -217,6 +219,12 @@ export class SynthBrowserApp {
       if (!audio.started) throw new Error(`audio activation failed: ${audio.diagnostic}`);
       if (midi.status !== "online") throw new Error(`MIDI activation failed: ${midi.reason ?? "unavailable"}`);
       this.renderStatus({ type: "status", status: "audio:online; midi:online" });
+    } else {
+      // No lease supplied its own MIDI access (the frogg3rs site's own boot
+      // path), so check whether the browser already holds it: fire-and-forget,
+      // never awaited here, so a slow or rejected query cannot delay or fail
+      // boot.
+      void this.startMidiIfAlreadyGranted();
     }
     this.options.claimRuntimeRoot();
     await this.renderFrame();
@@ -264,14 +272,53 @@ export class SynthBrowserApp {
     }
   }
 
-  private async startUserActivation(): Promise<void> {
-    if (this.activationStarted) return;
-    this.activationStarted = true;
+  // At load, on the boot path with no activation lease, WHERE the Permissions
+  // API already reports Web MIDI sysex access as granted, this starts MIDI
+  // immediately through the same path the Controllers action uses, so a
+  // controller set up on an earlier visit works with no prompt. On any other
+  // reported state, a rejected query, or a browser with no Permissions API,
+  // it leaves MIDI to the Controllers action. Never awaited by its caller, so
+  // its outcome cannot delay or fail audio or boot. The manager's own status
+  // is rendered here because this path runs outside `startUserActivation`,
+  // which is the only other place that renders it.
+  private async startMidiIfAlreadyGranted(): Promise<void> {
+    const permissions = navigator.permissions;
+    if (!permissions?.query) return;
+    let status: PermissionStatus;
+    try {
+      status = await permissions.query({ name: "midi", sysex: true } as PermissionDescriptor);
+    } catch {
+      return;
+    }
+    if (status.state !== "granted") return;
+    const midi = await this.midi.startFromUserActivation();
+    this.renderStatus({ type: "status", status: `midi:${midi.status}` });
+  }
+
+  // Runs on every dispatched action. The audio half only re-runs while it has
+  // not yet started -- once it has, `this.audio.startFromUserActivation()`
+  // would short-circuit anyway, so skipping the call outright costs nothing
+  // and keeps this function's own early return scoped to audio alone. The
+  // MIDI half is gated on the action name instead of on that same flag, so a
+  // Controllers dispatch still reaches `this.midi.startFromUserActivation()`
+  // even after an earlier, non-Controllers dispatch already started audio.
+  // Audio's own guard is real: a start it already completed returns
+  // immediately. MIDI's guard covers the same case now: overlapping callers
+  // of `this.midi.startFromUserActivation()`, including this dispatch racing
+  // the load-time saved-grant start above, share the one in-flight
+  // `navigator.requestMIDIAccess` call and its outcome instead of each
+  // issuing their own.
+  private async startUserActivation(actionName: string): Promise<void> {
     if (!this.audio) return;
     const [audio, midi] = await Promise.all([
-      this.audio.startFromUserActivation(),
-      this.midi.startFromUserActivation(),
+      this.audioActivationStarted
+        ? Promise.resolve<AudioBridgeStart>({ started: true })
+        : this.audio.startFromUserActivation(),
+      actionName === SidebarControllersAction
+        ? this.midi.startFromUserActivation()
+        : Promise.resolve<BrowserMidiStartResult>({ status: this.midi.status() }),
     ]);
+    if (audio.started) this.audioActivationStarted = true;
     this.renderStatus({ type: "status", status: `audio:${audio.started ? "online" : audio.diagnostic}; midi:${midi.status}` });
   }
 
@@ -279,17 +326,36 @@ export class SynthBrowserApp {
     const response = await this.runtime.request({ type: "dispatch-action", ...action });
     if (response.type === "ui-frame") this.ui.renderFrame(Uint8Array.from(response.frame).buffer);
     else if (response.type === "error") this.renderStatus({ type: "status", status: response.error });
-    await this.consumeAudioInputRetry();
+    await this.consumePendingAudioRequest();
   }
 
-  // The runtime arms a retry only from the portable `Retry Input` action, so
-  // capture is re-run exactly when the user asked for it. Losing a stream never
-  // arms one, which is what keeps a denied or ended capture from re-prompting off
-  // the back of an unrelated UI action.
-  private async consumeAudioInputRetry(): Promise<void> {
-    if (this.stopped || !this.audio || !this.runtime.consumeAudioInputRetry) return;
-    if (!(await this.runtime.consumeAudioInputRetry())) return;
-    await this.audio.retryInput();
+  // The runtime arms a pending request only from a device selection, the
+  // portable `Retry Input` action, or `Allow Microphone` (all resolve through
+  // the same index/control path on the C++ side), so a device is requested or
+  // routed exactly when the operator asked for it. Losing a stream never arms one,
+  // which is what keeps a denied or ended capture from re-prompting off the
+  // back of an unrelated UI action.
+  private async consumePendingAudioRequest(): Promise<void> {
+    if (this.stopped || !this.audio || !this.runtime.consumePendingAudioRequest) return;
+    const { index, control } = await this.runtime.consumePendingAudioRequest();
+    if (index === PendingAudioRequest.none) return;
+    if (control === AudioRequestControl.output) {
+      if (index === PendingAudioRequest.release) {
+        await this.audio.releaseSelectedOutput();
+        return;
+      }
+      await this.audio.acquireOutputDeviceAtIndex(index);
+      return;
+    }
+    if (index === PendingAudioRequest.release) {
+      await this.audio.releaseSelectedInput();
+      return;
+    }
+    if (index === PendingAudioRequest.requestPermission) {
+      await this.audio.requestInputPermission();
+      return;
+    }
+    await this.audio.acquireInputDeviceAtIndex(index);
   }
 
   private requestFrame(): void {
@@ -317,6 +383,22 @@ export class SynthBrowserApp {
 
   private async expectOk(response: RuntimeResponse): Promise<void> {
     if (response.type === "error") throw new Error(response.error);
+  }
+
+  // Hands the app's exported file to the browser's own save flow: an
+  // anchor click triggers the download, and the object URL is revoked on
+  // the next macrotask -- revoking it before the click's download starts
+  // can cancel the download in Chromium.
+  private offerDownload({ fileName, mediaType, bytes }: { fileName: string; mediaType: string; bytes: ArrayBuffer }): void {
+    const url = URL.createObjectURL(new Blob([bytes], { type: mediaType }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   private renderStatus(response: RuntimeResponse): void {
@@ -359,14 +441,18 @@ export async function installSynthBrowserApp(root: HTMLElement, options: SynthBr
   }
 }
 
-export function installBrowserAudioActivation(
-  target: EventTarget,
-  worker: BrowserAudioWorker,
-  options: AudioBridgeOptions = {},
-): AudioBridge {
-  const bridge = new AudioBridge(worker, options);
-  target.addEventListener("pointerdown", () => { void bridge.startFromUserActivation(); }, { once: true });
-  return bridge;
+// Acts on a bridge the caller already owns and drives, rather than
+// constructing its own. Stays listening across a failed attempt and removes
+// itself only once the bridge actually reports started; re-invoking
+// `startFromUserActivation` before then is safe, since it short-circuits on
+// its own once running.
+export function installBrowserAudioActivation(target: EventTarget, bridge: AudioBridge): void {
+  const onPointerDown = () => {
+    void bridge.startFromUserActivation().then((result) => {
+      if (result.started) target.removeEventListener("pointerdown", onPointerDown);
+    });
+  };
+  target.addEventListener("pointerdown", onPointerDown);
 }
 
 export async function installSheafPatchLauncher(
