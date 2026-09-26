@@ -219,9 +219,4 @@ private:
     synth::runtime_ui::ControllersPageSurface surface_;
 };
 
-inline void PumpJuceMessages(int milliseconds = 25)
-{
-    juce::Thread::sleep(milliseconds);
-}
-
 }  // namespace synth_runtime::test

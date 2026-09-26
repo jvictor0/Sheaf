@@ -309,7 +309,7 @@ void RequireDrawStartsInsideResolvedBounds(const juce::Image& image,
                                            juce::Rectangle<int> bounds,
                                            const char* label)
 {
-    const juce::Colour rootBackground(18, 20, 22);
+    const juce::Colour rootBackground = synth_juce::UiToJuceColour(synth::kSurfaceBackground);
     const int x = bounds.getX() + 2;
     const int y = bounds.getY() + 2;
     Require(image.getBounds().contains(x, y), label);
