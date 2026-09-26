@@ -19,7 +19,6 @@ struct RuntimeFileCallbacks
     std::function<void(const std::filesystem::path&)> savePatchAs;
     std::function<void(const std::filesystem::path&)> savePatchAsOverwrite;
     std::function<void(const std::filesystem::path&)> loadPatch;
-    std::function<void()> revertPatch;
 };
 
 class RuntimeFileService final
@@ -71,11 +70,6 @@ public:
         {
             callbacks_.loadPatch(std::filesystem::path(action.value));
             fileStatus_ = "Load requested: " + action.value;
-        }
-        else if (action.name == Actions::kFileRevert)
-        {
-            callbacks_.revertPatch();
-            fileStatus_ = "Revert requested";
         }
     }
 

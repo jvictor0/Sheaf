@@ -263,7 +263,7 @@ public:
         const synth::ui::Node* root = RootNode();
         if (root == nullptr)
         {
-            graphics.fillAll(juce::Colour(18, 20, 22));
+            graphics.fillAll(UiToJuceColour(synth::kSurfaceBackground));
             return;
         }
 
@@ -272,7 +272,7 @@ public:
                                  root->color.has_value()
                                      ? std::optional<juce::Colour>(
                                            StateColourFor(*root->color, root->selected, root->enabled))
-                                     : std::optional<juce::Colour>(juce::Colour(18, 20, 22)),
+                                     : std::optional<juce::Colour>(UiToJuceColour(synth::kSurfaceBackground)),
                                  BorderColourForNode(*root),
                                  BorderWidthForNode(*root),
                                  CornerRadiusForNode(*root));
