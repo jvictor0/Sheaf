@@ -23,7 +23,7 @@ test("starts a generic verified package from the isolated launcher's second orig
         locateFile: materialized.locateFile,
         mainScriptUrlOrBlob: materialized.mainScriptUrlOrBlob,
       },
-      versions: { abiVersion: 4, uiProtocolVersion: 2, runtimeConfigVersion: 1 },
+      versions: { abiVersion: 6, uiProtocolVersion: 2, runtimeConfigVersion: 1 },
     });
     const created = await runtime.request({ type: "create" });
     const audio = await runtime.request({ type: "audio-config" });
@@ -41,7 +41,7 @@ test("starts a generic verified package from the isolated launcher's second orig
   });
 
   expect(result.crossOriginIsolated).toBe(true);
-  expect(result.catalogAbiVersion).toBe(4);
+  expect(result.catalogAbiVersion).toBe(6);
   expect(result.loaded).toEqual({ type: "ok" });
   expect(result.created).toEqual({ type: "created", handle: 41 });
   expect(result.audio).toEqual({ type: "audio-config", channels: 2, inputChannels: 0 });
