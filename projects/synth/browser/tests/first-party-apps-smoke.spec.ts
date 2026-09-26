@@ -211,9 +211,11 @@ for (const app of firstPartyApps) {
     try {
       await installInstrumentedLauncher(page);
 
+      // Launcher rows sort by display name (mergeCatalogs): "1 Second Delay",
+      // "Braid 4", "Mini App".
       await expect.poll(() => page.locator(".synth-launcher__app").evaluateAll((rows) =>
         rows.map((row) => (row as HTMLElement).dataset.synthAppId)))
-        .toEqual(["sheaf/braid-4", "sheaf/miniapp"]);
+        .toEqual(["sheaf/one-second-delay", "sheaf/braid-4", "sheaf/miniapp"]);
       const discoveryRequests = requests.filter((pathname) =>
         pathname.endsWith(".json") || pathname.includes("/packages/"));
       expect(discoveryRequests).toEqual([

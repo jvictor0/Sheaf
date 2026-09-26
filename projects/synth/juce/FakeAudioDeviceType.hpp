@@ -21,9 +21,12 @@
 //
 // The test drives audio by hand: FakeAudioDevice::start() records the callback
 // the device manager installs, and RunBlock() invokes it with whatever channel
-// pointers, channel counts, and frame count the scenario needs — including
-// counts above/below the negotiated shape and null pointers inside the counted
-// prefix, none of which real hardware lets a test produce on demand.
+// pointers and frame count the scenario needs, at the channel counts the
+// device itself negotiated at open() — including a null pointer inside the
+// counted prefix, which is the one shape no real driver callback lets a test
+// produce on demand. A channel count that differs from what open() negotiated
+// is not something RunBlock can express: real hardware reports its shape at
+// open, never through a callback that quietly grows or shrinks it.
 //
 // FailOpenForInputDevice() makes any device selected with that input name fail
 // to open, the way a device that is enumerated but unavailable (already in use,
@@ -94,14 +97,12 @@ public:
     }
 
     // Delivers one device block to whatever callback the device manager
-    // installed, exactly as a driver thread would. `inputs` may contain null
-    // entries and `numInputChannels` may differ from the negotiated active
-    // count; that is the point of the fake.
-    void RunBlock(const float* const* inputs,
-                  int numInputChannels,
-                  float* const* outputs,
-                  int numOutputChannels,
-                  int numSamples);
+    // installed, exactly as a driver thread would: the channel counts it
+    // reports are always this device's own negotiated active counts (from
+    // getActiveInputChannels()/getActiveOutputChannels()), never a count the
+    // caller supplies. `inputs` may still contain null entries inside that
+    // counted range.
+    void RunBlock(const float* const* inputs, float* const* outputs, int numSamples);
 
 private:
     static juce::StringArray ChannelNames(const juce::String& prefix, int count) {
@@ -290,16 +291,12 @@ inline void FakeAudioDevice::stop() {
     callback->audioDeviceStopped();
 }
 
-inline void FakeAudioDevice::RunBlock(const float* const* inputs,
-                                      int numInputChannels,
-                                      float* const* outputs,
-                                      int numOutputChannels,
-                                      int numSamples) {
+inline void FakeAudioDevice::RunBlock(const float* const* inputs, float* const* outputs, int numSamples) {
     if (callback_ == nullptr) {
         return;
     }
-    callback_->audioDeviceIOCallbackWithContext(inputs, numInputChannels, outputs, numOutputChannels,
-                                                numSamples, {});
+    callback_->audioDeviceIOCallbackWithContext(inputs, activeInputChannels_.countNumberOfSetBits(), outputs,
+                                                activeOutputChannels_.countNumberOfSetBits(), numSamples, {});
 }
 
 }  // namespace synth_juce
