@@ -1,20 +1,22 @@
 #pragma once
 
 // synth_runtime::ShellComponent / SYNTH_RUNTIME_MAIN — the generic JUCE
-// window chrome that wraps a synth_runtime::Runtime<App> (Task 2) into a
-// runnable application (Plan 3 Task 4).
+// window chrome that wraps a synth_runtime::Runtime<App> into a
+// runnable application.
 //
-// ShellComponent is a thin MainPane<App> host (Plan 4 Task 2, sru-1): it
+// ShellComponent is a thin MainPane<App> host: it
 // constructs a single MainPane<App>, `addAndMakeVisible`s it, and its
 // resized() fills the shell's full bounds with it. The former patch-command
 // row (New/Save/Save As/Load/Revert + patch name + status label), the
 // MidiPanel strip, and the AudioPanel strip are gone from this layout --
 // MainPane's sidebar (Audio/Controllers/File) and content host are the only
-// chrome now. MainPane's Audio, File, and Controllers pages
-// (AudioConfigPage.hpp / FilePage.hpp / ControllersPage.hpp) are all real as
-// of Task 4 of Plan 4, which also deleted MidiPanel.hpp outright -- Runtime
+// chrome now. MainPane's Audio, Controllers, Sync, and File pages are all
+// resolved node trees built by RuntimeMainComponent (with
+// JuceRuntimeMainServices supplying the JUCE-side data) and drawn by the
+// shared portable renderer, not standalone JUCE components constructed one
+// per page. MidiPanel.hpp is deleted outright -- Runtime
 // no longer constructs or owns any MIDI UI component (see Runtime.hpp's
-// MidiConnections() accessor, which ControllersPage reads directly).
+// MidiConnections() accessor, which the Controllers page reads directly).
 //
 // Runtime's timer-driven repaint hook (Runtime::Start() calls it at the end
 // of every tick) is wired to repaint the shell, which now just means
@@ -42,6 +44,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -75,11 +78,20 @@ class RuntimeShellSession {
 public:
     // Launcher-side shell seam for apps that need caller-supplied data paths.
     // Call from the JUCE message thread after synth::SetCurrentThreadId has
-    // identified it as synth::ThreadId::Message.
-    explicit RuntimeShellSession(std::optional<synth::RuntimeDataPaths> paths = std::nullopt) {
+    // identified it as synth::ThreadId::Message. `beforeStart`, when set, runs
+    // just before Start(). No production caller passes one (real launches
+    // always take the real platform devices); a test supplies it to register
+    // a synthetic audio device type first, since Start() otherwise reaches
+    // real hardware with no seam to intervene afterward (JUCE only creates
+    // the real platform device types when its type list is still empty).
+    explicit RuntimeShellSession(std::optional<synth::RuntimeDataPaths> paths = std::nullopt,
+                                 std::function<void(Runtime<App>&)> beforeStart = {}) {
         runtime_ = std::make_unique<Runtime<App>>();
         if (paths.has_value()) {
             runtime_->SetRuntimeDataPathsOverride(std::move(*paths));
+        }
+        if (beforeStart) {
+            beforeStart(*runtime_);
         }
         runtime_->Start();
         shell_ = std::make_unique<ShellComponent<App>>(*runtime_);
@@ -116,17 +128,21 @@ public:
 template <synth::SynthApplication App>
 class RuntimeSessionOwnerFor final : public RuntimeSessionOwner {
 public:
-    explicit RuntimeSessionOwnerFor(synth::RuntimeDataPaths paths) : session_(std::move(paths)) {}
+    explicit RuntimeSessionOwnerFor(synth::RuntimeDataPaths paths,
+                                    std::function<void(Runtime<App>&)> beforeStart = {})
+        : session_(std::move(paths), std::move(beforeStart)) {}
 
     juce::Component& Component() override { return session_.Component(); }
+    Runtime<App>& GetRuntime() { return session_.GetRuntime(); }
 
 private:
     RuntimeShellSession<App> session_;
 };
 
 template <synth::SynthApplication App>
-std::unique_ptr<RuntimeSessionOwner> MakeRuntimeSessionOwner(synth::RuntimeDataPaths paths) {
-    return std::make_unique<RuntimeSessionOwnerFor<App>>(std::move(paths));
+std::unique_ptr<RuntimeSessionOwner> MakeRuntimeSessionOwner(
+    synth::RuntimeDataPaths paths, std::function<void(Runtime<App>&)> beforeStart = {}) {
+    return std::make_unique<RuntimeSessionOwnerFor<App>>(std::move(paths), std::move(beforeStart));
 }
 
 // The application wrapper instantiated by SYNTH_RUNTIME_MAIN(AppType). Owns

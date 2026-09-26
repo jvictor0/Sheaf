@@ -1,5 +1,6 @@
 #include "synth/ControllersPageUI.hpp"
 #include "synth/ControllerWizard.hpp"
+#include "synth/MidiAppCatalog.hpp"
 #include "support/SourceScan.hpp"
 
 #ifdef JUCE_MAJOR_VERSION
@@ -184,6 +185,7 @@ struct TestHarness
     int commitAttempts = 0;
     int commits = 0;
     int saves = 0;
+    std::vector<synth::ControllerWizardDescriptor> layouts;
 
     TestHarness()
     {
@@ -222,6 +224,7 @@ struct TestHarness
             return saveSucceeds;
         };
         callbacks.setStatus = [this](std::string text) { status = std::move(text); };
+        callbacks.layouts = layouts;
         return synth::runtime_ui::ControllersPageSurface(std::move(callbacks));
     }
 };
@@ -252,7 +255,8 @@ void RefreshWizardDiscovery(synth::runtime_ui::ControllersPageSurface& surface,
                             const TestHarness& harness)
 {
     surface.SetDiscovery(synth::DiscoverControllerWizards(
-        harness.devices, harness.instrument, synth::ControllerWizardRegistry()));
+        harness.devices, harness.instrument,
+        synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{})));
 }
 
 void SeedGridPresentation(TestHarness& harness)
@@ -322,7 +326,7 @@ void TestDiscoveryRendersPortableAvailableRowsAndDiagnostics()
     const synth::ui::NodeTree tree = surface.BuildTree();
     const synth::ui::Node* row = FindNodeById(tree, "runtime.controllers.available.0");
     Require(row != nullptr, "available controller row exists");
-    // D8: no backend paints a container's own label, so the area heading and the
+    // no backend paints a container's own label, so the area heading and the
     // recognized controller's descriptor name must be rendered child nodes. The
     // descriptor name is not derivable from the endpoint device names beside it.
     Require(row->label.empty(), "available controller row carries no unrendered label");
@@ -717,11 +721,8 @@ void TestWizardSaveFailureDoesNotRollbackCommittedInstrument()
             "save failure remains visible on the still-open workflow");
 }
 
-void TestReconfigureSeedsExactProfilesAndReplacesOnlyTheValidatedRecord()
+void TestConfigureSeedsFromDormantDataForBlacklistedRecords()
 {
-    TestHarness harness;
-    harness.instrument.controllers.clear();
-    Require(harness.instrument.AddController(MakeGenericSlot("before")), "add leading record");
     synth::MfTwisterControllerWizard wizard;
     synth::MfTwisterConfigForm form;
     form.encoderSlotText = "4";
@@ -729,76 +730,6 @@ void TestReconfigureSeedsExactProfilesAndReplacesOnlyTheValidatedRecord()
         form, {.name = "twister", .input = {"offline-in", "Offline In"},
                .output = {"offline-out", "Offline Out"}});
     Require(static_cast<bool>(generated), "generate compatible offline Twister record");
-    Require(harness.instrument.AddController(*generated.controller), "add Twister record");
-    Require(harness.instrument.AddController(MakeGenericSlot("after")), "add trailing record");
-    harness.connection.controllers.resize(harness.instrument.controllers.size());
-
-    auto surface = harness.MakeSurface();
-    surface.MarkDirty();
-    surface.RefreshOnTick();
-    const synth::ui::Action reconfigure = *FindNodeById(
-        surface.BuildTree(), synth::runtime_ui::NodeIds::ControllerReconfigure(1))->action;
-    surface.DispatchAction(reconfigure);
-    const synth::ui::NodeTree compatibleTree = surface.BuildTree();
-    Require(FindNodeById(compatibleTree, "controller-wizard.twister.encoder-slot")->text == "4",
-            "a complete compatible offline profile seeds its shared Encoder Slot");
-    Require(FindNodeById(compatibleTree, synth::runtime_ui::NodeIds::kWizardIgnore) == nullptr,
-            "existing reconfiguration never exposes Ignore");
-
-    surface.DispatchAction(synth::ui::Action::WithValue(
-        "controller-wizard.twister.encoder-slot", "6"));
-    surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kWizardSubmit));
-    Require(harness.commits == 1 && harness.saves == 1,
-            "accepted reconfiguration performs one commit then one save");
-    Require(harness.instrument.controllers.size() == 3 &&
-                harness.instrument.controllers[0].name == "before" &&
-                harness.instrument.controllers[2].name == "after",
-            "reconfiguration preserves the stored record's ordered position");
-    const synth::MidiControllerSlot& replaced = harness.instrument.controllers[1];
-    Require(replaced.name == "twister" && replaced.input.identifier == "offline-in" &&
-                replaced.output.identifier == "offline-out" &&
-                replaced.wizardId == "com.sheaf.midi-fighter-twister" &&
-                replaced.disposition == synth::MidiControllerDisposition::Active,
-            "reconfiguration preserves identity while activating the complete generated profile");
-    Require(replaced.config.encoderInput->turns.size() == 16 &&
-                replaced.config.systemMessages.size() == 6 &&
-                replaced.config.encoderInput->turns[0].slotIx == 6,
-            "reconfiguration replaces rather than merges the profile");
-
-    TestHarness kindHarness;
-    kindHarness.instrument.controllers.clear();
-    synth::MidiControllerSlot mismatchedKind = *generated.controller;
-    mismatchedKind.kind = synth::MidiProfileKind::Launchpad;
-    mismatchedKind.config = synth::LaunchpadDefaultProfileConfig();
-    Require(kindHarness.instrument.AddController(std::move(mismatchedKind)),
-            "add valid legacy-shaped record with a resolved Twister id");
-    kindHarness.connection.controllers.resize(1);
-    auto kindSurface = kindHarness.MakeSurface();
-    kindSurface.MarkDirty();
-    kindSurface.RefreshOnTick();
-    kindSurface.DispatchAction(*FindNodeById(
-        kindSurface.BuildTree(), synth::runtime_ui::NodeIds::ControllerReconfigure(0))->action);
-    kindSurface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kWizardSubmit));
-    Require(kindHarness.commits == 1 && kindHarness.saves == 1 &&
-                kindHarness.instrument.controllers[0].kind == synth::MidiProfileKind::MfTwister,
-            "reconfiguration takes the resolved wizard's generated kind while preserving record identity");
-
-    TestHarness incompatibleHarness;
-    incompatibleHarness.instrument.controllers.clear();
-    synth::MidiControllerSlot incompatible = *generated.controller;
-    incompatible.config.systemMessages.push_back(incompatible.config.systemMessages.front());
-    Require(incompatibleHarness.instrument.AddController(std::move(incompatible)),
-            "add deliberately extra-mapped record");
-    incompatibleHarness.connection.controllers.resize(1);
-    auto incompatibleSurface = incompatibleHarness.MakeSurface();
-    incompatibleSurface.MarkDirty();
-    incompatibleSurface.RefreshOnTick();
-    incompatibleSurface.DispatchAction(*FindNodeById(
-        incompatibleSurface.BuildTree(), synth::runtime_ui::NodeIds::ControllerReconfigure(0))->action);
-    const synth::ui::NodeTree incompatibleTree = incompatibleSurface.BuildTree();
-    Require(FindNodeById(incompatibleTree, "controller-wizard.twister.encoder-slot")->text == "0" &&
-                VisibleTextLower(incompatibleTree).find("replaces") != std::string::npos,
-            "incompatible stored mappings open defaults with a destructive replacement warning");
 
     TestHarness blacklistedHarness;
     blacklistedHarness.instrument.controllers.clear();
@@ -859,65 +790,188 @@ void TestReconfigureSeedsExactProfilesAndReplacesOnlyTheValidatedRecord()
     Require(FindNodeById(dormantIncompatibleTree, "controller-wizard.twister.encoder-slot")->text == "0" &&
                 VisibleTextLower(dormantIncompatibleTree).find("replaces") != std::string::npos,
             "incompatible dormant Twister data opens destructive defaults");
-
-    TestHarness staleHarness;
-    staleHarness.instrument.controllers.clear();
-    Require(staleHarness.instrument.AddController(*generated.controller), "add stale target");
-    staleHarness.connection.controllers.resize(1);
-    auto staleSurface = staleHarness.MakeSurface();
-    staleSurface.MarkDirty();
-    staleSurface.RefreshOnTick();
-    staleSurface.DispatchAction(*FindNodeById(
-        staleSurface.BuildTree(), synth::runtime_ui::NodeIds::ControllerReconfigure(0))->action);
-    staleSurface.DispatchAction(synth::ui::Action::WithValue(
-        "controller-wizard.twister.encoder-slot", "9"));
-    staleHarness.instrument.controllers[0].output.identifier = "retargeted-output";
-    staleSurface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kWizardSubmit));
-    Require(staleHarness.commitAttempts == 0 && staleHarness.saves == 0 &&
-                staleSurface.ActiveWizardSession() != nullptr &&
-                FindNodeById(staleSurface.BuildTree(), "controller-wizard.twister.encoder-slot")->text == "9" &&
-                VisibleTextLower(staleSurface.BuildTree()).find("changed") != std::string::npos,
-            "stale existing record identity refuses without save and preserves form state");
 }
 
-void TestReconfigureRefusesEveryChangedExistingRecordIdentity()
+void TestAddFromPresetWithNoDeviceInstallsTheDefaultPresetWithNoneEndpoints()
 {
-    const auto refuse = [](const auto& mutate, const char* label) {
-        TestHarness harness;
-        harness.instrument.controllers.clear();
-        synth::MfTwisterControllerWizard wizard;
-        synth::MfTwisterConfigForm form;
-        const synth::WizardGenerationResult generated = wizard.GenerateProfile(
-            form, {.name = "target", .input = {"in", "Input"}, .output = {"out", "Output"}});
-        Require(static_cast<bool>(generated), "generate stale identity target");
-        Require(harness.instrument.AddController(*generated.controller), "add stale identity target");
-        harness.connection.controllers.resize(1);
-        auto surface = harness.MakeSurface();
-        surface.MarkDirty();
-        surface.RefreshOnTick();
-        surface.DispatchAction(*FindNodeById(
-            surface.BuildTree(), synth::runtime_ui::NodeIds::ControllerReconfigure(0))->action);
-        surface.DispatchAction(synth::ui::Action::WithValue(
-            "controller-wizard.twister.encoder-slot", "9"));
-        mutate(harness.instrument);
-        surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kWizardSubmit));
-        Require(harness.commitAttempts == 0 && harness.saves == 0 &&
-                    surface.ActiveWizardSession() != nullptr &&
-                    FindNodeById(surface.BuildTree(), "controller-wizard.twister.encoder-slot")->text == "9" &&
-                    VisibleTextLower(surface.BuildTree()).find("changed") != std::string::npos,
-                label);
-    };
-    refuse([](synth::MidiInstrumentConfig& instrument) { instrument.controllers.erase(instrument.controllers.begin()); },
-           "removed stored index refuses without commit or save");
-    refuse([](synth::MidiInstrumentConfig& instrument) { instrument.controllers[0].name = "renamed"; },
-           "changed stored name refuses without commit or save");
-    refuse([](synth::MidiInstrumentConfig& instrument) { instrument.controllers[0].input.identifier = "retargeted"; },
-           "changed stored endpoint refuses without commit or save");
-    refuse([](synth::MidiInstrumentConfig& instrument) {
-        instrument.controllers[0].disposition = synth::MidiControllerDisposition::Blacklisted;
-        instrument.controllers[0].dormantConfig = instrument.controllers[0].config;
-        instrument.controllers[0].config = {};
-    }, "changed stored disposition refuses without commit or save");
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // No preset-draft action dispatched: this proves the row's displayed
+    // default (the Preset combo's first option -- here the library's only
+    // descriptor, the Twister) is what Add actually installs, not merely
+    // what the combo happens to show.
+    surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAddController));
+
+    Require(harness.commits == 1, "add-from-preset with the untouched default commits");
+    Require(harness.instrument.controllers.size() == 4, "add-from-preset appends one controller");
+    const synth::MidiControllerSlot& added = harness.instrument.controllers[3];
+    Require(added.name == "MIDI Fighter Twister", "the installed record takes the preset's display name");
+    Require(added.kind == synth::MidiProfileKind::MfTwister &&
+                added.wizardId == "com.sheaf.midi-fighter-twister",
+            "the installed record carries the preset's kind and wizard id");
+    Require(added.config.encoderInput.has_value() && added.config.encoderInput->turns.size() == 16,
+            "the installed record carries the preset's generated config");
+    Require(!added.input.IsConfigured() && !added.output.IsConfigured(),
+            "with no matching device pair both ports are left unset, reading (none)");
+}
+
+void TestAddFromPresetWithMatchingOnlinePairBindsBothEndpoints()
+{
+    TestHarness harness;
+    // The harness already carries an unclaimed "Midi Fighter Twister" output
+    // (uid:782494201); adding the matching input completes the pair the
+    // library Twister descriptor's aliases need.
+    harness.devices.inputs.push_back({"twister-in-id", "Midi Fighter Twister"});
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kAddPresetDraft, "com.sheaf.midi-fighter-twister"));
+    surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAddController));
+
+    Require(harness.commits == 1, "add-from-preset with a matching pair commits");
+    Require(harness.instrument.controllers.size() == 4, "add-from-preset appends one controller");
+    const synth::MidiControllerSlot& added = harness.instrument.controllers[3];
+    Require(added.input.identifier == "twister-in-id" && added.input.name == "Midi Fighter Twister",
+            "an unclaimed matching input is bound");
+    Require(added.output.identifier == "uid:782494201" && added.output.name == "Midi Fighter Twister",
+            "an unclaimed matching output is bound");
+    Require(added.kind == synth::MidiProfileKind::MfTwister &&
+                added.wizardId == "com.sheaf.midi-fighter-twister",
+            "the installed record still carries the preset's kind and wizard id");
+}
+
+void TestAddCustomGenericYieldsAnEmptyGenericRecord()
+{
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kAddPresetDraft, "custom"));
+    surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAddController));
+
+    Require(harness.commits == 1, "add Custom commits");
+    Require(harness.instrument.controllers.size() == 4, "add Custom appends one controller");
+    const synth::MidiControllerSlot& added = harness.instrument.controllers[3];
+    Require(added.name == "Custom", "a Custom add is named Custom");
+    Require(added.kind == synth::MidiProfileKind::Generic && added.wizardId == std::nullopt,
+            "a Custom add is always the Generic kind and carries no wizard id");
+    Require(!added.config.encoderInput.has_value() && !added.input.IsConfigured() &&
+                !added.output.IsConfigured(),
+            "a Custom add seeds an empty record: no encoder block, no endpoints");
+}
+
+void TestAddPresetDropdownListsRegistryDescriptorsThenOneCustomEntry()
+{
+    // Without a catalog: the library fallback registry (Twister, Launchpad,
+    // WRLD.Bldr), then exactly one Custom entry, not one Custom(<kind>)
+    // entry per registry descriptor.
+    const std::vector<synth::ControllerWizardDescriptor> libraryRegistry =
+        synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{});
+    const std::vector<synth::ui::ControlOption> libraryOptions =
+        synth::runtime_ui::ControllersLayout::BuildAddPresetOptions(libraryRegistry);
+    Require(libraryOptions.size() == libraryRegistry.size() + 1,
+            "the library-registry dropdown is the registry plus exactly one Custom entry");
+    for (std::size_t ix = 0; ix < libraryRegistry.size(); ++ix)
+    {
+        Require(libraryOptions[ix].id == libraryRegistry[ix].id &&
+                    libraryOptions[ix].label == libraryRegistry[ix].displayName,
+                "each registry descriptor keeps its own id and display name in the dropdown");
+    }
+    Require(libraryOptions.back().id == "custom" && libraryOptions.back().label == "Custom",
+            "the dropdown's last entry is the plain Custom option");
+
+    // With a catalog: an app-supplied registry of arbitrary size gets the
+    // same treatment -- its descriptors, then one Custom entry.
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back({.id = "app.device.one",
+                                      .displayName = "App Device One",
+                                      .kind = synth::MidiProfileKind::Generic,
+                                      .inputAliases = {"App Device One"},
+                                      .outputAliases = {"App Device One"},
+                                      .config = {}});
+    catalog.deviceDefaults.push_back({.id = "app.device.two",
+                                      .displayName = "App Device Two",
+                                      .kind = synth::MidiProfileKind::MfTwister,
+                                      .inputAliases = {"App Device Two"},
+                                      .outputAliases = {"App Device Two"},
+                                      .config = {}});
+    const std::vector<synth::ControllerWizardDescriptor> appRegistry =
+        synth::MakeControllerWizardRegistry(catalog);
+    // This catalog covers Generic and MfTwister, so a device must still stay
+    // reachable for Launchpad and WRLD.Bldr: the registry appends a library
+    // descriptor for each, before the dropdown's one Custom entry (frogg3rs'
+    // real shape: its six devices cover MfTwister/Generic/Launchpad, so only
+    // WRLD.Bldr gets appended there).
+    Require(appRegistry.size() == 4, "the app registry is its 2 catalog devices plus library Launchpad and"
+                                     " WRLD.Bldr, the 2 kinds this catalog does not cover");
+    const std::vector<synth::ui::ControlOption> appOptions =
+        synth::runtime_ui::ControllersLayout::BuildAddPresetOptions(appRegistry);
+    Require(appOptions.size() == 5, "an app catalog's dropdown is its 2 devices, the 2 appended library"
+                                    " descriptors, and one Custom entry");
+    Require(appOptions[0].id == "app.device.one" && appOptions[1].id == "app.device.two",
+            "an app catalog's descriptors keep their own order and ids first");
+    Require(appOptions[2].id == "library.launchpad" && appOptions[3].id == "library.wrldbldr",
+            "library descriptors for uncovered kinds follow the catalog's own devices");
+    Require(appOptions.back().id == "custom" && appOptions.back().label == "Custom",
+            "an app catalog's dropdown also ends in exactly one Custom entry");
+}
+
+void TestAddLibraryLaunchpadAndWrldBldrGiveDefaultConfigAndDeviceLabel()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kAddPresetDraft, "library.launchpad"));
+    surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAddController));
+    Require(harness.commits == 1, "add library Launchpad commits");
+    Require(harness.instrument.controllers.size() == 1, "add library Launchpad appends one controller");
+    const synth::MidiControllerSlot& launchpad = harness.instrument.controllers[0];
+    Require(launchpad.kind == synth::MidiProfileKind::Launchpad, "the Launchpad row carries the Launchpad kind");
+    Require(launchpad.wizardId == "library.launchpad", "the Launchpad row carries the library descriptor's id");
+    const synth::MidiControllerProfileConfig expectedLaunchpad = synth::LaunchpadDefaultProfileConfig();
+    Require(launchpad.config.systemMessages.size() == expectedLaunchpad.systemMessages.size(),
+            "the Launchpad row's config matches the library default's system messages");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kAddPresetDraft, "library.wrldbldr"));
+    surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAddController));
+    Require(harness.commits == 2, "add library WRLD.Bldr commits");
+    Require(harness.instrument.controllers.size() == 2, "add library WRLD.Bldr appends one controller");
+    const synth::MidiControllerSlot& wrldbldr = harness.instrument.controllers[1];
+    Require(wrldbldr.kind == synth::MidiProfileKind::WrldBldr, "the WRLD.Bldr row carries the WrldBldr kind");
+    Require(wrldbldr.wizardId == "library.wrldbldr", "the WRLD.Bldr row carries the library descriptor's id");
+    const synth::MidiControllerProfileConfig expectedWrldBldr = synth::WrldBldrDefaultProfileConfig();
+    Require(wrldbldr.config.systemMessages.size() == expectedWrldBldr.systemMessages.size(),
+            "the WRLD.Bldr row's config matches the library default's system messages");
+
+    harness.connection.controllers.resize(harness.instrument.controllers.size());
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree tree = surface.BuildTree();
+    const synth::ui::Node* launchpadDevice =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerDevice(0));
+    const synth::ui::Node* wrldbldrDevice =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerDevice(1));
+    Require(launchpadDevice != nullptr && launchpadDevice->text == "Launchpad",
+            "the Launchpad row's device label reads the library descriptor's display name");
+    Require(wrldbldrDevice != nullptr && wrldbldrDevice->text == "WRLD.Bldr",
+            "the WRLD.Bldr row's device label reads the library descriptor's display name");
 }
 
 void TestWizardIgnoreCommitsOneInertBlacklistedRecord()
@@ -1156,7 +1210,7 @@ void TestNoHandRolledControllerNodesSurvive()
     {
         // A plain copy out of a tree is hand assembly too, and the predicate is
         // named for that breadth rather than pretending to be narrower than it
-        // is (task 7.1). This pins the case that used to make its old name a
+        // is. This pins the case that used to make its old name a
         // lie.
         std::ofstream out(temp);
         out << "void alias(const std::vector<ui::Node>& nodes) { ui::Node node = nodes.front(); }\n";
@@ -1176,8 +1230,8 @@ void TestNoHandRolledControllerNodesSurvive()
     Require(!synth::test::SourceAssemblesUiNodeByHand(temp),
             "source scan does not flag ui::Node parameters, references, or containers");
 
-    // sru-43's inspection over every runtime producer source, not just the two
-    // this suite grew up with. `RuntimePages.hpp` joined the set in task 7.1
+    // Inspection over every runtime producer source, not just the two
+    // this suite grew up with. `RuntimePages.hpp` joined the set
     // when `BuildSidebarTree` moved onto the library; it was the last runtime
     // page code hand-rolling nodes.
     for (const char* file : {"projects/synth/include/synth/ControllersPageUI.hpp",
@@ -1189,12 +1243,12 @@ void TestNoHandRolledControllerNodesSurvive()
     }
     // Anti-vacuity for the sweep above: a predicate that had quietly started
     // returning false for everything would pass all three. The shell is the one
-    // place that legitimately hand-places already-resolved subtree roots (D6,
-    // and confirmed in 7.1's review), so it is the fixture that proves the
-    // predicate still fires on real repository source.
+    // place that legitimately hand-places already-resolved subtree roots, so it
+    // is the fixture that proves the predicate still fires on real repository
+    // source.
     Require(synth::test::SourceAssemblesUiNodeByHand(
                 "projects/synth/include/synth/RuntimeMainComponent.hpp"),
-            "the shell's deliberate composition root keeps the sru-43 scan honest");
+            "the shell's deliberate composition root keeps the scan honest");
 }
 
 void TestControllersSectionsNestThroughLibraryContainers()
@@ -1218,8 +1272,8 @@ void TestControllersSectionsNestThroughLibraryContainers()
     Require(!scroll->children.empty(), "the Controllers scroll area has nested children");
     const synth::ui::Node* row =
         FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerRow(0));
-    Require(row != nullptr && row->kind == synth::ui::NodeKind::Row,
-            "controller list entries are Row containers");
+    Require(row != nullptr && row->kind == synth::ui::NodeKind::Section,
+            "controller list entries are Section containers stacking their two header lines");
     Require(FindParentOf(tree, row->id.value) == scroll,
             "controller list rows are nested under the scroll area");
     const synth::ui::Node* section =
@@ -1272,12 +1326,79 @@ void TestControllerRowsStayReadableWithLargeLists()
         FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerRow(59));
     Require(scroll != nullptr && first != nullptr && tail != nullptr,
             "large controller list exposes first and tail rows");
-    Require(first->bounds.height == 36.0f && tail->bounds.height == 36.0f,
+    Require(first->bounds.height == synth::runtime_ui::ControllersLayout::kControllerHeaderHeight &&
+                tail->bounds.height == synth::runtime_ui::ControllersLayout::kControllerHeaderHeight,
             "large controller list rows keep the recovered readable height");
     Require(scroll->scrollContentHeight > scroll->bounds.height,
             "large controller list publishes a larger scroll content extent");
     Require(tail->bounds.y + tail->bounds.height <= scroll->scrollContentHeight + 0.001f,
             "large controller list tail stays inside scroll content");
+}
+
+void TestControllerDeviceLabelsIdentifyThePresetOrBoundInputDevice()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+
+    // (a) a row added from a device preset: the resolved wizard id's
+    // descriptor names the row, not its internal profile kind.
+    synth::MidiControllerSlot fromPreset;
+    fromPreset.name = "from preset";
+    fromPreset.kind = synth::MidiProfileKind::MfTwister;
+    fromPreset.config = synth::MfTwisterDefaultProfileConfig();
+    fromPreset.wizardId = "com.sheaf.midi-fighter-twister";
+    fromPreset.input = {.identifier = "twister-in", .name = "Midi Fighter Twister"};
+    fromPreset.output = {.identifier = "twister-out", .name = "Midi Fighter Twister"};
+    Require(harness.instrument.AddController(fromPreset), "add preset-created controller");
+    harness.connection.controllers.push_back({});
+
+    // (b) a Custom row: no wizard id resolves, so the label falls back to
+    // the MIDI input device the row is bound to, the same identity the
+    // "MIDI in:" label already shows on a blacklisted row.
+    synth::MidiControllerSlot custom = MakeGenericSlot("custom row");
+    custom.input = {.identifier = "custom-in", .name = "Custom Input"};
+    Require(harness.instrument.AddController(custom), "add Custom controller");
+    harness.connection.controllers.push_back({});
+
+    // A Custom row bound to no device: the fallback still resolves, to the
+    // same "(none)" the stored-endpoint label uses.
+    Require(harness.instrument.AddController(MakeGenericSlot("unbound custom")),
+            "add unbound Custom controller");
+    harness.connection.controllers.push_back({});
+
+    // (c) a blacklisted row from a preset: the same descriptor lookup
+    // applies once the row is Released.
+    synth::MidiControllerSlot blacklisted = fromPreset;
+    blacklisted.name = "blacklisted preset";
+    blacklisted.disposition = synth::MidiControllerDisposition::Blacklisted;
+    blacklisted.dormantConfig = blacklisted.config;
+    blacklisted.config = {};
+    Require(harness.instrument.AddController(blacklisted), "add blacklisted preset controller");
+    harness.connection.controllers.push_back({});
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree tree = surface.BuildTree();
+
+    const synth::ui::Node* presetDevice =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerDevice(0));
+    const synth::ui::Node* customDevice =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerDevice(1));
+    const synth::ui::Node* unboundCustomDevice =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerDevice(2));
+    const synth::ui::Node* blacklistedDevice =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerDevice(3));
+
+    Require(presetDevice != nullptr && presetDevice->text == "MIDI Fighter Twister",
+            "a row created from a device preset shows the preset's descriptor name");
+    Require(customDevice != nullptr && customDevice->text == "Custom Input (custom-in)",
+            "a Custom row with no resolved preset shows the MIDI input device it is bound to");
+    Require(unboundCustomDevice != nullptr && unboundCustomDevice->text == "(none)",
+            "a Custom row bound to no device shows the same (none) the MIDI in: label uses");
+    Require(blacklistedDevice != nullptr && blacklistedDevice->text == "MIDI Fighter Twister",
+            "a blacklisted row created from a device preset still shows the preset's descriptor name");
 }
 
 void TestControllerLifecycleActionsUseTheNormalCommitAndSavePath()
@@ -1316,23 +1437,32 @@ void TestControllerLifecycleActionsUseTheNormalCommitAndSavePath()
     surface.MarkDirty();
     surface.RefreshOnTick();
     const synth::ui::NodeTree initialTree = surface.BuildTree();
+    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerRenameDraft(0)) == nullptr &&
+                FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerRename(0)) == nullptr &&
+                FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerRenameDraft(3)) == nullptr,
+            "the Name row is absent from the header -- a collapsed active row and a blacklisted row (which"
+            " has no editor to move it into) both show neither the draft nor its button");
+    surface.ViewModel().ToggleConfig(0);
+    const synth::ui::NodeTree expandedTree = surface.BuildTree();
     const synth::ui::Node* renameDraft = FindNodeById(
-        initialTree, synth::runtime_ui::NodeIds::ControllerRenameDraft(0));
+        expandedTree, synth::runtime_ui::NodeIds::ControllerRenameDraft(0));
     const synth::ui::Node* renameButton = FindNodeById(
-        initialTree, synth::runtime_ui::NodeIds::ControllerRename(0));
+        expandedTree, synth::runtime_ui::NodeIds::ControllerRename(0));
     Require(renameDraft != nullptr && renameDraft->action.has_value() &&
                 renameDraft->action->value.back() != ':' &&
                 renameButton != nullptr && renameButton->action.has_value(),
-            "Rename exposes a draft field with an unambiguous renderer prefix and an explicit commit button");
+            "the expanded editor exposes a Name draft field with an unambiguous renderer prefix and an"
+            " explicit commit button");
+    Require(FindNodeById(expandedTree, synth::runtime_ui::NodeIds::ControllerRenameDraft(0) + ".caption")
+                    ->text == "Name",
+            "the editor's Name draft has a visible caption");
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerDelete(0)) != nullptr,
             "manual active row exposes Delete");
-    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerBlacklist(1)) != nullptr &&
-                FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerReconfigure(1)) != nullptr,
-            "resolved active row exposes Blacklist and Reconfigure");
+    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerBlacklist(1)) != nullptr,
+            "resolved active row exposes Blacklist");
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerBlacklist(2)) == nullptr &&
-                FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerReconfigure(2)) == nullptr &&
                 FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerDelete(2)) != nullptr,
-            "unknown active id gates wizard actions but preserves recovery Delete");
+            "unknown active id gates Blacklist but preserves recovery Delete");
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerBadge(3)) != nullptr &&
                 FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerRemoveBlacklist(3)) != nullptr &&
                 FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerConfigure(3)) != nullptr &&
@@ -1343,7 +1473,7 @@ void TestControllerLifecycleActionsUseTheNormalCommitAndSavePath()
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerConfigure(4)) == nullptr &&
                 FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerRemoveBlacklist(4)) != nullptr,
             "unknown blacklisted id preserves Remove but gates Configure");
-    // sru-4: a blacklisted row shows its stored endpoint labels. Its endpoints
+    // A blacklisted row shows its stored endpoint labels. Its endpoints
     // stay deliberately Unconfigured, so the label cannot come from connection
     // status, and the identifier must survive so duplicate same-name devices
     // remain distinguishable.
@@ -1359,13 +1489,30 @@ void TestControllerLifecycleActionsUseTheNormalCommitAndSavePath()
                 blacklistedOutputLabel->text.find("Known Output") != std::string::npos &&
                 blacklistedOutputLabel->text.find("known-out") != std::string::npos,
             "blacklisted row shows its stored output name and identifier");
-    const synth::ui::Node* incompleteBlacklist = FindNodeById(
+    const synth::ui::Node* incompleteRelease = FindNodeById(
         initialTree, synth::runtime_ui::NodeIds::ControllerBlacklist(5));
-    Require(incompleteBlacklist != nullptr && !incompleteBlacklist->enabled,
-            "resolved Active records with incomplete endpoints keep a disabled Blacklist affordance");
+    Require(incompleteRelease == nullptr,
+            "an incomplete endpoint pair keeps Release off the row entirely, not just disabled");
     const synth::ui::Node* lifecycleScroll = FindNodeById(
         initialTree, synth::runtime_ui::NodeIds::kScroll);
     Require(lifecycleScroll != nullptr, "lifecycle tree includes its scroll container");
+    const std::string legendId = synth::runtime_ui::NodeIds::kStatusLegend;
+    const synth::ui::Node* onlineDot = FindNodeById(initialTree, legendId + ".online");
+    const synth::ui::Node* onlineLabel = FindNodeById(initialTree, legendId + ".online.label");
+    const synth::ui::Node* offlineDot = FindNodeById(initialTree, legendId + ".offline");
+    const synth::ui::Node* offlineLabel = FindNodeById(initialTree, legendId + ".offline.label");
+    const synth::ui::Node* notSetDot = FindNodeById(initialTree, legendId + ".not_set");
+    const synth::ui::Node* notSetLabel = FindNodeById(initialTree, legendId + ".not_set.label");
+    Require(onlineDot != nullptr && onlineLabel != nullptr && offlineDot != nullptr &&
+                offlineLabel != nullptr && notSetDot != nullptr && notSetLabel != nullptr,
+            "the status dot legend carries all three dot/label pairs");
+    Require(onlineLabel->text == "online" && offlineLabel->text == "offline" &&
+                notSetLabel->text == "not set",
+            "the status dot legend names the three endpoint statuses in order");
+    Require(onlineDot->bounds.x < onlineLabel->bounds.x &&
+                offlineDot->bounds.x < offlineLabel->bounds.x &&
+                notSetDot->bounds.x < notSetLabel->bounds.x,
+            "each status dot precedes its own label on x");
     for (const synth::ui::Node& node : initialTree.nodes)
     {
         if (node.id.value.starts_with("runtime.controllers.row.") &&
@@ -1425,8 +1572,14 @@ void TestControllerLifecycleActionsUseTheNormalCommitAndSavePath()
     Require(harness.commits == 1 && harness.saves == 1 &&
                 harness.instrument.controllers[0].name == "manual:renamed",
             "Rename preserves a colon-containing valid name through the lifecycle callback path");
-    surface.DispatchAction(*FindNodeById(
-        surface.BuildTree(), synth::runtime_ui::NodeIds::ControllerRename(0))->action);
+    const synth::ui::NodeTree renamedTree = surface.BuildTree();
+    const synth::ui::Node* renameDraftAgain = FindNodeById(
+        renamedTree, synth::runtime_ui::NodeIds::ControllerRenameDraft(0));
+    const synth::ui::Node* renameAgain = FindNodeById(
+        renamedTree, synth::runtime_ui::NodeIds::ControllerRename(0));
+    Require(renameDraftAgain != nullptr && renameAgain != nullptr && renameAgain->action.has_value(),
+            "the rename editor stays open under the new name after the commit");
+    surface.DispatchAction(*renameAgain->action);
     Require(harness.commits == 1 && harness.saves == 1,
             "unchanged rename is refused without a second commit or save");
     harness.connection.controllers[1].input = {
@@ -1492,23 +1645,909 @@ std::string VisibleTextLower(const synth::ui::NodeTree& tree)
     return text;
 }
 
+void TestReleaseRequiresResolvedWizardAndBoundEndpoints()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+
+    synth::MidiControllerSlot noDevice;
+    noDevice.name = "no device";
+    noDevice.kind = synth::MidiProfileKind::MfTwister;
+    noDevice.config = synth::MfTwisterDefaultProfileConfig();
+    noDevice.wizardId = "com.sheaf.midi-fighter-twister";
+
+    synth::MidiControllerSlot bound;
+    bound.name = "bound";
+    bound.kind = synth::MidiProfileKind::MfTwister;
+    bound.config = synth::MfTwisterDefaultProfileConfig();
+    bound.wizardId = "com.sheaf.midi-fighter-twister";
+    bound.input = {.identifier = "bound-in", .name = "Bound Input"};
+    bound.output = {.identifier = "bound-out", .name = "Bound Output"};
+
+    synth::MidiControllerSlot boundUnresolved = bound;
+    boundUnresolved.name = "bound unresolved";
+    boundUnresolved.wizardId = "com.example.missing-wizard";
+    boundUnresolved.input = {.identifier = "unresolved-in", .name = "Unresolved Input"};
+    boundUnresolved.output = {.identifier = "unresolved-out", .name = "Unresolved Output"};
+
+    synth::MidiControllerSlot boundResolvedToEdit = bound;
+    boundResolvedToEdit.name = "bound resolved to edit";
+    boundResolvedToEdit.input = {.identifier = "edit-in", .name = "Edit Input"};
+    boundResolvedToEdit.output = {.identifier = "edit-out", .name = "Edit Output"};
+
+    Require(harness.instrument.AddController(noDevice), "add unbound resolved controller");
+    Require(harness.instrument.AddController(bound), "add bound resolved controller");
+    Require(harness.instrument.AddController(boundUnresolved), "add bound unresolved controller");
+    Require(harness.instrument.AddController(boundResolvedToEdit),
+            "add bound resolved controller for the edit case");
+    harness.connection.controllers.resize(harness.instrument.controllers.size());
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree tree = surface.BuildTree();
+
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerBlacklist(0)) == nullptr,
+            "Release is absent from a resolved row with no bound device");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerBlacklist(1)) != nullptr,
+            "Release is present on a fully bound resolved row");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerBlacklist(2)) == nullptr,
+            "Release is absent from a bound row whose wizard id does not resolve");
+
+    // Drive the row through the real mapping-edit action (not a hand-built
+    // config) so this fails if the edit path ever clears wizardId again.
+    const std::string mappingEditValue =
+        std::to_string(3) + ":" +
+        synth::runtime_ui::ControllersLayout::SectionToken(synth::MidiConfigSection::Encoders) + ":0:" +
+        synth::runtime_ui::ControllersLayout::FieldToken(synth::MidiMappingRowVM::Field::SlotIx) + ":5";
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kMappingFieldCommit, mappingEditValue));
+    Require(harness.commits == 1 && surface.StatusText() == "OK",
+            "the mapping edit on the fourth row commits through the normal mapping-edit path");
+    Require(harness.instrument.controllers[3].wizardId.has_value() &&
+                *harness.instrument.controllers[3].wizardId == "com.sheaf.midi-fighter-twister",
+            "editing a mapping does not clear the row's wizard id");
+
+    const synth::ui::NodeTree editedTree = surface.BuildTree();
+    Require(FindNodeById(editedTree, synth::runtime_ui::NodeIds::ControllerBlacklist(3)) != nullptr,
+            "Release is present on a bound, resolved row after its mappings have been edited");
+}
+
+void TestReleaseNeverOffersWhatBlacklistControllerWouldRefuse()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+
+    synth::MidiControllerSlot boundUnresolved;
+    boundUnresolved.name = "bound unresolved";
+    boundUnresolved.kind = synth::MidiProfileKind::MfTwister;
+    boundUnresolved.config = synth::MfTwisterDefaultProfileConfig();
+    boundUnresolved.wizardId = "com.example.missing-wizard";
+    boundUnresolved.input = {.identifier = "unresolved-in", .name = "Unresolved Input"};
+    boundUnresolved.output = {.identifier = "unresolved-out", .name = "Unresolved Output"};
+
+    Require(harness.instrument.AddController(boundUnresolved),
+            "add a bound controller with an unresolved wizard id");
+    harness.connection.controllers.resize(harness.instrument.controllers.size());
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree tree = surface.BuildTree();
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerBlacklist(0)) == nullptr,
+            "the page omits Release for a bound row whose wizard id does not resolve");
+
+    synth::MidiInstrumentConfig out;
+    std::string reason;
+    Require(!surface.ViewModel().BlacklistController(0, out, &reason),
+            "BlacklistController itself refuses the very slot the page omits Release for");
+    Require(reason == "only registry-supported active controllers can be released",
+            "the refusal names the registry-support precondition the page's gate now mirrors");
+}
+
+void TestConfigureStaysAvailableOnAReleasedEditedRow()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+
+    synth::MidiControllerSlot edited;
+    edited.name = "released and edited";
+    edited.kind = synth::MidiProfileKind::MfTwister;
+    edited.wizardId = "com.sheaf.midi-fighter-twister";
+    edited.config = synth::MfTwisterDefaultProfileConfig(
+        synth::MfTwisterDefaultProfileOptions{.slotIx = 5});
+    edited.input = {.identifier = "rel-in", .name = "Release In"};
+    edited.output = {.identifier = "rel-out", .name = "Release Out"};
+
+    Require(harness.instrument.AddController(edited), "add a resolved, edited, bound controller");
+    harness.connection.controllers.resize(harness.instrument.controllers.size());
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kControllerBlacklist,
+        synth::runtime_ui::NodeIds::ControllerActionToken(0, "released and edited")));
+    Require(harness.instrument.controllers[0].disposition == synth::MidiControllerDisposition::Blacklisted,
+            "the row is released before checking Configure");
+
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree releasedTree = surface.BuildTree();
+    Require(FindNodeById(releasedTree, synth::runtime_ui::NodeIds::ControllerConfigure(0)) != nullptr,
+            "Configure stays available on a released row whose mappings were edited before release");
+}
+
+void TestRelabellingIsCosmeticForReleasedRecords()
+{
+    Require(std::string_view(synth::runtime_ui::Actions::kControllerBlacklist) ==
+                std::string_view("runtime.controllers.controller.blacklist"),
+            "the Release action's wire name is unchanged by relabelling");
+    Require(std::string_view(synth::runtime_ui::Actions::kControllerRemoveBlacklist) ==
+                std::string_view("runtime.controllers.controller.remove_blacklist"),
+            "the Reclaim action's wire name is unchanged by relabelling");
+
+    synth::MidiInstrumentConfig instrument;
+    synth::MidiControllerSlot released;
+    released.name = "released twister";
+    released.kind = synth::MidiProfileKind::MfTwister;
+    released.disposition = synth::MidiControllerDisposition::Blacklisted;
+    released.wizardId = "com.sheaf.midi-fighter-twister";
+    released.input = {.identifier = "rt-in", .name = "Released Twister In"};
+    released.output = {.identifier = "rt-out", .name = "Released Twister Out"};
+    released.dormantConfig = synth::MfTwisterDefaultProfileConfig();
+    Require(instrument.AddController(released), "add a released record");
+
+    synth::JsonArena arena(256 * 1024);
+    const synth::JSON json = synth::ToJSON(arena, instrument);
+    const synth::JSON controller = json.Get("controllers").GetAt(0);
+    Require(controller.Get("disposition").StringValue() == std::string_view("blacklisted"),
+            "the persisted disposition token is unchanged by relabelling");
+
+    synth::MidiInstrumentConfig loaded;
+    Require(synth::FromJSON(json, loaded), "the released record round-trips");
+    Require(loaded.controllers.size() == 1 &&
+                loaded.controllers[0].disposition == synth::MidiControllerDisposition::Blacklisted &&
+                loaded.controllers[0].wizardId == released.wizardId,
+            "the round trip preserves the released disposition and identity");
+}
+
+void TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence()
+{
+    // Seed a genuinely installed Twister row through the real add-from-preset
+    // path (the same InstallDescriptorProfile call Restore itself uses), so
+    // the config copied from it below is guaranteed to be what
+    // SlotMatchesWizardProfile will regenerate and compare against -- not a
+    // hand-guessed approximation of it.
+    TestHarness seedHarness;
+    seedHarness.devices.inputs.push_back({"twister-in-id", "Midi Fighter Twister"});
+    auto seedSurface = seedHarness.MakeSurface();
+    seedSurface.SetEnumerateDevices(seedHarness.devices);
+    seedSurface.MarkDirty();
+    seedSurface.RefreshOnTick();
+    seedSurface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAddController));
+    Require(seedHarness.instrument.controllers.size() == 4, "seed harness installs one preset row");
+    const synth::MidiControllerSlot installed = seedHarness.instrument.controllers[3];
+    Require(installed.wizardId == "com.sheaf.midi-fighter-twister" &&
+                installed.input.identifier == "twister-in-id" &&
+                installed.output.identifier == "uid:782494201",
+            "the seed row installed from the library preset with both ports bound");
+
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+
+    synth::MidiControllerSlot pristine = installed;
+    pristine.name = "pristine";
+    pristine.input = {.identifier = "pristine-in", .name = "Pristine Input"};
+    pristine.output = {.identifier = "pristine-out", .name = "Pristine Output"};
+
+    synth::MidiControllerSlot manual = MakeGenericSlot("manual restore check");
+
+    synth::MidiControllerSlot edited = installed;
+    edited.name = "edited";
+    edited.input = {.identifier = "edited-in", .name = "Edited Input"};
+    edited.output = {.identifier = "edited-out", .name = "Edited Output"};
+
+    Require(harness.instrument.AddController(pristine), "add pristine preset row");
+    Require(harness.instrument.AddController(manual), "add manual row");
+    Require(harness.instrument.AddController(edited), "add row to diverge next");
+    harness.connection.controllers.resize(harness.instrument.controllers.size());
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // Diverge row 2's mapping through the real per-field commit path, exactly
+    // as a user editing a mapping would, rather than hand-mutating its config.
+    surface.ViewModel().ToggleConfig(2);
+    surface.ViewModel().ToggleSection(2, synth::MidiConfigSection::Encoders);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const std::vector<synth::MidiMappingRowVM> encoderRows =
+        surface.ViewModel().SectionRows(2, synth::MidiConfigSection::Encoders);
+    std::optional<std::size_t> turnStepRowIx;
+    for (std::size_t ix = 0; ix < encoderRows.size(); ++ix)
+    {
+        for (synth::MidiMappingRowVM::Field field : encoderRows[ix].editableFields)
+        {
+            if (field == synth::MidiMappingRowVM::Field::TurnStep)
+            {
+                turnStepRowIx = ix;
+                break;
+            }
+        }
+        if (turnStepRowIx.has_value())
+        {
+            break;
+        }
+    }
+    Require(turnStepRowIx.has_value(), "find an editable turn-step row to diverge");
+    const std::string editValue = "2:encoders:" + std::to_string(*turnStepRowIx) + ":" +
+                                  std::to_string(static_cast<int>(synth::MidiMappingRowVM::Field::TurnStep)) +
+                                  ":0.25";
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kMappingFieldCommit, editValue));
+    Require(harness.commits == 1, "the mapping edit commits");
+
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree tree = surface.BuildTree();
+
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerRestore(0)) == nullptr,
+            "Restore is absent from an untouched preset row");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerRestore(1)) == nullptr,
+            "Restore is absent from a row never created from a preset");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerRestore(2)) != nullptr,
+            "Restore is present on a preset row whose config has diverged from its preset");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kControllerRestore,
+        synth::runtime_ui::NodeIds::ControllerActionToken(2, "edited")));
+
+    const synth::MidiControllerSlot& restored = harness.instrument.controllers[2];
+    Require(restored.name == "edited", "Restore preserves the row's name");
+    Require(restored.input.identifier == "edited-in" && restored.output.identifier == "edited-out",
+            "Restore preserves both endpoint refs");
+    Require(restored.disposition == synth::MidiControllerDisposition::Active,
+            "Restore preserves the row's disposition");
+
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree afterRestoreTree = surface.BuildTree();
+    Require(FindNodeById(afterRestoreTree, synth::runtime_ui::NodeIds::ControllerRestore(2)) == nullptr,
+            "Restore disappears once the row matches its preset again");
+}
+
+// The Encoders section's Turn and Push group headers lay their column labels
+// and Add/Block buttons out in one Row sharing ControllersLayout::
+// kEditorColumnGap (ControllersPageUI.hpp's emitGroupHeader), the same gap
+// the mapping rows below use between fields. Pin the gap by geometry, not by
+// control count, so a regression that collapsed it back to the old literal
+// 0.0f (welding the last column to the Add button) fails here.
+void TestEncoderGroupHeaderSeparatesLastColumnFromAddButton()
+{
+    using RowGroup = synth::MidiMappingRowVM::RowGroup;
+
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.SetContentBounds({0.0f, 0.0f, 1000.0f, 800.0f});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // Controller 2 ("blank") is MakeGenericSlot()'s untouched default: no
+    // encoderInput at all, so SectionRows() below is empty and both group
+    // headers come from AddableGroups()' header-only affordance rather than
+    // from any actual mapping row.
+    constexpr std::size_t controllerIx = 2;
+    surface.ViewModel().ToggleConfig(controllerIx);
+    surface.ViewModel().ToggleSection(controllerIx, synth::MidiConfigSection::Encoders);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    Require(surface.ViewModel().SectionRows(controllerIx, synth::MidiConfigSection::Encoders).empty(),
+            "blank generic controller starts with no encoder mapping rows");
+
+    const std::vector<synth::MidiMappingRowVM::Field> turnFields = surface.ViewModel().GroupColumnFields(
+        controllerIx, synth::MidiConfigSection::Encoders, RowGroup::EncoderTurn);
+    const std::vector<synth::MidiMappingRowVM::Field> pushFields = surface.ViewModel().GroupColumnFields(
+        controllerIx, synth::MidiConfigSection::Encoders, RowGroup::EncoderPush);
+    Require(turnFields.size() > 1, "Turn header shows more than one column label");
+    Require(pushFields.size() > 1, "Push header shows more than one column label");
+
+    const synth::ui::NodeTree tree = surface.BuildTree();
+
+    auto requireHeaderGaps = [&](std::size_t headerIx, std::size_t lastFieldIx, const char* presenceLabel,
+                                 const char* columnGapLabel, const char* addGapLabel) {
+        const synth::ui::Node* lastColumn = FindNodeById(
+            tree, synth::runtime_ui::NodeIds::GroupColumnLabel(
+                      controllerIx, synth::MidiConfigSection::Encoders, headerIx, lastFieldIx));
+        const synth::ui::Node* addSingle = FindNodeById(
+            tree, synth::runtime_ui::NodeIds::GroupAddSingle(
+                      controllerIx, synth::MidiConfigSection::Encoders, headerIx));
+        const synth::ui::Node* addBlock = FindNodeById(
+            tree, synth::runtime_ui::NodeIds::GroupAddBlock(
+                      controllerIx, synth::MidiConfigSection::Encoders, headerIx));
+        Require(lastColumn != nullptr && addSingle != nullptr && addBlock != nullptr, presenceLabel);
+
+        Require(addSingle->bounds.x - (lastColumn->bounds.x + lastColumn->bounds.width) ==
+                    synth::runtime_ui::ControllersLayout::kEditorColumnGap,
+                columnGapLabel);
+        Require(addBlock->bounds.x - (addSingle->bounds.x + addSingle->bounds.width) ==
+                    synth::runtime_ui::ControllersLayout::kEditorColumnGap,
+                addGapLabel);
+    };
+
+    requireHeaderGaps(0, turnFields.size() - 1,
+                      "Turn header's last column, add_single, and add_block nodes all render",
+                      "Turn header: last column to add_single keeps kEditorColumnGap",
+                      "Turn header: add_single to add_block keeps kEditorColumnGap");
+    requireHeaderGaps(1, pushFields.size() - 1,
+                      "Push header's last column, add_single, and add_block nodes all render",
+                      "Push header: last column to add_single keeps kEditorColumnGap",
+                      "Push header: add_single to add_block keeps kEditorColumnGap");
+}
+
+void TestSystemMessageShiftFieldRendersAndCommits()
+{
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.SetContentBounds({0.0f, 0.0f, 1000.0f, 800.0f});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // Controller 2 ("blank") is MakeGenericSlot()'s untouched default -- no
+    // system messages at all, so AddSingle seeds the row this test edits.
+    constexpr std::size_t controllerIx = 2;
+    surface.ViewModel().ToggleConfig(controllerIx);
+    surface.ViewModel().ToggleSection(controllerIx, synth::MidiConfigSection::SystemMessages);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddSingle,
+                                                        "2:system_messages:system"));
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    const std::vector<synth::MidiMappingRowVM> rows =
+        surface.ViewModel().SectionRows(controllerIx, synth::MidiConfigSection::SystemMessages);
+    Require(!rows.empty(), "add single creates a system row");
+    Require(std::find(rows[0].editableFields.begin(), rows[0].editableFields.end(),
+                      synth::MidiMappingRowVM::Field::ShiftAction) != rows[0].editableFields.end(),
+            "fresh system row exposes the Shift field");
+
+    const synth::ui::NodeTree tree = surface.BuildTree();
+    const synth::ui::Node* shiftCombo = FindNodeById(
+        tree, synth::runtime_ui::NodeIds::MappingField(controllerIx, synth::MidiConfigSection::SystemMessages, 0,
+                                                        synth::MidiMappingRowVM::Field::ShiftAction));
+    Require(shiftCombo != nullptr, "system row's Shift combo renders");
+    Require(shiftCombo->kind == synth::ui::NodeKind::ComboBox, "Shift field renders as a combo box");
+    Require(shiftCombo->options.size() == surface.ViewModel().ShiftCatalog().size(),
+            "Shift combo offers every ShiftCatalog() choice");
+    Require(shiftCombo->selectedOption == "0", "a fresh row's Shift combo starts at (none)");
+
+    const std::vector<synth::UISystemMessageChoice>& shiftCatalog = surface.ViewModel().ShiftCatalog();
+    Require(shiftCatalog.size() > 1, "fixture's ShiftCatalog offers at least one real choice besides (none)");
+    constexpr int kShiftChoiceIx = 1;
+
+    const std::string commitValue =
+        std::to_string(controllerIx) + ":system_messages:0:" +
+        std::to_string(static_cast<int>(synth::MidiMappingRowVM::Field::ShiftAction)) + ":" +
+        std::to_string(kShiftChoiceIx);
+    const int commitsBefore = harness.commits;
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kMappingFieldCommit, commitValue));
+    Require(harness.commits == commitsBefore + 1, "Shift field commit persists through the normal commit path");
+
+    const synth::MidiControllerSystemMessageAssociation& committed =
+        harness.instrument.controllers[controllerIx].config.systemMessages[0];
+    Require(committed.shiftedPress.has_value(), "committed association carries a shifted press");
+
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::Node* shiftComboAfter = FindNodeById(
+        surface.BuildTree(), synth::runtime_ui::NodeIds::MappingField(
+                                 controllerIx, synth::MidiConfigSection::SystemMessages, 0,
+                                 synth::MidiMappingRowVM::Field::ShiftAction));
+    Require(shiftComboAfter != nullptr && shiftComboAfter->selectedOption == std::to_string(kShiftChoiceIx),
+            "Shift combo reflects the committed choice after rebuild");
+}
+
 }  // namespace
+
+void TestLaunchpadRowOffersVariantAndRetargetsItsPads()
+{
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.SetContentBounds({0.0f, 0.0f, 1000.0f, 800.0f});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // MakeInstrument()'s three rows: 0 wrldbldr, 1 launchpad, 2 generic.
+    constexpr std::size_t launchpadIx = 1;
+    const synth::ui::NodeTree tree = surface.BuildTree();
+    const synth::ui::Node* variant =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerVariant(launchpadIx));
+    Require(variant != nullptr, "the launchpad row offers a model selector");
+    Require(variant->kind == synth::ui::NodeKind::ComboBox, "Variant is a combo box");
+    Require(variant->options.size() == 3, "Variant offers every Launchpad model");
+    Require(variant->options[0].label == std::string("Launchpad X"), "first option is Launchpad X");
+    Require(variant->options[2].label == std::string("Launchpad Mini MK3"),
+            "last option is the Mini MK3");
+    Require(variant->selectedOption == "0", "a default-profile row shows Launchpad X");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerVariant(0)) == nullptr &&
+                FindNodeById(tree, synth::runtime_ui::NodeIds::ControllerVariant(2)) == nullptr,
+            "no other kind offers a model selector");
+
+    // The backend appends the chosen option's id to the action's value.
+    const int commitsBefore = harness.commits;
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kVariantSelect, "1:2"));
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    Require(harness.commits == commitsBefore + 1, "choosing a model commits once");
+    const synth::MidiControllerSlot& pads = harness.instrument.controllers[launchpadIx];
+    Require(pads.config.launchpadModel == synth::LaunchpadController::LaunchpadMiniMk3,
+            "the row records the chosen model");
+    std::size_t retargeted = 0;
+    for (const auto& association : pads.config.systemMessages)
+    {
+        if (association.launchpadPosition.has_value())
+        {
+            Require(association.launchpadPosition->controller ==
+                        synth::LaunchpadController::LaunchpadMiniMk3,
+                    "every pad follows the chosen model");
+            ++retargeted;
+        }
+    }
+    Require(retargeted > 0, "the default profile had pads to retarget");
+
+    const synth::ui::NodeTree after = surface.BuildTree();
+    const synth::ui::Node* afterVariant =
+        FindNodeById(after, synth::runtime_ui::NodeIds::ControllerVariant(launchpadIx));
+    Require(afterVariant != nullptr && afterVariant->selectedOption == "2",
+            "the selector shows what the row now records");
+}
+
+void TestLaunchpadRowModelSelectorIsCaptionedModel()
+{
+    TestHarness harness;
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.SetContentBounds({0.0f, 0.0f, 1000.0f, 800.0f});
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    // MakeInstrument()'s three rows: 0 wrldbldr, 1 launchpad, 2 generic.
+    constexpr std::size_t launchpadIx = 1;
+    const synth::ui::NodeTree tree = surface.BuildTree();
+    const synth::ui::Node* caption = FindNodeById(
+        tree, synth::runtime_ui::NodeIds::ControllerVariant(launchpadIx) + ".caption");
+    Require(caption != nullptr && caption->text == "Model",
+            "the launchpad row's model selector is captioned Model");
+}
+
+void TestConnectMessageShowsOnAnAbletonStyleRowsExpandedConfiguration()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    // The real Akai APC40 mkII Ableton-mode connect message
+    // (app/FroggersMidiCatalog.hpp's Apc40AbletonDeviceDefault), not a
+    // placeholder byte string.
+    synth::MidiControllerSlot ableton = MakeGenericSlot("Ableton APC40");
+    ableton.config.openSysEx.push_back({0xF0, 0x47, 0x7F, 0x29, 0x60, 0x00, 0x04, 0x41, 0x09, 0x07, 0x01, 0xF7});
+    Require(harness.instrument.AddController(ableton), "add Ableton-style controller");
+    harness.connection.controllers.push_back({});
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    surface.ViewModel().ToggleConfig(0);
+    const synth::ui::NodeTree tree = surface.BuildTree();
+
+    const synth::ui::Node* field =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ConnectMessageField(0, 0));
+    Require(field != nullptr && field->text == "F0 47 7F 29 60 00 04 41 09 07 01 F7",
+            "an Ableton-style row's connect message shows as hex bytes in its expanded configuration");
+    const synth::ui::Node* heading =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ConnectMessagesHeading(0));
+    Require(heading != nullptr && heading->text == "Connect messages",
+            "the connect-messages area has a visible heading");
+    const synth::ui::Node* addButton =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ConnectMessageAdd(0));
+    Require(addButton != nullptr, "the connect-messages area offers an Add button");
+    // Measured bounds, not appearance: the button must be emitted inside a
+    // Row so its width/height style arguments land on the Row's horizontal
+    // and vertical axes respectively, not swapped by a Column parent.
+    Require(addButton->bounds.width == synth::runtime_ui::ControllersLayout::kAddButtonWidth &&
+                addButton->bounds.height == 28.0f,
+            "the Add button's measured width and height land on their own axes");
+    const synth::ui::Node* deleteButton =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::ConnectMessageDelete(0, 0));
+    Require(deleteButton != nullptr, "the stored connect message has a delete button");
+}
+
+void TestConnectMessageEditCommitsValidAndRefusesInvalidUnchanged()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    // Starts with a placeholder message; the edit below replaces it with the
+    // real Akai APC40 mkII Ableton-mode message
+    // (app/FroggersMidiCatalog.hpp's Apc40AbletonDeviceDefault).
+    synth::MidiControllerSlot ableton = MakeGenericSlot("Ableton APC40");
+    ableton.config.openSysEx.push_back({0xF0, 0x7E, 0x00, 0xF7});
+    Require(harness.instrument.AddController(ableton), "add Ableton-style controller");
+    harness.connection.controllers.push_back({});
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    surface.ViewModel().ToggleConfig(0);
+
+    // A valid edit (F0 ... F7, data bytes in 00-7F) commits and updates the
+    // field text.
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageCommit,
+        "0:0:F0 47 7F 29 60 00 04 41 09 07 01 F7"));
+    Require(harness.commits == 1 && surface.StatusText() == "OK",
+            "a valid connect-message edit commits");
+    Require(harness.instrument.controllers[0].config.openSysEx[0] ==
+                (std::vector<std::uint8_t>{0xF0, 0x47, 0x7F, 0x29, 0x60, 0x00, 0x04, 0x41, 0x09, 0x07, 0x01,
+                                          0xF7}),
+            "the committed instrument carries the parsed bytes");
+    const synth::ui::NodeTree afterValid = surface.BuildTree();
+    Require(FindNodeById(afterValid, synth::runtime_ui::NodeIds::ConnectMessageField(0, 0))->text ==
+                "F0 47 7F 29 60 00 04 41 09 07 01 F7",
+            "the field shows the newly committed message");
+
+    // An edit that is not a single SysEx message refuses and changes
+    // nothing: not F0-led, not F7-tailed, and a data byte over 0x7F.
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageCommit, "0:0:00 F7"));
+    Require(harness.commits == 1, "a non-F0-led edit is refused, not committed");
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageCommit, "0:0:F0 00"));
+    Require(harness.commits == 1, "a non-F7-tailed edit is refused, not committed");
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageCommit, "0:0:F0 80 F7"));
+    Require(harness.commits == 1, "a data byte over 0x7F is refused, not committed");
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageCommit, "0:0:not hex"));
+    Require(harness.commits == 1, "malformed hex is refused, not committed");
+    Require(surface.StatusText().starts_with("Refused"), "the refusal sets a status message");
+    // Re-commit the same valid message to move the status off "Refused"
+    // before testing the empty commit below. Without this, a silently
+    // dropped empty commit (the arity guard treating "0:0" as too few parts
+    // and returning before ever touching SetStatus) would leave the prior
+    // refusal's status in place, and the starts_with("Refused") check below
+    // would pass whether or not the drop was silent.
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageCommit,
+        "0:0:F0 47 7F 29 60 00 04 41 09 07 01 F7"));
+    Require(harness.commits == 2 && surface.StatusText() == "OK",
+            "re-committing the same valid message resets status to OK");
+    // An empty commit tokenises to just "0:0" (the trailing empty field after
+    // the last ':' is dropped by Split's getline loop), so the arity guard
+    // must accept that shape and let SetConnectMessage's own emptiness check
+    // refuse it -- not treat it as too few parts and silently return.
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageCommit, "0:0:"));
+    Require(harness.commits == 2, "an empty commit is refused, not committed");
+    Require(surface.StatusText().starts_with("Refused"), "an empty commit sets a refusal status");
+    Require(harness.instrument.controllers[0].config.openSysEx[0] ==
+                (std::vector<std::uint8_t>{0xF0, 0x47, 0x7F, 0x29, 0x60, 0x00, 0x04, 0x41, 0x09, 0x07, 0x01,
+                                          0xF7}),
+            "every refused edit leaves the stored message exactly as the last valid commit left it");
+    const synth::ui::NodeTree afterRefusals = surface.BuildTree();
+    Require(FindNodeById(afterRefusals, synth::runtime_ui::NodeIds::ConnectMessageField(0, 0))->text ==
+                "F0 47 7F 29 60 00 04 41 09 07 01 F7",
+            "the displayed field is unchanged by every refused edit");
+}
+
+void TestConnectMessageAddAndDelete()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    Require(harness.instrument.AddController(MakeGenericSlot("Custom row")), "add a Custom row");
+    harness.connection.controllers.push_back({});
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    surface.ViewModel().ToggleConfig(0);
+
+    Require(FindNodeById(surface.BuildTree(), synth::runtime_ui::NodeIds::ConnectMessageField(0, 0)) ==
+                nullptr,
+            "a Custom row starts with no connect messages");
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kConnectMessageAdd, "0"));
+    Require(harness.commits == 1 && harness.instrument.controllers[0].config.openSysEx.size() == 1,
+            "Add appends one connect message");
+    Require(harness.instrument.controllers[0].config.openSysEx[0] ==
+                (std::vector<std::uint8_t>{0xF0, 0xF7}),
+            "a newly added connect message starts as an already-valid empty message");
+
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageDelete, "0:0"));
+    Require(harness.commits == 2 && harness.instrument.controllers[0].config.openSysEx.empty(),
+            "Delete removes the connect message");
+    Require(FindNodeById(surface.BuildTree(), synth::runtime_ui::NodeIds::ConnectMessageField(0, 0)) ==
+                nullptr,
+            "the deleted connect message's field is gone from the tree");
+}
+
+// Shared by the two-message index tests below: a row holding messages
+// F0 01 F7 (index 0) and F0 02 F7 (index 1), so a later commit or delete at
+// index 1 has a distinct index 0 to prove untouched.
+void SetUpTwoConnectMessageRow(TestHarness& harness)
+{
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    synth::MidiControllerSlot slot = MakeGenericSlot("two messages");
+    slot.config.openSysEx.push_back({0xF0, 0x01, 0xF7});
+    slot.config.openSysEx.push_back({0xF0, 0x02, 0xF7});
+    Require(harness.instrument.AddController(slot), "add a row with two connect messages");
+    harness.connection.controllers.push_back({});
+}
+
+void TestConnectMessageDeleteRemovesTheGivenIndexNotAlwaysFirst()
+{
+    namespace NodeIds = synth::runtime_ui::NodeIds;
+
+    TestHarness harness;
+    SetUpTwoConnectMessageRow(harness);
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    surface.ViewModel().ToggleConfig(0);
+
+    // Delete index 1, not index 0: a "delete always removes index 0" bug
+    // would instead remove message F0 01 F7 and still leave one message
+    // behind, so the surviving message is the only thing that tells them
+    // apart.
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageDelete, "0:1"));
+    Require(harness.commits == 1 && harness.instrument.controllers[0].config.openSysEx.size() == 1,
+            "Delete removes exactly one connect message");
+    Require(harness.instrument.controllers[0].config.openSysEx[0] ==
+                (std::vector<std::uint8_t>{0xF0, 0x01, 0xF7}),
+            "Delete removes the message at the given index, leaving the other one, not always index 0");
+    const synth::ui::Node* survivorField =
+        FindNodeById(surface.BuildTree(), NodeIds::ConnectMessageField(0, 0));
+    Require(survivorField != nullptr && survivorField->text == "F0 01 F7",
+            "the surviving message is what the page shows at index 0");
+}
+
+void TestConnectMessageCommitAtIndexOneLeavesIndexZeroUnchanged()
+{
+    namespace NodeIds = synth::runtime_ui::NodeIds;
+
+    TestHarness harness;
+    SetUpTwoConnectMessageRow(harness);
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    surface.ViewModel().ToggleConfig(0);
+
+    // Commit to index 1, not index 0: a "commit always writes index 0" bug
+    // would instead overwrite F0 01 F7 and leave message 1 untouched, so
+    // checking both indexes' final bytes is what tells the two apart.
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kConnectMessageCommit, "0:1:F0 55 F7"));
+    Require(harness.commits == 1 && surface.StatusText() == "OK",
+            "a valid edit at index 1 commits");
+    Require(harness.instrument.controllers[0].config.openSysEx[0] ==
+                (std::vector<std::uint8_t>{0xF0, 0x01, 0xF7}),
+            "the edit at index 1 leaves index 0's stored bytes unchanged");
+    Require(harness.instrument.controllers[0].config.openSysEx[1] ==
+                (std::vector<std::uint8_t>{0xF0, 0x55, 0xF7}),
+            "the edit at index 1 updates index 1 to the edited bytes");
+    const synth::ui::NodeTree afterCommit = surface.BuildTree();
+    Require(FindNodeById(afterCommit, NodeIds::ConnectMessageField(0, 0))->text == "F0 01 F7",
+            "the displayed field at index 0 is unchanged");
+    Require(FindNodeById(afterCommit, NodeIds::ConnectMessageField(0, 1))->text == "F0 55 F7",
+            "the displayed field at index 1 shows the newly committed message");
+}
+
+void TestConnectMessageHandlersRefuseVisiblyWhenHostRejectsCommit()
+{
+    const std::string kHostRejectedText = "Refused: host rejected the instrument commit";
+
+    // HandleConnectMessageCommit: a valid edit that the host's commit
+    // callback refuses.
+    {
+        TestHarness harness;
+        SetUpTwoConnectMessageRow(harness);
+        harness.commitSucceeds = false;
+        auto surface = harness.MakeSurface();
+        surface.MarkDirty();
+        surface.RefreshOnTick();
+        surface.ViewModel().ToggleConfig(0);
+
+        surface.DispatchAction(synth::ui::Action::WithValue(
+            synth::runtime_ui::Actions::kConnectMessageCommit, "0:1:F0 55 F7"));
+        Require(harness.commitAttempts == 1 && harness.commits == 0,
+                "a host-rejected connect-message commit attempts but does not complete a commit");
+        Require(surface.StatusText() == kHostRejectedText,
+                "a host-rejected connect-message commit reports the shared refusal status");
+        Require(harness.instrument.controllers[0].config.openSysEx[1] ==
+                    (std::vector<std::uint8_t>{0xF0, 0x02, 0xF7}),
+                "a host-rejected connect-message commit leaves the stored message unchanged");
+    }
+
+    // HandleConnectMessageDelete: a valid delete that the host's commit
+    // callback refuses.
+    {
+        TestHarness harness;
+        SetUpTwoConnectMessageRow(harness);
+        harness.commitSucceeds = false;
+        auto surface = harness.MakeSurface();
+        surface.MarkDirty();
+        surface.RefreshOnTick();
+        surface.ViewModel().ToggleConfig(0);
+
+        surface.DispatchAction(synth::ui::Action::WithValue(
+            synth::runtime_ui::Actions::kConnectMessageDelete, "0:1"));
+        Require(harness.commitAttempts == 1 && harness.commits == 0,
+                "a host-rejected connect-message delete attempts but does not complete a commit");
+        Require(surface.StatusText() == kHostRejectedText,
+                "a host-rejected connect-message delete reports the shared refusal status");
+        Require(harness.instrument.controllers[0].config.openSysEx.size() == 2,
+                "a host-rejected connect-message delete leaves both stored messages in place");
+    }
+
+    // HandleConnectMessageAdd: an add that the host's commit callback
+    // refuses.
+    {
+        TestHarness harness;
+        harness.instrument.controllers.clear();
+        harness.connection.controllers.clear();
+        Require(harness.instrument.AddController(MakeGenericSlot("Custom row")), "add a Custom row");
+        harness.connection.controllers.push_back({});
+        harness.commitSucceeds = false;
+        auto surface = harness.MakeSurface();
+        surface.MarkDirty();
+        surface.RefreshOnTick();
+        surface.ViewModel().ToggleConfig(0);
+
+        surface.DispatchAction(
+            synth::ui::Action::WithValue(synth::runtime_ui::Actions::kConnectMessageAdd, "0"));
+        Require(harness.commitAttempts == 1 && harness.commits == 0,
+                "a host-rejected connect-message add attempts but does not complete a commit");
+        Require(surface.StatusText() == kHostRejectedText,
+                "a host-rejected connect-message add reports the shared refusal status");
+        Require(harness.instrument.controllers[0].config.openSysEx.empty(),
+                "a host-rejected connect-message add leaves the row with no stored messages");
+    }
+}
+
+void TestConnectMessageShownOnEveryKindNotJustGeneric()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    synth::MidiControllerSlot wrld = MakeWrldBldrSlot("wrld with connect message");
+    wrld.config.openSysEx.push_back({0xF0, 0x7E, 0x00, 0xF7});
+    Require(harness.instrument.AddController(wrld), "add a WRLD.Bldr row with a connect message");
+    harness.connection.controllers.push_back({});
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    surface.ViewModel().ToggleConfig(0);
+    const synth::ui::Node* field =
+        FindNodeById(surface.BuildTree(), synth::runtime_ui::NodeIds::ConnectMessageField(0, 0));
+    Require(field != nullptr && field->text == "F0 7E 00 F7",
+            "the connect-messages list shows on a WRLD.Bldr row too, not only a Generic row");
+}
+
+void TestControllerDeviceLabelForUnresolvedWizardIdShowsBoundDevice()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    synth::MidiControllerSlot slot = MakeGenericSlot("stale preset");
+    slot.wizardId = "some.descriptor.no.longer.in.the.registry";
+    slot.input = {.identifier = "lp-in", .name = "LPX MIDI In"};
+    Require(harness.instrument.AddController(slot), "add a row whose wizard id resolves against nothing");
+    harness.connection.controllers.push_back({});
+
+    auto surface = harness.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::Node* device =
+        FindNodeById(surface.BuildTree(), synth::runtime_ui::NodeIds::ControllerDevice(0));
+    Require(device != nullptr && device->text == "LPX MIDI In (lp-in)",
+            "a row whose wizard id no longer resolves shows its bound input device, not a resolution failure");
+}
+
+void TestControllerDeviceLabelForAppCatalogDeviceShowsItsName()
+{
+    TestHarness harness;
+    harness.instrument.controllers.clear();
+    harness.connection.controllers.clear();
+    // A real app-catalog device (AppDefaultControllerWizard, the same
+    // construction MakeControllerWizardRegistry gives every frogg3rs
+    // device default), not a library descriptor -- the dropdown test with
+    // a catalog only ever checked option ids, never this label.
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back({.id = "app.device.one",
+                                      .displayName = "App Device One",
+                                      .kind = synth::MidiProfileKind::Generic,
+                                      .inputAliases = {},
+                                      .outputAliases = {},
+                                      .config = {}});
+    harness.layouts = synth::MakeControllerWizardRegistry(catalog);
+
+    auto surface = harness.MakeSurface();
+    surface.SetEnumerateDevices(harness.devices);
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kAddPresetDraft, "app.device.one"));
+    surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAddController));
+    Require(harness.commits == 1, "add from the app catalog device commits");
+    const std::size_t addedIx = harness.instrument.controllers.size() - 1;
+    Require(harness.instrument.controllers[addedIx].wizardId == "app.device.one",
+            "the added row carries the app catalog device's id");
+
+    harness.connection.controllers.resize(harness.instrument.controllers.size());
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::Node* device = FindNodeById(
+        surface.BuildTree(), synth::runtime_ui::NodeIds::ControllerDevice(addedIx));
+    Require(device != nullptr && device->text == "App Device One",
+            "a row added from an app catalog device shows that device's own display name");
+}
 
 int main()
 {
     TestNoHandRolledControllerNodesSurvive();
     TestControllersSectionsNestThroughLibraryContainers();
     TestControllerRowsStayReadableWithLargeLists();
+    TestControllerDeviceLabelsIdentifyThePresetOrBoundInputDevice();
     TestDiscoveryRendersPortableAvailableRowsAndDiagnostics();
     TestWizardSessionRoutesPortableChooserAndForm();
     TestWizardSubmitCommitsCompleteProfileThenSaves();
     TestWizardSubmitRefusalsRetainFormAndPersistence();
     TestWizardSaveFailureDoesNotRollbackCommittedInstrument();
-    TestReconfigureSeedsExactProfilesAndReplacesOnlyTheValidatedRecord();
-    TestReconfigureRefusesEveryChangedExistingRecordIdentity();
+    TestConfigureSeedsFromDormantDataForBlacklistedRecords();
+    TestAddFromPresetWithNoDeviceInstallsTheDefaultPresetWithNoneEndpoints();
+    TestAddFromPresetWithMatchingOnlinePairBindsBothEndpoints();
+    TestAddCustomGenericYieldsAnEmptyGenericRecord();
+    TestAddPresetDropdownListsRegistryDescriptorsThenOneCustomEntry();
+    TestAddLibraryLaunchpadAndWrldBldrGiveDefaultConfigAndDeviceLabel();
     TestWizardIgnoreCommitsOneInertBlacklistedRecord();
     TestEndpointSelectorsPreferTheExactStoredIdentifier();
     TestControllerLifecycleActionsUseTheNormalCommitAndSavePath();
+    TestReleaseRequiresResolvedWizardAndBoundEndpoints();
+    TestReleaseNeverOffersWhatBlacklistControllerWouldRefuse();
+    TestConfigureStaysAvailableOnAReleasedEditedRow();
+    TestRelabellingIsCosmeticForReleasedRecords();
+    TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence();
+    TestEncoderGroupHeaderSeparatesLastColumnFromAddButton();
+    TestSystemMessageShiftFieldRendersAndCommits();
+    TestLaunchpadRowOffersVariantAndRetargetsItsPads();
+    TestLaunchpadRowModelSelectorIsCaptionedModel();
+    TestConnectMessageShowsOnAnAbletonStyleRowsExpandedConfiguration();
+    TestConnectMessageEditCommitsValidAndRefusesInvalidUnchanged();
+    TestConnectMessageAddAndDelete();
+    TestConnectMessageDeleteRemovesTheGivenIndexNotAlwaysFirst();
+    TestConnectMessageCommitAtIndexOneLeavesIndexZeroUnchanged();
+    TestConnectMessageHandlersRefuseVisiblyWhenHostRejectsCommit();
+    TestConnectMessageShownOnEveryKindNotJustGeneric();
+    TestControllerDeviceLabelForUnresolvedWizardIdShowsBoundDevice();
+    TestControllerDeviceLabelForAppCatalogDeviceShowsItsName();
 
     TestHarness harness;
     synth::runtime_ui::ControllersPageSurface surface = harness.MakeSurface();
@@ -1522,20 +2561,19 @@ int main()
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::kBack) != nullptr, "back button node");
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::kScroll) != nullptr, "scroll area node");
     Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::kAddButton) != nullptr, "add controller button");
-    const synth::ui::Node* addName =
-        FindNodeById(initialTree, synth::runtime_ui::NodeIds::kAddName);
-    const synth::ui::Node* addKind =
-        FindNodeById(initialTree, synth::runtime_ui::NodeIds::kAddKind);
-    const synth::ui::Node* addKindCaption =
-        FindNodeById(initialTree, std::string(synth::runtime_ui::NodeIds::kAddKind) + ".caption");
-    Require(addName != nullptr && addName->action.has_value() &&
-                addName->action->name == "runtime.controllers.add_name_draft",
-            "add controller name edits dispatch a portable draft action");
-    Require(addKind != nullptr && addKind->action.has_value() &&
-                addKind->action->name == "runtime.controllers.add_kind_draft",
-            "add controller kind edits dispatch a portable draft action");
-    Require(addKindCaption != nullptr && addKindCaption->text == "Kind",
-            "add controller kind selector has a visible caption");
+    const synth::ui::Node* addPreset =
+        FindNodeById(initialTree, synth::runtime_ui::NodeIds::kAddPreset);
+    const synth::ui::Node* addPresetCaption =
+        FindNodeById(initialTree, std::string(synth::runtime_ui::NodeIds::kAddPreset) + ".caption");
+    Require(addPreset != nullptr && addPreset->action.has_value() &&
+                addPreset->action->name == "runtime.controllers.add_preset_draft",
+            "add controller preset edits dispatch a portable draft action");
+    Require(addPresetCaption != nullptr && addPresetCaption->text == "Preset",
+            "add controller preset selector has a visible caption");
+    Require(!addPreset->options.empty() && addPreset->options.back().label == "Custom" &&
+                addPreset->selectedOption == addPreset->options.front().id,
+            "the add row's Preset combo offers the registry then one Custom entry, defaulting to the"
+            " first option");
     const synth::ui::Node* wrldInput =
         FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerInput(0));
     const synth::ui::Node* wrldInputRow =
@@ -1548,57 +2586,67 @@ int main()
         FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutput(0));
     const synth::ui::Node* wrldOutputRow =
         FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutput(0) + ".row");
-    const synth::ui::Node* wrldDots =
-        FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerStatusDots(0));
+    const synth::ui::Node* wrldInputDot =
+        FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerInputStatus(0));
+    const synth::ui::Node* wrldOutputDot =
+        FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutputStatus(0));
     const synth::ui::Node* padsOutput =
         FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutput(1));
     const synth::ui::Node* padsOutputRow =
         FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutput(1) + ".row");
-    const synth::ui::Node* padsVariant =
-        FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerVariant(1));
-    const synth::ui::Node* padsVariantRow =
-        FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerVariant(1) + ".row");
     const synth::ui::Node* scrollNode = FindNodeById(initialTree, synth::runtime_ui::NodeIds::kScroll);
     Require(wrldInput != nullptr && padsInput != nullptr && wrldOutput != nullptr && padsOutput != nullptr,
             "controller device controls render");
     Require(wrldInputRow != nullptr && padsInputRow != nullptr && wrldOutputRow != nullptr &&
-                padsOutputRow != nullptr && padsVariantRow != nullptr,
+                padsOutputRow != nullptr,
             "captioned endpoint selectors render their flow-slot rows");
-    Require(wrldDots != nullptr, "controller status dots render");
-    Require(padsVariant != nullptr, "launchpad variant selector renders");
+    Require(wrldInputDot != nullptr && wrldOutputDot != nullptr, "controller status dots render");
     Require(scrollNode != nullptr, "scroll area node still present");
     Require(wrldInput->bounds.x == padsInput->bounds.x, "launchpad input aligns with other controller inputs");
     Require(wrldOutput->bounds.x == padsOutput->bounds.x, "launchpad output aligns with other controller outputs");
-    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerInput(0) + ".caption")->text == "Input",
+    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerInput(0) + ".caption")->text ==
+                "MIDI in",
             "input selector caption is visible text");
-    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutput(0) + ".caption")->text == "Output",
+    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerOutput(0) + ".caption")->text ==
+                "MIDI out",
             "output selector caption is visible text");
-    Require(FindNodeById(initialTree, synth::runtime_ui::NodeIds::ControllerVariant(1) + ".caption")->text ==
-                "Variant",
-            "variant selector caption is visible text");
     Require(wrldInputRow->bounds.x == padsInputRow->bounds.x,
             "captioned launchpad input aligns with other controller input flow slots");
     Require(wrldOutputRow->bounds.x == padsOutputRow->bounds.x,
             "captioned launchpad output aligns with other controller output flow slots");
-    Require(wrldOutputRow->bounds.x == wrldInputRow->bounds.x + wrldInputRow->bounds.width +
-                                         synth::runtime_ui::ControllersLayout::kEndpointBoxGap,
-            "input and output selector flow slots keep endpoint spacing");
-    Require(padsVariantRow->bounds.x > padsOutputRow->bounds.x + padsOutputRow->bounds.width,
-            "launchpad variant flow slot sits to the right of output");
-    Require(padsVariantRow->bounds.x == padsOutputRow->bounds.x + padsOutputRow->bounds.width +
+    // wrldInputRow and wrldOutputRow are no longer siblings: each now sits
+    // inside its own per-port row alongside that port's status dot, so their
+    // raw bounds.x are relative to different immediate parents (bounds are
+    // parent-relative) and are not directly comparable. Compare
+    // the port rows themselves, which are the siblings the gap sits between.
+    const synth::ui::Node* wrldInputPort = FindParentOf(initialTree, wrldInputRow->id.value);
+    const synth::ui::Node* wrldOutputPort = FindParentOf(initialTree, wrldOutputRow->id.value);
+    Require(wrldInputPort != nullptr && wrldOutputPort != nullptr,
+            "each port's captioned combo sits inside a per-port row alongside its status dot");
+    Require(wrldOutputPort->bounds.x == wrldInputPort->bounds.x + wrldInputPort->bounds.width +
                                         synth::runtime_ui::ControllersLayout::kEndpointBoxGap,
-            "output and variant selector flow slots keep endpoint spacing");
-    Require(wrldDots->bounds.y ==
-                (synth::runtime_ui::ControllersLayout::kControllerHeaderHeight - wrldDots->bounds.height) /
-                    2.0f,
-            "status dots are vertically centered in the controller row");
-    Require(scrollNode->scrollContentWidth >= padsVariantRow->bounds.x + padsVariantRow->bounds.width,
-            "scroll content reserves launchpad variant width");
+            "the input and output ports keep endpoint spacing between them");
+    // Bounds are parent-relative, so the output line check has to walk
+    // parentage rather than compare raw y across different immediate
+    // parents. The output selector's row now nests one level deeper than
+    // before: its own captioned row sits inside a per-port row (paired
+    // with that port's status dot), which sits inside the shared endpoints
+    // cluster, which sits on line two.
+    const synth::ui::Node* padsOutputPort = FindParentOf(initialTree, padsOutputRow->id.value);
+    const synth::ui::Node* padsOutputEndpoints =
+        padsOutputPort != nullptr ? FindParentOf(initialTree, padsOutputPort->id.value) : nullptr;
+    const synth::ui::Node* padsOutputLine =
+        padsOutputEndpoints != nullptr ? FindParentOf(initialTree, padsOutputEndpoints->id.value)
+                                       : nullptr;
+    Require(padsOutputLine != nullptr &&
+                padsOutputLine->id.value == synth::runtime_ui::NodeIds::ControllerRow(1) + ".line2",
+            "the output selector is on the ports line");
+    Require(wrldInputDot->bounds.x < wrldInputRow->bounds.x &&
+                wrldOutputDot->bounds.x < wrldOutputRow->bounds.x,
+            "each port's status dot precedes its own combo on line two");
 
-    surface.DispatchAction(
-        synth::ui::Action::WithValue("runtime.controllers.add_name_draft", "newctl"));
-    surface.DispatchAction(
-        synth::ui::Action::WithValue("runtime.controllers.add_kind_draft", "generic"));
+    surface.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kAddPresetDraft, "custom"));
     surface.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAddController));
     Require(harness.commits == 1, "add controller commits");
     Require(harness.instrument.controllers.size() == 4, "add controller increases count");
@@ -1722,9 +2770,6 @@ int main()
         synth::runtime_ui::Actions::kDeleteRow, "0:encoders:" + std::to_string(*blockRowIx)));
     Require(harness.commits == 8, "delete block commits");
 
-    surface.DispatchAction(synth::ui::Action::WithValue(synth::runtime_ui::Actions::kVariantSelect, "1:1"));
-    Require(harness.commits == 9, "launchpad variant selection commits");
-
     surface.ViewModel().ToggleConfig(2);
     surface.ViewModel().ToggleSection(2, synth::MidiConfigSection::Encoders);
     surface.MarkDirty();
@@ -1846,7 +2891,7 @@ int main()
         std::to_string(static_cast<int>(synth::MidiMappingRowVM::Field::EncoderMode)) + ":2";
     surface.DispatchAction(
         synth::ui::Action::WithValue(synth::runtime_ui::Actions::kMappingFieldCommit, absoluteValue));
-    Require(harness.commits == 10, "absolute mode edit commits through Controllers surface");
+    Require(harness.commits == 9, "absolute mode edit commits through Controllers surface");
     Require(harness.instrument.controllers[0].config.encoderInput->mode == synth::EncoderMode::Absolute,
             "Controllers commit persists absolute mode");
     Require(harness.instrument.controllers[0].config.encoderInput->turnStep == 0.25f,
@@ -1887,7 +2932,7 @@ int main()
         std::to_string(static_cast<int>(synth::MidiMappingRowVM::Field::EncoderMode)) + ":0";
     surface.DispatchAction(
         synth::ui::Action::WithValue(synth::runtime_ui::Actions::kMappingFieldCommit, relativeValue));
-    Require(harness.commits == 11, "switching back to signed mode commits");
+    Require(harness.commits == 10, "switching back to signed mode commits");
     Require(harness.instrument.controllers[0].config.encoderInput->turnStep == 0.25f,
             "switching back restores stored relative step");
     synth::MessageInBus relativeBus(nullptr, 16);
@@ -2129,6 +3174,11 @@ int main()
     Require(visible.find("aftertouch") == std::string::npos, "portable tree hides aftertouch");
     Require(visible.find("polyphonic pressure") == std::string::npos,
             "portable tree hides polyphonic pressure");
+    // The removed row editor's heading was "Pressure mappings", which neither
+    // of the two greps above matches -- so this is the only assertion that
+    // fails if a per-row pressure-mapping list is ever rendered again.
+    Require(visible.find("pressure mapping") == std::string::npos,
+            "portable tree hides the per-row pressure-mapping list");
     Require(visible.find("midi status") == std::string::npos, "portable tree hides MIDI status");
     Require(visible.find("note number") == std::string::npos, "portable tree hides standalone note field");
 

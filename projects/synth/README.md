@@ -520,12 +520,13 @@ it gets for free.
 
 `MainPane` lays out a fixed-width right sidebar (Audio/Controllers/Sync/File
 buttons plus a rolling-max deadline readout) next to a content host that
-shows exactly one page at a time: `AudioConfigPage` (audio device
-selection/status), `ControllersPage` (per-controller MIDI device pickers and
-mapping edits), `SyncPageSurface` (clock/transport policy and status), and
-`FilePage` (patch commands and patch identity). There is
-no separate shell chrome row — each page owns the state that used to live in
-the old MidiPanel/AudioPanel strips and the patch-command row.
+shows exactly one page at a time: the Audio page (audio device
+selection/status), the Controllers page (per-controller MIDI device pickers
+and mapping edits), the Sync page (`SyncPageSurface`, clock/transport policy
+and status), and the File page (patch commands and patch identity).
+`RuntimeMainComponent` builds each one from the portable page trees in
+`include/synth/RuntimePages.hpp` and `include/synth/ControllersPageUI.hpp`.
+Each page owns its own state; there is no separate shell chrome row.
 
 `projects/synth/apps/<name>/` holds one runtime application each. An app
 provides a JUCE-free core satisfying `synth::SynthApplicationCore` (so it can
@@ -554,7 +555,7 @@ v1 by supplying safe sync defaults (all flags off, PPQN 24), and reject invalid
 schema-v2 sync values atomically. Patch files do not carry MIDI/audio/sync
 configuration.
 
-`FilePage` (`projects/synth/runtime/FilePage.hpp`) hosts the patch-command
+The File page hosts the patch-command
 row (New/Save/Save As/Load/Revert), an in-app patch browser rooted at
 `Runtime::DataPaths().patchesRoot`, and the patch identity label. It does not
 use the operating system file explorer. Patch command results are logged by the
