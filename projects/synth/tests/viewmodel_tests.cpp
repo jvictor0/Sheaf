@@ -63,7 +63,8 @@ using synth::MidiInstrumentConfig;
 using synth::MidiMappingRowVM;
 using synth::MidiProfileKind;
 using synth::EncoderModeCatalog;
-using synth::RollingMax256;
+using synth::DeadlineWindowCapacity;
+using synth::RollingMax;
 using synth::UISystemMessage;
 
 MidiControllerSlot MakeWrldBldrSlot(const char* name) {
@@ -1324,8 +1325,8 @@ TEST_CASE(RebuildScalesToFourControllersSixtyFourRowsUnderTenMilliseconds) {
     REQUIRE_TRUE(elapsed < std::chrono::milliseconds(10));
 }
 
-TEST_CASE(RollingMax256ReturnsMaxOfLast256Writes) {
-    RollingMax256 rolling;
+TEST_CASE(RollingMaxReturnsMaxOfItsWindow) {
+    RollingMax rolling(256);
     REQUIRE_TRUE(rolling.Max() == 0.0f);
 
     rolling.Write(1.0f);
@@ -1334,8 +1335,8 @@ TEST_CASE(RollingMax256ReturnsMaxOfLast256Writes) {
     REQUIRE_TRUE(rolling.Max() == 5.0f);
 }
 
-TEST_CASE(RollingMax256ForgetsSpikesOlderThan256Writes) {
-    RollingMax256 rolling;
+TEST_CASE(RollingMaxForgetsSpikesOlderThanItsWindow) {
+    RollingMax rolling(256);
     rolling.Write(100.0f);  // this write will be overwritten after 256 more writes
     for (int ix = 0; ix < 256; ++ix) {
         rolling.Write(1.0f);
@@ -1345,8 +1346,8 @@ TEST_CASE(RollingMax256ForgetsSpikesOlderThan256Writes) {
     REQUIRE_TRUE(rolling.Max() == 1.0f);
 }
 
-TEST_CASE(RollingMax256KeepsSpikeUntilEvicted) {
-    RollingMax256 rolling;
+TEST_CASE(RollingMaxKeepsSpikeUntilEvicted) {
+    RollingMax rolling(256);
     rolling.Write(42.0f);
     for (int ix = 0; ix < 255; ++ix) {
         rolling.Write(0.0f);
@@ -1357,6 +1358,33 @@ TEST_CASE(RollingMax256KeepsSpikeUntilEvicted) {
 
     rolling.Write(0.0f);  // 257th write wraps around and evicts the spike.
     REQUIRE_TRUE(rolling.Max() == 0.0f);
+}
+
+TEST_CASE(DeadlineWindowCapacityTracksTheUiFrameRate) {
+    REQUIRE_TRUE(DeadlineWindowCapacity(30) == 30);
+    REQUIRE_TRUE(DeadlineWindowCapacity(60) == 60);
+    // An unset or invalid frame rate still yields a usable window instead
+    // of a capacity-zero ring buffer.
+    REQUIRE_TRUE(DeadlineWindowCapacity(0) == 30);
+}
+
+TEST_CASE(ShortenedDeadlineWindowDropsAStalePeakWithinItsOwnSpan) {
+    const std::size_t capacity = DeadlineWindowCapacity(30);
+    RollingMax rolling(capacity);
+
+    rolling.Write(97.0f);
+    rolling.Write(1.0f);  // one frame later
+    // Positive control: a spike is still on screen a frame after it
+    // happens -- proof this is a real hold, not a capacity-of-one window
+    // that would trade one wrong reading (stale) for another (invisible).
+    REQUIRE_TRUE(rolling.Max() == 97.0f);
+
+    // The rest of the window's own span elapses with no further spike --
+    // one write past its capacity evicts the spike's slot.
+    for (std::size_t ix = 0; ix < capacity - 1; ++ix) {
+        rolling.Write(1.0f);
+    }
+    REQUIRE_TRUE(rolling.Max() == 1.0f);
 }
 
 // --- Finding 2: WrldBldrX/Y edits keep position and control address paired ---

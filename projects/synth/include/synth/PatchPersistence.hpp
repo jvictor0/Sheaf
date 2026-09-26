@@ -30,7 +30,7 @@ JSON ToJSON(JsonArena& arena, const AudioDeviceState& state);
 bool FromJSON(JSON json, AudioDeviceState& state);
 
 inline constexpr const char* kRuntimeConfigSchema = "sheaf.synth.runtime-config";
-inline constexpr int kRuntimeConfigSchemaVersion = 2;
+inline constexpr int kRuntimeConfigSchemaVersion = 3;
 
 JSON ToJSON(JsonArena& arena, const SyncConfig& config);
 bool FromJSON(JSON json, SyncConfig& config);

@@ -186,6 +186,8 @@ const char* MessageTypeName(MessageIn::Type type) {
         return "paramIncDec";
     case MessageIn::Type::ParamSetAbsolute:
         return "paramSetAbsolute";
+    case MessageIn::Type::ParamSetAbsoluteOnBank:
+        return "paramSetAbsoluteOnBank";
     case MessageIn::Type::ParamPush:
         return "paramPush";
     case MessageIn::Type::ToggleReset:
@@ -235,6 +237,8 @@ bool ParseMessageType(std::string_view value, MessageIn::Type& type) {
         type = MessageIn::Type::ParamIncDec;
     } else if (value == "paramSetAbsolute") {
         type = MessageIn::Type::ParamSetAbsolute;
+    } else if (value == "paramSetAbsoluteOnBank") {
+        type = MessageIn::Type::ParamSetAbsoluteOnBank;
     } else if (value == "paramPush") {
         type = MessageIn::Type::ParamPush;
     } else if (value == "toggleReset" || value == "toggleShift" || value == "setReset" || value == "setShift") {
@@ -1779,6 +1783,7 @@ SystemMessageOutputState SystemMessageOutputInfo::Evaluate(const MessageIn& mess
     }
     case MessageIn::Type::ParamIncDec:
     case MessageIn::Type::ParamSetAbsolute:
+    case MessageIn::Type::ParamSetAbsoluteOnBank:
     case MessageIn::Type::ParamPush:
     case MessageIn::Type::NextParamBank:
     case MessageIn::Type::PrevParamBank:
@@ -2269,6 +2274,7 @@ JSON ToJSON(JsonArena& arena, const MessageIn& value) {
         return json;
     case MessageIn::Type::ParamIncDec:
     case MessageIn::Type::ParamSetAbsolute:
+    case MessageIn::Type::ParamSetAbsoluteOnBank:
     case MessageIn::Type::ParamPush:
     case MessageIn::Type::ToggleReset:
     case MessageIn::Type::ToggleRandom:
@@ -2335,6 +2341,7 @@ bool FromJSON(JSON json, MessageIn& value) {
         return true;
     case MessageIn::Type::ParamIncDec:
     case MessageIn::Type::ParamSetAbsolute:
+    case MessageIn::Type::ParamSetAbsoluteOnBank:
     case MessageIn::Type::ParamPush:
     case MessageIn::Type::ToggleReset:
     case MessageIn::Type::ToggleRandom:

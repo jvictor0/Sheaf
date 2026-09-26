@@ -21,9 +21,11 @@
 #include <exception>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #ifndef __EMSCRIPTEN__
 using EMSCRIPTEN_WEBAUDIO_T = int;
@@ -361,12 +363,23 @@ public:
         , midiBridge_(engine_)
         , services_(engine_,
                     midiBridge_,
+                    submittedAudioDevices_,
                     [this] { return AudioWorkletDeadlineSamplePercent(); },
                     [this] { return AudioInputStateSnapshot(); })
         , mainComponent_(engine_.Application(), services_)
     {
         engine_.Clock().SetOutputSchedulingHorizonMicros(
             BrowserMidiBridge<synth::Engine<App>>::kSchedulingLeadMicros);
+        // sar-33: wires the external-input-routed signal's storage into the
+        // AppContext apps see, before engine_.Initialize() can ever run
+        // App::Init(). inputRoutingSignal_ is a member of this Runtime
+        // (constructed above, in the member-init list, before this
+        // constructor body runs), so its address is already stable here.
+        // Defaults to not-routed, which is already correct for a fresh
+        // Runtime -- no capture has been granted yet, so no explicit
+        // RefreshInputRoutedState() call is needed until SetAudioInputSource/
+        // ClearAudioInputSource run.
+        engine_.Context().inputRoutingSignal = &inputRoutingSignal_;
     }
 
     Runtime(const Runtime&) = delete;
@@ -450,6 +463,16 @@ public:
         }
 #ifdef __EMSCRIPTEN__
         if (audioContext_ != 0) {
+            // The worklet thread, processor, and node are already set up from
+            // the first call -- only the AudioContext's own resume can still
+            // be outstanding, if the browser refused it because that first
+            // call carried no user gesture. Retry it here instead of
+            // trivially reporting success: a no-op once already running, and
+            // otherwise gives a later real gesture the resume attempt the
+            // first call was not able to make stick.
+            if (emscripten_audio_context_state(audioContext_) != AUDIO_CONTEXT_STATE_RUNNING) {
+                emscripten_resume_audio_context_sync(audioContext_);
+            }
             return true;
         }
         audioContext_ = suppliedContext;
@@ -507,12 +530,14 @@ public:
             physicalChannels > kMaxBrowserInputChannels) {
             return false;
         }
-        return audioInput_.Publish(
+        const bool published = audioInput_.Publish(
             sourceHandle,
             physicalChannels,
             statusCode,
             [this](std::uint32_t attached) { return DisconnectAudioInputSource(attached); },
             [this](std::uint32_t next) { return ConnectAudioInputSource(next); });
+        RefreshInputRoutedState();
+        return published;
     }
 
     bool ClearAudioInputSource(std::uint32_t statusCode)
@@ -520,9 +545,11 @@ public:
         if (!BrowserAudioInputStatusCodeValid(statusCode)) {
             return false;
         }
-        return audioInput_.Clear(statusCode, [this](std::uint32_t previous) {
+        const bool cleared = audioInput_.Clear(statusCode, [this](std::uint32_t previous) {
             return DisconnectAudioInputSource(previous);
         });
+        RefreshInputRoutedState();
+        return cleared;
     }
 
     // Substitutes the two Web Audio graph operations the input publication
@@ -579,12 +606,37 @@ public:
         return state;
     }
 
-    // The only source of a retry is the user pressing `Retry Input` on the Audio
-    // page (sbw-4): capture loss alone never arms one, so a lost stream cannot
-    // re-prompt off the back of an unrelated UI action.
-    int ConsumeAudioInputRetry()
+    // sar-33: one derived flag over the existing capture-grant/-revoke
+    // lifecycle above. Called from SetAudioInputSource (the grant point:
+    // BrowserRuntimeAbi.cpp's synth_browser_set_audio_input_source calls
+    // through to this method) and ClearAudioInputSource (the revoke point:
+    // synth_browser_clear_audio_input_source), both invoked only from the JS
+    // bridge (browser/src/audio.ts's AudioBridge, after
+    // navigator.mediaDevices.getUserMedia settles from the user-activation-
+    // bound request) -- never from the audio worklet render thread (see
+    // Process()/ProcessAudioWorkletPlanarBlock, which only ever READ
+    // audioInput_'s published state, never call these two setters). Routed
+    // mirrors BrowserAudioInputCaptureLive (BrowserAudioDevices.hpp): only
+    // Online/ChannelCountUnreported count as a live, user-gesture-granted
+    // capture; every other status (including a zero-input application's
+    // permanent NotRequested) is not-routed, identically to the JUCE side's
+    // "not the platform default" rule.
+    void RefreshInputRoutedState()
     {
-        return services_.ConsumeAudioInputRetry() ? 1 : 0;
+        const BrowserAudioInputState state = AudioInputStateSnapshot();
+        const bool routed = state.requestedChannels > 0 && BrowserAudioInputCaptureLive(state.status);
+        inputRoutingSignal_.Publish(routed);
+    }
+
+    // The only sources of a pending request are the user pressing `Retry
+    // Input` and selecting an input or output device on the Audio page
+    // (sbw-4): capture loss alone never arms one, so a lost stream cannot
+    // re-prompt off the back of an unrelated UI action. See
+    // BrowserAudioDevices.hpp for the sentinel values this returns; outControl
+    // reports which control (input or output) the returned index applies to.
+    int ConsumePendingAudioRequest(BrowserAudioDeviceKind& outControl)
+    {
+        return services_.ConsumePendingAudioRequest(outControl);
     }
 
     std::uint32_t AudioWorkletBlockCount() const
@@ -689,6 +741,12 @@ public:
         RequireStarted();
         midiBridge_.SubmitEndpoints(endpoints);
         services_.NoteMidiDeviceListChanged();
+    }
+
+    void SubmitAudioDevices(std::vector<BrowserAudioDevice> devices)
+    {
+        RequireStarted();
+        submittedAudioDevices_ = std::move(devices);
     }
 
     std::optional<typename BrowserMidiBridge<synth::Engine<App>>::Action> DequeueMidiAction()
@@ -989,6 +1047,10 @@ private:
     std::atomic<std::uint32_t> audioWorkletBlockCount_{0};
     std::atomic<std::uint32_t> audioWorkletPeakMicrounits_{0};
     BrowserAudioInputPublication audioInput_;
+    // sar-33: this Runtime's storage for AppContext::inputRoutingSignal
+    // (wired in the constructor, above). See RefreshInputRoutedState for the
+    // browser derivation and its two call sites.
+    synth::InputRoutingSignal inputRoutingSignal_;
     // Empty in production; see SetAudioInputGraphForTesting.
     std::function<BrowserAudioInputConnectResult(std::uint32_t)> audioInputConnectOverride_;
     std::function<bool(std::uint32_t)> audioInputDisconnectOverride_;
@@ -996,6 +1058,11 @@ private:
     const std::size_t requestedAudioInputChannels_ = StaticAudioInputChannels();
     synth::Engine<App> engine_;
     BrowserMidiBridge<synth::Engine<App>> midiBridge_;
+    // The devices JS most recently submitted through SubmitAudioDevices,
+    // stored beside midiBridge_ the same way its own submitted list lives on
+    // this Runtime; services_ below holds this by reference, so it must be
+    // declared (and therefore constructed) before services_ is.
+    std::vector<BrowserAudioDevice> submittedAudioDevices_;
     BrowserRuntimeMainServices<App> services_;
     synth::runtime_ui::RuntimeMainComponent<App, BrowserRuntimeMainServices<App>> mainComponent_;
     std::atomic<bool> started_{false};
@@ -1019,6 +1086,18 @@ struct MidiEndpointDescriptor {
     std::uint32_t identifierSize = 0;
     const char* name = nullptr;
     std::uint32_t nameSize = 0;
+    std::uint32_t kind = 0;
+};
+
+// Same shape as MidiEndpointDescriptor -- two UTF-8 (pointer, size) fields
+// plus a 0/1 kind discriminator -- carrying a browser audio device instead of
+// a MIDI endpoint. See DecodeBrowserDescriptorArray below for the packing
+// discipline both descriptor arrays share on receipt.
+struct AudioDeviceDescriptor {
+    const char* deviceId = nullptr;
+    std::uint32_t deviceIdSize = 0;
+    const char* label = nullptr;
+    std::uint32_t labelSize = 0;
     std::uint32_t kind = 0;
 };
 
@@ -1055,6 +1134,45 @@ static_assert(sizeof(MidiDiagnosticsDescriptor) == 24);
 static_assert(offsetof(MidiDiagnosticsDescriptor, droppedScheduledOutputCount) == 8);
 static_assert(offsetof(MidiDiagnosticsDescriptor, lateScheduledOutputCount) == 16);
 
+// Decodes one (pointer, size) UTF-8 field shared by a descriptor entry,
+// copying it into a std::string during this call -- the same
+// copy-during-the-call contract that makes the JS side's synchronous free of
+// its packed buffer safe. A null pointer with a nonzero size is malformed and
+// reported as such; a null pointer with a zero size is an empty field.
+inline std::optional<std::string> DecodeBrowserUtf8Field(const char* pointer, std::uint32_t size)
+{
+    if (pointer == nullptr && size != 0) {
+        return std::nullopt;
+    }
+    return pointer == nullptr ? std::string{} : std::string(pointer, size);
+}
+
+// Shared by SubmitMidiEndpoints and SubmitAudioDevices below: both receive a
+// descriptor array from JS and must decode it into a vector of Elements
+// before returning, since the descriptors only point at buffers JS is free to
+// release once this call returns. `decodeOne` converts a single descriptor,
+// returning std::nullopt for a malformed entry; a single malformed entry
+// fails the whole array, matching each function's prior all-or-nothing
+// behaviour.
+template <typename Descriptor, typename Element, typename DecodeOne>
+std::optional<std::vector<Element>> DecodeBrowserDescriptorArray(
+    const Descriptor* items, std::uint32_t count, DecodeOne&& decodeOne)
+{
+    if (count > 0 && items == nullptr) {
+        return std::nullopt;
+    }
+    std::vector<Element> converted;
+    converted.reserve(count);
+    for (std::uint32_t ix = 0; ix < count; ++ix) {
+        std::optional<Element> element = decodeOne(items[ix]);
+        if (!element.has_value()) {
+            return std::nullopt;
+        }
+        converted.push_back(std::move(*element));
+    }
+    return converted;
+}
+
 // The ABI erases an application-specific Runtime<App>. BrowserAppEntry is the
 // sole binding point that instantiates this adapter for a concrete app.
 class RuntimeAbi {
@@ -1075,13 +1193,14 @@ public:
                                     std::uint32_t physicalChannels,
                                     std::uint32_t statusCode) = 0;
     virtual int ClearAudioInputSource(std::uint32_t statusCode) = 0;
-    virtual int ConsumeAudioInputRetry() = 0;
+    virtual int ConsumePendingAudioRequest(std::uint32_t* outControl) = 0;
     virtual int SetTimestampEpochOffsetMicros(std::int64_t offsetMicros) = 0;
     virtual int MessageTick(std::uint64_t timestampMicros) = 0;
     virtual const std::uint8_t* BuildUiFrame(std::size_t* size) = 0;
     virtual int DispatchAction(const char* name, const char* value) = 0;
     virtual bool ConsumePersistenceDirty() = 0;
     virtual int SubmitMidiEndpoints(const MidiEndpointDescriptor* endpoints, std::uint32_t count) = 0;
+    virtual int SubmitAudioDevices(const AudioDeviceDescriptor* devices, std::uint32_t count) = 0;
     virtual int DequeueMidiAction(MidiActionDescriptor* action) = 0;
     virtual int DeliverMidi(std::uint32_t controllerIx, const std::uint8_t* bytes, std::uint32_t size,
                             std::uint64_t timestampMicros) = 0;
@@ -1162,9 +1281,17 @@ public:
         return runtime_.ClearAudioInputSource(statusCode) ? 0 : -1;
     }
 
-    int ConsumeAudioInputRetry() override
+    int ConsumePendingAudioRequest(std::uint32_t* outControl) override
     {
-        return runtime_.ConsumeAudioInputRetry();
+        // A null out-param cannot report which control the index applies to,
+        // so the request is left armed rather than consumed on a guess.
+        if (outControl == nullptr) {
+            return kNoPendingAudioRequest;
+        }
+        BrowserAudioDeviceKind control = BrowserAudioDeviceKind::Input;
+        const int pending = runtime_.ConsumePendingAudioRequest(control);
+        *outControl = static_cast<std::uint32_t>(control);
+        return pending;
     }
 
     int SetTimestampEpochOffsetMicros(std::int64_t offsetMicros) override
@@ -1209,25 +1336,59 @@ public:
 
     int SubmitMidiEndpoints(const MidiEndpointDescriptor* endpoints, std::uint32_t count) override
     {
-        if (count > 0 && endpoints == nullptr) {
+        using Endpoint = typename BrowserMidiBridge<synth::Engine<App>>::Endpoint;
+        using EndpointKind = typename BrowserMidiBridge<synth::Engine<App>>::EndpointKind;
+        std::optional<std::vector<Endpoint>> converted =
+            DecodeBrowserDescriptorArray<MidiEndpointDescriptor, Endpoint>(
+                endpoints, count, [](const MidiEndpointDescriptor& endpoint) -> std::optional<Endpoint> {
+                    if (endpoint.kind > 1) {
+                        return std::nullopt;
+                    }
+                    std::optional<std::string> identifier =
+                        DecodeBrowserUtf8Field(endpoint.identifier, endpoint.identifierSize);
+                    std::optional<std::string> name =
+                        DecodeBrowserUtf8Field(endpoint.name, endpoint.nameSize);
+                    if (!identifier.has_value() || !name.has_value()) {
+                        return std::nullopt;
+                    }
+                    return Endpoint{
+                        .identifier = std::move(*identifier),
+                        .name = std::move(*name),
+                        .kind = endpoint.kind == 0 ? EndpointKind::Input : EndpointKind::Output,
+                    };
+                });
+        if (!converted.has_value()) {
             return -1;
         }
-        std::vector<typename BrowserMidiBridge<synth::Engine<App>>::Endpoint> converted;
-        converted.reserve(count);
-        for (std::uint32_t ix = 0; ix < count; ++ix) {
-            const MidiEndpointDescriptor& endpoint = endpoints[ix];
-            if ((endpoint.identifier == nullptr && endpoint.identifierSize != 0) ||
-                (endpoint.name == nullptr && endpoint.nameSize != 0) || endpoint.kind > 1) {
-                return -1;
-            }
-            converted.push_back({
-                .identifier = endpoint.identifier == nullptr ? std::string{} : std::string(endpoint.identifier, endpoint.identifierSize),
-                .name = endpoint.name == nullptr ? std::string{} : std::string(endpoint.name, endpoint.nameSize),
-                .kind = endpoint.kind == 0 ? BrowserMidiBridge<synth::Engine<App>>::EndpointKind::Input
-                                           : BrowserMidiBridge<synth::Engine<App>>::EndpointKind::Output,
-            });
+        return Invoke([this, &converted] { runtime_.SubmitMidiEndpoints(*converted); });
+    }
+
+    int SubmitAudioDevices(const AudioDeviceDescriptor* devices, std::uint32_t count) override
+    {
+        std::optional<std::vector<BrowserAudioDevice>> converted =
+            DecodeBrowserDescriptorArray<AudioDeviceDescriptor, BrowserAudioDevice>(
+                devices, count, [](const AudioDeviceDescriptor& device) -> std::optional<BrowserAudioDevice> {
+                    if (device.kind > 1) {
+                        return std::nullopt;
+                    }
+                    std::optional<std::string> deviceId =
+                        DecodeBrowserUtf8Field(device.deviceId, device.deviceIdSize);
+                    std::optional<std::string> label =
+                        DecodeBrowserUtf8Field(device.label, device.labelSize);
+                    if (!deviceId.has_value() || !label.has_value()) {
+                        return std::nullopt;
+                    }
+                    return BrowserAudioDevice{
+                        .deviceId = std::move(*deviceId),
+                        .label = std::move(*label),
+                        .kind = device.kind == 0 ? BrowserAudioDeviceKind::Input
+                                                  : BrowserAudioDeviceKind::Output,
+                    };
+                });
+        if (!converted.has_value()) {
+            return -1;
         }
-        return Invoke([this, &converted] { runtime_.SubmitMidiEndpoints(converted); });
+        return Invoke([this, &converted] { runtime_.SubmitAudioDevices(std::move(*converted)); });
     }
 
     int DequeueMidiAction(MidiActionDescriptor* action) override
@@ -1368,7 +1529,7 @@ int synth_browser_set_audio_input_source(synth_browser_runtime* runtime,
                                          std::uint32_t statusCode);
 int synth_browser_clear_audio_input_source(synth_browser_runtime* runtime,
                                            std::uint32_t statusCode);
-int synth_browser_consume_audio_input_retry(synth_browser_runtime* runtime);
+int synth_browser_consume_pending_audio_request(synth_browser_runtime* runtime, std::uint32_t* outControl);
 int synth_browser_set_timestamp_epoch_offset(
     synth_browser_runtime* runtime, std::int64_t offsetMicros);
 std::uint32_t synth_browser_audio_worklet_block_count(synth_browser_runtime* runtime);
@@ -1380,6 +1541,8 @@ int synth_browser_dispatch_action(synth_browser_runtime* runtime, const char* na
 int synth_browser_consume_persistence_dirty(synth_browser_runtime* runtime);
 int synth_browser_submit_midi_endpoints(synth_browser_runtime* runtime,
                                         const synth_browser::MidiEndpointDescriptor* endpoints, std::uint32_t count);
+int synth_browser_submit_audio_devices(synth_browser_runtime* runtime,
+                                       const synth_browser::AudioDeviceDescriptor* devices, std::uint32_t count);
 int synth_browser_dequeue_midi_action(synth_browser_runtime* runtime, synth_browser::MidiActionDescriptor* action);
 int synth_browser_deliver_midi(synth_browser_runtime* runtime, std::uint32_t controllerIx, const std::uint8_t* bytes,
                                std::uint32_t size, std::uint64_t timestampMicros);

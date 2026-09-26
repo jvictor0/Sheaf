@@ -4,7 +4,7 @@ import {
   SUPPORTED_UI_PROTOCOL_VERSION,
 } from "./protocol.js";
 import { MAX_BROWSER_AUDIO_INPUT_CHANNELS, browserAudioInputLimitDiagnostic } from "./audio-input-limits.js";
-import type { MidiAction, MidiEndpoint, MidiOutput, MidiOutputDiagnostics } from "./protocol.js";
+import type { AudioDevice, MidiAction, MidiEndpoint, MidiOutput, MidiOutputDiagnostics } from "./protocol.js";
 import { validateBrowserRuntimeIdentity } from "./catalog.js";
 import type { BrowserRuntimeIdentity } from "./catalog.js";
 import { BROWSER_PERSISTENCE_STATUS_PATH, BrowserPersistence } from "./persistence.js";
@@ -24,6 +24,7 @@ export type RuntimeCommand =
   | { type: "dispatch-action"; name: string; value: string }
   | { type: "destroy" }
   | { type: "midi-endpoints"; endpoints: MidiEndpoint[] }
+  | { type: "audio-devices"; devices: AudioDevice[] }
   | { type: "midi-input"; controllerIx: number; bytes: number[]; timestampMicros: number }
   | { type: "drain-midi-output" }
   | { type: "midi-diagnostics" }
@@ -64,12 +65,18 @@ export interface RuntimeModuleFacade {
   // been registered. Reads the registration cache; it never registers.
   audioInputSourceHandle?(source: AudioNode): number;
   clearAudioInputSource?(handle: number, statusCode: number): number;
-  consumeAudioInputRetry?(handle: number): boolean;
+  // index: -1 nothing pending, -2 release/default the armed control,
+  // otherwise a nonnegative index into the device list most recently
+  // submitted through `submitAudioDevices`. control: which control (0 input,
+  // 1 output -- BrowserAudioDeviceKind) the index applies to; meaningless
+  // when index is -1.
+  consumePendingAudioRequest?(handle: number): { index: number; control: number };
   messageTick(handle: number, timestampMicros: number): number;
   buildUiFrame(handle: number): ArrayBuffer;
   dispatchAction(handle: number, name: string, value: string): number;
   hasPersistenceChanges?(handle: number): boolean;
   submitMidiEndpoints(handle: number, endpoints: MidiEndpoint[]): number;
+  submitAudioDevices(handle: number, devices: AudioDevice[]): number;
   dequeueMidiAction(handle: number): MidiAction | undefined;
   deliverMidi(handle: number, controllerIx: number, bytes: number[], timestampMicros: number): number;
   dequeueMidiOutput(handle: number): MidiOutput | undefined;
@@ -138,7 +145,7 @@ type EmscriptenModule = {
   _synth_browser_start_audio_worklet?(handle: number, audioContextHandle: number): number;
   _synth_browser_set_audio_input_source?(handle: number, sourceHandle: number, physicalChannels: number, statusCode: number): number;
   _synth_browser_clear_audio_input_source?(handle: number, statusCode: number): number;
-  _synth_browser_consume_audio_input_retry?(handle: number): number;
+  _synth_browser_consume_pending_audio_request?(handle: number, outControl: number): number;
   _synth_browser_audio_worklet_block_count?(handle: number): number;
   _synth_browser_audio_worklet_peak_microunits?(handle: number): number;
   _synth_browser_audio_worklet_deadline_microunits?(handle: number): number;
@@ -147,6 +154,7 @@ type EmscriptenModule = {
   _synth_browser_dispatch_action(handle: number, name: number, value: number): number;
   _synth_browser_consume_persistence_dirty?(handle: number): number;
   _synth_browser_submit_midi_endpoints(handle: number, endpoints: number, count: number): number;
+  _synth_browser_submit_audio_devices(handle: number, devices: number, count: number): number;
   _synth_browser_dequeue_midi_action(handle: number, action: number): number;
   _synth_browser_deliver_midi(handle: number, controllerIx: number, bytes: number, size: number, timestampMicros: bigint): number;
   _synth_browser_dequeue_midi_output(handle: number, descriptor: number): number;
@@ -186,7 +194,11 @@ function withBytes<T>(module: EmscriptenModule, bytes: Uint8Array, operation: (p
   }
 }
 
-const MIDI_ENDPOINT_SIZE = 20;
+// Shared by MIDI endpoints and audio devices: both descriptors are two UTF-8
+// (pointer, size) fields plus a 0/1 kind discriminator (MidiEndpointDescriptor
+// / AudioDeviceDescriptor, BrowserRuntimeAbi.cpp), so one stride and one
+// packing routine serve both.
+const DESCRIPTOR_SIZE = 20;
 const MIDI_ACTION_SIZE = 24;
 const MIDI_OUTPUT_SIZE = 24;
 const MIDI_DIAGNOSTICS_SIZE = 24;
@@ -195,6 +207,51 @@ const MIDI_ACTION_TYPES: MidiAction["type"][] = ["open-input", "open-output", "c
 
 function decodeUtf8(module: EmscriptenModule, pointer: number, size: number): string {
   return new TextDecoder().decode(module.HEAPU8.slice(pointer, pointer + size));
+}
+
+// Packs a fixed-stride array of string-carrying entries into one malloc'd
+// `DESCRIPTOR_SIZE`-stride descriptor buffer plus one malloc'd UTF-8 buffer
+// per string field, invokes `submit` with the descriptor pointer and count,
+// and frees every allocation synchronously before returning. Both
+// `submitMidiEndpoints` and `submitAudioDevices` call this one routine
+// (BrowserRuntimeAbi.cpp's `DecodeBrowserDescriptorArray` decodes the result
+// on the C++ side the same way for both) rather than each packing its own
+// buffer -- the descriptors only point at these buffers for the duration of
+// the call, which is why every allocation must be freed before this returns.
+function packDescriptors(
+  module: EmscriptenModule,
+  entries: ReadonlyArray<{ primary: string; secondary: string; kind: number }>,
+  submit: (pointer: number, count: number) => number,
+): number {
+  const encoded = entries.map((entry) => ({
+    primary: new TextEncoder().encode(entry.primary),
+    secondary: new TextEncoder().encode(entry.secondary),
+    kind: entry.kind,
+  }));
+  const allocated = encoded
+    .flatMap((entry) => [entry.primary, entry.secondary])
+    .map((bytes) => bytes.length === 0 ? 0 : module._malloc(bytes.length));
+  const descriptorPointer = entries.length === 0 ? 0 : module._malloc(entries.length * DESCRIPTOR_SIZE);
+  try {
+    const view = new DataView(module.HEAPU8.buffer);
+    for (let index = 0; index < encoded.length; index++) {
+      const entry = encoded[index];
+      const primaryPointer = allocated[index * 2];
+      const secondaryPointer = allocated[index * 2 + 1];
+      if (primaryPointer !== 0) module.HEAPU8.set(entry.primary, primaryPointer);
+      if (secondaryPointer !== 0) module.HEAPU8.set(entry.secondary, secondaryPointer);
+      const offset = descriptorPointer + index * DESCRIPTOR_SIZE;
+      view.setUint32(offset, primaryPointer, true);
+      view.setUint32(offset + 4, entry.primary.length, true);
+      view.setUint32(offset + 8, secondaryPointer, true);
+      view.setUint32(offset + 12, entry.secondary.length, true);
+      view.setUint32(offset + 16, entry.kind, true);
+    }
+    return submit(descriptorPointer, entries.length);
+  } finally {
+    if (descriptorPointer !== 0) module._free(descriptorPointer);
+    allocated.filter((pointer) => pointer !== 0).forEach((pointer) => module._free(pointer));
+  }
 }
 
 export function emscriptenRuntimeFacade(module: EmscriptenModule): RuntimeModuleFacade {
@@ -208,8 +265,8 @@ export function emscriptenRuntimeFacade(module: EmscriptenModule): RuntimeModule
     throw new Error("runtime module does not expose audio input source registration");
   if (typeof module._synth_browser_clear_audio_input_source !== "function")
     throw new Error("runtime module does not expose audio input source clear");
-  if (typeof module._synth_browser_consume_audio_input_retry !== "function")
-    throw new Error("runtime module does not expose audio input retry");
+  if (typeof module._synth_browser_consume_pending_audio_request !== "function")
+    throw new Error("runtime module does not expose the pending audio request");
   const audioInputSourceHandles = new WeakMap<AudioNode, number>();
   return {
     abiVersion: module._synth_browser_abi_version(),
@@ -254,7 +311,19 @@ export function emscriptenRuntimeFacade(module: EmscriptenModule): RuntimeModule
         throw new Error("audio input status code must be an integer between 0 and 10");
       return module._synth_browser_clear_audio_input_source!(handle, statusCode);
     },
-    consumeAudioInputRetry: (handle) => module._synth_browser_consume_audio_input_retry!(handle) !== 0,
+    consumePendingAudioRequest: (handle) => {
+      // The one out-param this ABI surface needs: a 4-byte scratch buffer for
+      // the control byte, freed before returning exactly like every other
+      // malloc'd descriptor this facade uses (see packDescriptors, dequeueMidiAction).
+      const pointer = module._malloc(4);
+      try {
+        const index = module._synth_browser_consume_pending_audio_request!(handle, pointer);
+        const control = new DataView(module.HEAPU8.buffer).getUint32(pointer, true);
+        return { index, control };
+      } finally {
+        module._free(pointer);
+      }
+    },
     audioWorkletStats: module._synth_browser_audio_worklet_block_count &&
       module._synth_browser_audio_worklet_peak_microunits &&
       module._synth_browser_audio_worklet_deadline_microunits
@@ -280,31 +349,24 @@ export function emscriptenRuntimeFacade(module: EmscriptenModule): RuntimeModule
     hasPersistenceChanges: module._synth_browser_consume_persistence_dirty
       ? (handle) => module._synth_browser_consume_persistence_dirty!(handle) !== 0
       : undefined,
-    submitMidiEndpoints: (handle, endpoints) => {
-      const encoded = endpoints.map((endpoint) => ({ ...endpoint, identifier: new TextEncoder().encode(endpoint.identifier), name: new TextEncoder().encode(endpoint.name) }));
-      const allocated = encoded.flatMap((endpoint) => [endpoint.identifier, endpoint.name]).map((bytes) => bytes.length === 0 ? 0 : module._malloc(bytes.length));
-      const endpointPointer = endpoints.length === 0 ? 0 : module._malloc(endpoints.length * MIDI_ENDPOINT_SIZE);
-      try {
-        const view = new DataView(module.HEAPU8.buffer);
-        for (let index = 0; index < encoded.length; index++) {
-          const endpoint = encoded[index];
-          const identifierPointer = allocated[index * 2];
-          const namePointer = allocated[index * 2 + 1];
-          if (identifierPointer !== 0) module.HEAPU8.set(endpoint.identifier, identifierPointer);
-          if (namePointer !== 0) module.HEAPU8.set(endpoint.name, namePointer);
-          const offset = endpointPointer + index * MIDI_ENDPOINT_SIZE;
-          view.setUint32(offset, identifierPointer, true);
-          view.setUint32(offset + 4, endpoint.identifier.length, true);
-          view.setUint32(offset + 8, namePointer, true);
-          view.setUint32(offset + 12, endpoint.name.length, true);
-          view.setUint32(offset + 16, endpoint.kind === "input" ? 0 : 1, true);
-        }
-        return module._synth_browser_submit_midi_endpoints(handle, endpointPointer, endpoints.length);
-      } finally {
-        if (endpointPointer !== 0) module._free(endpointPointer);
-        allocated.filter((pointer) => pointer !== 0).forEach((pointer) => module._free(pointer));
-      }
-    },
+    submitMidiEndpoints: (handle, endpoints) => packDescriptors(
+      module,
+      endpoints.map((endpoint) => ({
+        primary: endpoint.identifier,
+        secondary: endpoint.name,
+        kind: endpoint.kind === "input" ? 0 : 1,
+      })),
+      (pointer, count) => module._synth_browser_submit_midi_endpoints(handle, pointer, count),
+    ),
+    submitAudioDevices: (handle, devices) => packDescriptors(
+      module,
+      devices.map((device) => ({
+        primary: device.deviceId,
+        secondary: device.label,
+        kind: device.kind === "input" ? 0 : 1,
+      })),
+      (pointer, count) => module._synth_browser_submit_audio_devices(handle, pointer, count),
+    ),
     dequeueMidiAction: (handle) => {
       const actionPointer = module._malloc(MIDI_ACTION_SIZE);
       try {
@@ -475,9 +537,12 @@ export class BrowserRuntimeWorker {
       throw new Error("runtime rejected the audio input status");
   }
 
-  async consumeAudioInputRetry(): Promise<boolean> {
+  // The raw ABI value (see `consumePendingAudioRequest` on
+  // `RuntimeModuleFacade`): index -1, control 0 when a module does not
+  // expose this at all.
+  async consumePendingAudioRequest(): Promise<{ index: number; control: number }> {
     const module = this.requireModule();
-    return module.consumeAudioInputRetry?.(this.requireHandle()) ?? false;
+    return module.consumePendingAudioRequest?.(this.requireHandle()) ?? { index: -1, control: 0 };
   }
 
   async handle(command: RuntimeCommand): Promise<RuntimeResponse> {
@@ -570,6 +635,8 @@ export class BrowserRuntimeWorker {
           for (let action = module.dequeueMidiAction(handle); action !== undefined; action = module.dequeueMidiAction(handle)) actions.push(action);
           return { type: "midi-actions", actions };
         }
+        case "audio-devices":
+          return this.call((module, handle) => module.submitAudioDevices(handle, command.devices));
         case "midi-input":
           return this.call((module, handle) => module.deliverMidi(handle, command.controllerIx, command.bytes, command.timestampMicros));
         case "drain-midi-output":
