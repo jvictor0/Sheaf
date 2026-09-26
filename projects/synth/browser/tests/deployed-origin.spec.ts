@@ -127,15 +127,20 @@ for (const app of deployedApps) {
         appIds: catalog.apps.map((entry: { appId: string }) => entry.appId),
       };
     }, remoteCatalogUrl!);
+    // readAppBuildManifest sorts by appId before build-first-party-catalog.mjs
+    // writes the raw catalog, so the published catalog.json's own apps[] order
+    // is alphabetical by appId, not the launcher's display-name order below.
     expect(deployedCatalog).toEqual({
       catalogVersion: expectedCatalogVersion,
-      appIds: ["braid-4", "miniapp"],
+      appIds: ["braid-4", "miniapp", "one-second-delay"],
     });
 
     const rows = page.locator(".synth-launcher__app");
+    // Launcher rows sort by display name (mergeCatalogs): "1 Second Delay",
+    // "Braid 4", "Mini App".
     await expect.poll(() => rows.evaluateAll((elements) =>
       elements.map((element) => (element as HTMLElement).dataset.synthAppId)))
-      .toEqual(["sheaf/braid-4", "sheaf/miniapp"]);
+      .toEqual(["sheaf/one-second-delay", "sheaf/braid-4", "sheaf/miniapp"]);
     await page.getByRole("button", { name: app.button }).click();
     await expect(page.locator(`[data-synth-node-id="${app.root}"]`)).toBeVisible({ timeout: 60_000 });
 

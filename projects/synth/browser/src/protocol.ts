@@ -1,17 +1,23 @@
 export const COMMAND_BUFFER_MAGIC = "SBCB";
-export const SUPPORTED_BROWSER_ABI_VERSION = 4;
-// Version 2 (sru-46): node bounds are parent-relative, `Draw` geometry is
-// node-local, node colour/text style and container border fields cross the
-// wire behind explicit presence bytes, and `variant` is gone. A hard break
-// with strict equality on both ends and no version-1 fallback. Moves in
-// lockstep with C++
-// `kCommandBufferVersion` and each Wasm package's exported
-// `synth_browser_ui_protocol_version()`.
-export const SUPPORTED_UI_PROTOCOL_VERSION = 2;
-export const SUPPORTED_RUNTIME_CONFIG_VERSION = 1;
+// Declared in protocol-versions.js and re-exported here, so a .mjs that runs
+// before anything is built can read them without importing compiled output.
+// This stays the import site every TypeScript consumer uses.
+export {
+  SUPPORTED_BROWSER_ABI_VERSION,
+  SUPPORTED_RUNTIME_CONFIG_VERSION,
+  SUPPORTED_UI_PROTOCOL_VERSION,
+} from "./protocol-versions.js";
+import { SUPPORTED_UI_PROTOCOL_VERSION } from "./protocol-versions.js";
 export const COMMAND_BUFFER_VERSION = SUPPORTED_UI_PROTOCOL_VERSION;
 
 export type MidiEndpoint = { identifier: string; name: string; kind: "input" | "output" };
+// Mirrors `synth_browser::BrowserAudioDevice` (BrowserAudioDevices.hpp), one
+// entry from `navigator.mediaDevices.enumerateDevices()` carried across
+// `synth_browser_submit_audio_devices`. `deviceId` and `label` are submitted
+// exactly as the browser reports them -- including both empty on an
+// unpermitted page -- since the native side, not JS, decides what is
+// presentable.
+export type AudioDevice = { deviceId: string; label: string; kind: "input" | "output" };
 export type MidiActionType = "open-input" | "open-output" | "close-input" | "close-output" | "update-input-ref" | "update-output-ref" | "resync";
 export type MidiAction = { type: MidiActionType; controllerIx: number; identifier?: string; name?: string };
 export type MidiOutput = {
