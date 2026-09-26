@@ -86,6 +86,7 @@ export class BrowserMidiManager {
   private drainRequested = false;
   private lateScheduledOutputCount = 0;
   private sendErrorCount = 0;
+  private activationInFlight: Promise<BrowserMidiStartResult> | undefined;
   private bridgeDiagnostics: MidiOutputDiagnostics = {
     droppedImmediateOutputCount: 0,
     droppedScheduledOutputCount: 0,
@@ -105,9 +106,25 @@ export class BrowserMidiManager {
     };
   }
 
+  // Two callers can both reach this before either settles: a Controllers
+  // click while an earlier Controllers click's prompt is still open, or the
+  // load-time saved-grant start racing a Controllers click. `this.access`
+  // guards re-entry only after a grant resolves, which is too late for
+  // either caller already in flight, so a second caller shares the first
+  // caller's own in-flight request and its eventual status instead of
+  // issuing a second `requestMIDIAccess` call.
   async startFromUserActivation(): Promise<BrowserMidiStartResult> {
     if (this.access) return { status: this.statusValue };
+    if (this.activationInFlight) return this.activationInFlight;
     this.statusValue = "requesting";
+    const activation = this.requestAccessAndStart().finally(() => {
+      this.activationInFlight = undefined;
+    });
+    this.activationInFlight = activation;
+    return activation;
+  }
+
+  private async requestAccessAndStart(): Promise<BrowserMidiStartResult> {
     try {
       const access = this.options.requestMIDIAccess
         ? await this.options.requestMIDIAccess({ sysex: true })

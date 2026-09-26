@@ -241,9 +241,11 @@ in `build/instrument_tests`, `build/blocks_tests`, `build/viewmodel_tests`,
 
 `ControllerWizard.hpp` adds a JUCE-free layer between raw MIDI device discovery
 and a complete controller profile. It ships one wizard, for the MIDI Fighter
-Twister, and the Controllers page turns a recognized attached pair into an
-installed profile in three activations: Controllers, Configuration Wizard,
-Submit.
+Twister. The Controllers page's add row and Restore are the only callers: Add
+installs a chosen preset's default profile in one activation, and Restore
+regenerates a diverged row's profile from the same descriptor. Neither runs
+through a wizard-specific page; both go through the ordinary instrument
+commit and save path.
 
 ### Registry and discovery
 
@@ -262,9 +264,10 @@ returning a `WizardDiscovery`. Name matching is **case-insensitive exact
 comparison against the descriptor's own aliases** — prefix, substring, fuzzy,
 and implicit numeric-suffix names deliberately do not match, so a
 platform-specific numbered name must be added as an explicit alias before it is
-recognized. Endpoints that no descriptor recognized are retained in
-`unmatchedInputs`/`unmatchedOutputs` as diagnostics and rendered on the
-Controllers page, so real-world device names can be turned into aliases later.
+recognized. Endpoints left unpaired — whether no descriptor recognized them or a
+descriptor recognized them but found no matching endpoint on the other side —
+are retained in `unmatchedInputs`/`unmatchedOutputs`, and the Controllers page
+renders them as "Other inputs" and "Other outputs."
 
 A pair is *available* only when both endpoints are present, one descriptor
 recognizes it, neither endpoint is claimed by any stored record (Active or
@@ -272,6 +275,16 @@ Blacklisted, identifier-first then stored-name fallback, matching
 reconciliation identity semantics), and the pair has not already been emitted in
 this pass. Discovery is deterministic: duplicate same-name devices pair by
 stable enumeration order, and no endpoint appears in two candidates.
+
+The Controllers page lists every available pair as read-only status under
+"Available controllers," by its port names and the display name of every
+preset that matches it, with "No connected controller is waiting to be set
+up" when none is waiting. The add row's Preset combo starts on the first
+listed device's first matching preset, or the registry's first descriptor
+when none is waiting. Add binds the first unused connected pair whose port
+names match the chosen preset's own aliases, so a device with more than one
+matching preset — an APC40 mkII, for its Generic and Ableton presets — binds
+whichever preset the player chooses.
 
 The runtime caches the device list and the derived classification. It
 reclassifies from the cached snapshot after a device-list change and after every
@@ -287,14 +300,14 @@ while an available candidate exists, even while the page is closed.
 wizard id is an **opaque non-empty persisted string**: the instrument model
 never consults the registry, so validity and loading do not depend on which
 wizards this build happens to contain. Registry resolution gates only the
-Reconfigure, Blacklist, and Configure UI actions.
+Restore action.
 
-An Active record requires its existing kind-valid profile. A Blacklisted record
-requires a non-empty wizard id and both endpoint references, has no
-runtime-active profile, and either carries no dormant profile (when created by
-Ignore) or the complete prior Active profile retained as dormant reconfiguration
-seed data (when changed from Active). Unique names and ordered iteration span
-both dispositions.
+An Active record requires its existing kind-valid profile. A Blacklisted
+record requires a non-empty wizard id and both endpoint references, has no
+runtime-active profile, and carries either no dormant profile or the complete
+prior Active profile retained as dormant data — shapes a configuration saved
+by an earlier build can hold, since nothing on the page creates a Blacklisted
+record now. Unique names and ordered iteration span both dispositions.
 
 Instrument JSON is schema version 2. Entries write `disposition`
 (`"active"`/`"blacklisted"`), an optional `wizardId`, and `profile` (the Active
@@ -328,126 +341,71 @@ boundaries:
   never rewritten, so an Active slot may claim a device a Blacklisted slot still
   names.
 
-Slot ordinals stay stable across these transitions, so deleting or blacklisting
-a middle record resizes through the normal whole-instrument rebuild path.
+Slot ordinals stay stable across these transitions, so deleting a middle
+record resizes through the normal whole-instrument rebuild path. A
+Blacklisted row shows its Released badge and stored port labels and offers
+Delete, the same control an Active row's ports line offers; it exposes no
+live endpoint selectors, mapping editor, or path back to Active.
 
-### The MF Twister form
+### The MF Twister default
 
-`MfTwisterConfigForm` is a portable `ui::Surface` under the node-id namespace
-`controller-wizard.twister`. It owns only in-memory state: it never enumerates
-MIDI, edits the engine, saves configuration, or includes JUCE/DOM headers.
+`MfTwisterConfigForm` holds only the fixed default the library ships: one
+controller-wide Encoder Slot of `0` and exactly six side buttons, defaulting
+respectively to Hold Reset, Hold Random, Hold Random Mod, Next Bank, Start,
+and Previous Bank on channel 3 CCs 8 through 13. It is in-memory generation
+input only: it never enumerates MIDI, edits the engine, saves configuration,
+renders a node tree, or dispatches an action. Add installs this default
+exactly like any other preset, and the player edits the installed row
+afterward, on the same mapping editor every other kind uses.
 
-It shows **one controller-wide `Encoder Slot`**
-(`controller-wizard.twister.encoder-slot`) and **exactly six** buttons in two
-columns of three, laid out by the form itself so both hosts get the same
-geometry:
-
-| Node | Column | Hardware address | Default |
-|---|---|---|---|
-| `controller-wizard.twister.button.0.message` | Left (CC 8-10) | ch 3, CC 8 | Hold Reset |
-| `controller-wizard.twister.button.1.message` | Left | ch 3, CC 9 | Hold Random |
-| `controller-wizard.twister.button.2.message` | Left | ch 3, CC 10 | Hold Random Mod |
-| `controller-wizard.twister.button.3.message` | Right (CC 11-13) | ch 3, CC 11 | Next Bank |
-| `controller-wizard.twister.button.4.message` | Right | ch 3, CC 12 | Start |
-| `controller-wizard.twister.button.5.message` | Right | ch 3, CC 13 | Previous Bank |
-
-Each button also has a paired `...button.{N}.argument` control. Encoder Slot
-defaults to `0`.
-
-The dropdown choices are a closed set of sixteen drawn from the shared UI
-system-message catalog: Toggle/Hold Reset, Toggle/Hold Random, Toggle/Hold
-Random Mod, Toggle/Hold Gesture Select, Bank Select, Next Bank, Previous Bank,
-Start, Continue, Stop, Clock, and Scene Select. There is no None/unassigned
-choice — every button always carries a message.
-
-Argument enablement is **wizard form policy, deliberately narrower than the
-generic `UISystemMessageHasArg()`**: the argument is enabled only for Toggle
-Gesture Select, Hold Gesture Select, Bank Select, and Scene Select. Next Bank
-and Previous Bank take their `slotIx` from the form-wide Encoder Slot, so their
-arguments are disabled and their stored text cannot reach the generated message.
-Disabled state travels through the portable node contract, and both the Chrome
-and JUCE backends render it as a disabled control and suppress its action.
-
-Encoder Slot and enabled arguments accept every non-negative base-10 integer
-representable by `std::size_t`; empty, negative, non-base-10, and overflowing
-text is a field-level error that refuses generation without touching the
-instrument.
-
-Generation reuses `MfTwisterDefaultProfileConfig`, passing the selected slot as
-`slotIx` and exactly six side-button associations. All sixteen encoder
+Generation reuses `MfTwisterDefaultProfileConfig`, passing the form's fixed
+Encoder Slot as `slotIx` and exactly six side-button associations. All sixteen encoder
 positions' turn, push, and output mappings target the one Encoder Slot, as do
-every Bank Select, Next Bank, and Previous Bank message. Bank Select alone also
-carries its per-button `bankIx`. Hold choices emit a `true` press message and a
-matching `false` release. Side buttons are input-only, with no output feedback.
+every Bank Select, Next Bank, and Previous Bank message. Hold choices emit a
+`true` press message and a matching `false` release. Side buttons are
+input-only, with no output feedback.
 
-### Lifecycle: submit, ignore, reconfigure, blacklist
+### Lifecycle: add, restore, delete
 
-`ControllersPageSurface` owns at most one wizard session (a candidate or a
-stored record index, plus the wizard and form). `Configuration Wizard`
-(`runtime.controllers.wizard.launch`) stays visible but disabled with the status
-"No recognized unconfigured controller pair is present" when nothing is
-available, opens the sole candidate's form directly when exactly one exists, and
-otherwise opens a chooser listing each candidate's controller and endpoint
-labels.
+The add row's Preset combo lists the registry's descriptors, in registry
+order, followed by one Custom entry; it starts on the first
+matching preset of the first device listed under "Available controllers," or
+the registry's first descriptor when none is waiting, until the player picks
+a different option. Add builds a named active controller from the chosen
+preset through this same wizard machinery, or an empty Generic-kind record
+with no generated mapping and no bound endpoints for Custom. The new row
+opens expanded, with every section it lists open, through the same disclosure
+and section toggles a player's own click on them uses, so those same clicks
+still collapse it. A row that appears any other way, such as loading a
+configuration, still starts collapsed.
 
-Submit re-snapshots devices and the instrument, revalidates the exact target,
-validates the form, generates, and performs **one** instrument commit; only
-after that succeeds does it request a runtime-configuration save. A refusal —
-invalid field, disappeared candidate, contended endpoint, or a record whose
-index, name, endpoints, or disposition changed out of band — commits nothing,
-saves nothing, and retains every entered value with an inline status. New
-records take the descriptor display name, or the smallest free numeric suffix
-starting at ` 2` (`MIDI Fighter Twister 2`, `MIDI Fighter Twister 3`).
-
-A new-candidate form also offers `Ignore this controller`, so the fast path does
-not hide blacklist access; `Ignore` is never offered while reconfiguring an
-existing record. Ignore commits one Blacklisted record with the pair's kind,
-wizard id, and both endpoint identities, and no profile.
-
-Reconfigure seeds the form only from an *exactly* generated Twister shape:
-`ExtractMfTwisterWizardSeed` requires no analog config and no extra mappings,
-exactly the default sixteen turn, sixteen push, and sixteen encoder-output
-mappings, exactly six expressible associations at channel 3 CCs 8-13, and one
-common slot across every encoder, Bank Select, Next Bank, and Previous Bank
-message. Anything else opens the wizard defaults with the warning "This stored
-profile cannot be represented by the wizard. Submit replaces the whole profile."
-There is no separate confirmation step — Submit *is* the confirmation, and it
-replaces the complete profile while preserving the record's name, endpoint
-references, wizard id, and ordered position. Hand-edited or extra mappings are
-deliberately dropped rather than merged. An offline stored record can still be
-reconfigured, because its stored references are sufficient.
+A row whose persisted wizard id resolves in the current registry and whose
+stored config no longer matches that preset's freshly generated profile
+offers Restore. Restore regenerates the descriptor's profile from the row's
+own current name and endpoint references, replaces the slot's kind and
+config, and leaves its name, endpoint references, wizard id, and disposition
+unchanged.
 
 Active rows offer inline Rename (a `runtime.controllers.row.{N}.rename_draft`
 text field plus a `runtime.controllers.row.{N}.rename` commit button) and an
-immediate `runtime.controllers.row.{N}.delete` with no confirmation step, plus
-Reconfigure and Blacklist when the record's wizard id resolves in the current
-registry. Blacklisting is immediate and always retains
-the prior profile as dormant seed data. Blacklisted rows show a `Blacklisted`
-badge and their stored endpoint labels, expose no endpoint selectors and no
-mapping editor, and offer Rename, Remove from blacklist, and Configure (only
-when the wizard id resolves). Removing a blacklisted record deletes the inert
-record, so an attached pair immediately becomes available again and the sidebar
-warning returns. Manual and legacy records — those with no wizard id — keep
-Rename, Delete, endpoint selection, and the low-level mapping editor, and are
-never offered Reconfigure or Blacklist, so they can never be stranded in a
-Blacklisted disposition.
+immediate `runtime.controllers.row.{N}.delete` with no confirmation step.
+Delete removes a record of either disposition. Manual and legacy records —
+those with no wizard id — keep Rename, Delete, endpoint selection, and the
+low-level mapping editor, and are never offered Restore.
 
-Every lifecycle action commits through the existing
-`engine.EditInstrument` + `MidiConnectionManager` reconcile path; the page never
-opens or closes device handlers itself.
+Every action on this page — adding, choosing a port, editing a mapping,
+renaming, deleting, and Restore — commits through the existing
+`engine.EditInstrument` + `MidiConnectionManager` reconcile path and saves the
+runtime configuration as part of that same action, so the edit survives a
+reload however the player leaves the page; a failed save leaves the committed
+edit in place and shows the status. The page never opens or closes device
+handlers itself, and leaving by Back adds no separate save.
 
 ### Acceptance coverage
 
-The browser is the primary acceptance surface: `browser/tests/fake-app.e2e.spec.ts`
-drives the whole flow through production portable actions and test-controlled
-Web MIDI ports supplied by `browser/tests/helpers/fake-midi.ts`, including the
-literal three-click path, the chooser, Ignore, warning clearance and return,
-refusal cases, rename, delete, blacklist, and both reconfigure paths.
-`browser/tests/ui-backend.spec.ts` pins the generic disabled-control rendering
-and action suppression in TypeScript. JUCE parity is pinned by
+JUCE parity is pinned by
 `juce/ControllersPageSimulationTests.cpp` (which drives the same node ids and
-actions), `juce/PortableJuceBackendTests.cpp` (generic disabled semantic
-controls), and `juce/RuntimePagesJuceTests.cpp` (the sidebar warning marker).
+actions) and `juce/RuntimePagesJuceTests.cpp` (the sidebar warning marker).
 JUCE-free contracts live in `build/controller_wizard_tests`,
 `build/controllers_page_ui_tests`, `build/runtime_main_component_tests`,
 `build/instrument_tests`, `build/reconcile_tests`,
@@ -456,7 +414,7 @@ JUCE-free contracts live in `build/controller_wizard_tests`,
 requirement-to-test mapping.
 
 Neither the browser TypeScript backend nor the JUCE renderer contains any
-Twister, wizard, blacklist, generation, matching, or validation policy.
+Twister, wizard, generation, matching, or validation policy.
 
 ## Portable UI Contract
 
@@ -520,12 +478,13 @@ it gets for free.
 
 `MainPane` lays out a fixed-width right sidebar (Audio/Controllers/Sync/File
 buttons plus a rolling-max deadline readout) next to a content host that
-shows exactly one page at a time: `AudioConfigPage` (audio device
-selection/status), `ControllersPage` (per-controller MIDI device pickers and
-mapping edits), `SyncPageSurface` (clock/transport policy and status), and
-`FilePage` (patch commands and patch identity). There is
-no separate shell chrome row — each page owns the state that used to live in
-the old MidiPanel/AudioPanel strips and the patch-command row.
+shows exactly one page at a time: the Audio page (audio device
+selection/status), the Controllers page (per-controller MIDI device pickers
+and mapping edits), the Sync page (`SyncPageSurface`, clock/transport policy
+and status), and the File page (patch commands and patch identity).
+`RuntimeMainComponent` builds each one from the portable page trees in
+`include/synth/RuntimePages.hpp` and `include/synth/ControllersPageUI.hpp`.
+Each page owns its own state; there is no separate shell chrome row.
 
 `projects/synth/apps/<name>/` holds one runtime application each. An app
 provides a JUCE-free core satisfying `synth::SynthApplicationCore` (so it can
@@ -554,8 +513,8 @@ v1 by supplying safe sync defaults (all flags off, PPQN 24), and reject invalid
 schema-v2 sync values atomically. Patch files do not carry MIDI/audio/sync
 configuration.
 
-`FilePage` (`projects/synth/runtime/FilePage.hpp`) hosts the patch-command
-row (New/Save/Save As/Load/Revert), an in-app patch browser rooted at
+The File page hosts the patch-command
+row (New/Save/Save As/Load), an in-app patch browser rooted at
 `Runtime::DataPaths().patchesRoot`, and the patch identity label. It does not
 use the operating system file explorer. Patch command results are logged by the
 runtime itself, at INFO level through `synth::AsyncLogQueue`
@@ -576,9 +535,10 @@ through `engine.EditInstrument` plus a
 `MidiConnectionManager` reconcile pass — the page never mutates config or
 device handlers directly.
 
-Audio, Controllers, and Sync page Back buttons save `config.json` before
-returning to the app view. File page Back only dismisses the File page; patch
-save/load commands are explicit.
+Audio and Sync page Back buttons save `config.json` before returning to the
+app view. The Controllers page saves on every committed edit instead, so its
+Back button adds no separate save. File page Back only dismisses the File
+page; patch save/load commands are explicit.
 
 ### Audio input on the JUCE desktop host
 
