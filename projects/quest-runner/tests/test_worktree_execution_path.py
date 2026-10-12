@@ -56,7 +56,10 @@ def _git_init(path: Path) -> None:
         check=True,
         capture_output=True,
     )
-    (path / ".gitignore").write_text("logs/\n", encoding="utf-8")
+    (path / ".gitignore").write_text(
+        (Path(__file__).resolve().parents[3] / ".gitignore").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     (path / ".gitkeep").write_text("", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=str(path), check=True, capture_output=True)
     subprocess.run(

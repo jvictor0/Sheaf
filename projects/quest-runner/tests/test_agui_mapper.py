@@ -11,7 +11,6 @@ from typing import Any
 from quest_runner_service.agui_mapper import (  # type: ignore[import-not-found]
     QuestLogToAguiMapper,
     iter_jsonl_events,
-    iter_quest_log_paths,
 )
 
 
@@ -276,10 +275,12 @@ class QuestLogToAguiMapperTests(unittest.TestCase):
         self.assertEqual(json.loads(events[8]["content"]), {"result": "done", "isError": False})
         self.assertEqual(mapper.errors(), [])
 
-    def test_replays_current_quest_logs_as_valid_agui_events(self) -> None:
-        repo_root = _repo_root()
-        log_paths = iter_quest_log_paths(repo_root)
-        self.assertGreaterEqual(len(log_paths), 55)
+    def test_replays_fixture_logs_as_valid_agui_events(self) -> None:
+        fixture_dir = Path(__file__).parent / "fixtures" / "quest_logs"
+        log_paths = sorted(fixture_dir.glob("*.jsonl"))
+        self.assertEqual(
+            {path.stem for path in log_paths}, {"claude_code", "codex", "cursor", "pi"}
+        )
 
         schema = _load_agui_schema()
         branches = _branch_by_type(schema)
@@ -288,11 +289,13 @@ class QuestLogToAguiMapperTests(unittest.TestCase):
         fallback_events: list[dict[str, Any]] = []
 
         for path in log_paths:
+            event_types: set[str] = set()
             mapper = QuestLogToAguiMapper()
             verifier = AguiStreamVerifier()
             for source_event in iter_jsonl_events(path):
                 source_count += 1
                 for agui_event in mapper.consume(source_event):
+                    event_types.add(agui_event["type"])
                     branch = branches.get(agui_event.get("type"))
                     self.assertIsNotNone(branch, agui_event)
                     _validate_against_schema(agui_event, branch or {}, schema)
@@ -307,9 +310,14 @@ class QuestLogToAguiMapperTests(unittest.TestCase):
                 agui_count += 1
 
             verifier.assert_balanced()
+            self.assertTrue(
+                {"RUN_STARTED", "RUN_FINISHED", "TEXT_MESSAGE_CONTENT", "TOOL_CALL_START", "TOOL_CALL_END"}
+                <= event_types,
+                (path.name, event_types),
+            )
             fallback_events.extend(mapper.errors())
 
-        self.assertGreaterEqual(source_count, 43966)
+        self.assertGreater(source_count, 0)
         self.assertGreater(agui_count, source_count)
         fallback_counts = Counter(
             (

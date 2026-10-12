@@ -42,6 +42,7 @@ TEST_MODULES := \
 	tests.test_experiment_lifecycle \
 	tests.test_migration_validation \
 	tests.test_agui_mapper \
+	tests.test_runtime_logs \
 	tests.test_chat_event_bus \
 	tests.test_dashboard_chat \
 	tests.test_smoke_test

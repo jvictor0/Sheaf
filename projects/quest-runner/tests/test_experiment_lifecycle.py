@@ -216,7 +216,12 @@ class ExperimentLifecycleIntegrationTests(unittest.TestCase):
         self.assertEqual(landed.status, "landed")
         self.assertIsNotNone(landed.landed_at)
         self.assertEqual(landed.remote_branch, meta.branch_name)
-        self.assertTrue((exp_dir / "logs" / "step_0006_implementer.jsonl").is_file())
+        archived_log = exp_dir / "logs" / "step_0006_implementer.jsonl"
+        self.assertTrue(archived_log.is_file())
+        self.assertEqual(archived_log.read_text(), '{"event":"test"}\n')
+        relative_log = archived_log.relative_to(self.temp.root).as_posix()
+        self.assertEqual(run_git(self.temp.root, "ls-files", "--", relative_log).stdout, "")
+        self.assertEqual(run_git(self.temp.root, "check-ignore", "--", relative_log).returncode, 0)
         self.assertTrue(
             (exp_dir / "issues" / "quest" / "physicalplan_issues.md").is_file()
         )

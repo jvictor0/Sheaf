@@ -130,6 +130,9 @@ This is not normal quest landing. Operators land experiments with
 
 ### Archived experiment artifacts
 
-After landing, JSONL logs copy to `experiments/<number>/logs/`. Issues and issue
+After landing, JSONL logs copy to `experiments/<number>/logs/`. These are ignored
+local replay artifacts, as are `<quest_dir>/logs/`; Git commits and pushes do not
+include them. Back them up separately before deleting the source checkout.
+Restoring the same paths makes them available to the dashboard again. Issues and issue
 responses copy to `experiments/<number>/issues/` and
 `experiments/<number>/issue_responses/` with quest-relative paths preserved.

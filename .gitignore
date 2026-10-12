@@ -35,6 +35,12 @@ data/**
 !data/.gitkeep
 logs/**
 !logs/.gitkeep
+
+# Quest runtime transcripts and experiment replay archives (not source logs/).
+/quests/*/*/logs/
+/quests/*/*/experiments/*/logs/
+/projects/*/quests/*/*/logs/
+/projects/*/quests/*/*/experiments/*/logs/
 models/
 *.sqlite
 *.sqlite-shm
