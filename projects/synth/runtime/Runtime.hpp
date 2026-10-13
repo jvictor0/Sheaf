@@ -1,52 +1,44 @@
 #pragma once
 
-// synth_runtime::Runtime — the JUCE-side host shell over synth::Engine<App>
-// (sar-7 and later). Owns the audio device, drives the engine's audio-thread
+// synth_runtime::Runtime — the JUCE-side host shell over synth::Engine<App>.
+// Owns the audio device, drives the engine's audio-thread
 // block pump from AudioIODeviceCallback, drives the engine's message-thread
 // tick from a juce::Timer, and forwards patch commands from chrome (menu
 // items, buttons) to the engine's PatchManager, INFO-logging each result.
 //
-// Startup/shutdown ordering here is binding; see the Task 2 brief
-// (.superpowers/sdd/p3-task-2-brief.md) for the full rationale. MIDI
+// Startup/shutdown ordering here is binding. MIDI
 // connection lifecycle (device open/close/offline/resync, per controller
-// slot including slot 0) is owned by midiConnections_ (a
-// MidiConnectionManager<App>, Task 2 of Plan 3):
-// engine.SetMidiProcessorsWillRebuildCallback forwards to
-// midiConnections_->OnMidiProcessorsWillRebuild() (detaching every
-// controller's forwarding processor before the engine destroys the current
-// MIDI processor chain), and the rebuilt callback forwards to
-// midiConnections_->OnInstrumentRebuilt() (resizing to the current
-// controller count, reinstalling forwarding, and running one reconcile pass)
-// -- see MidiConnectionManager.hpp's class doc comment for why the manager
-// owns every controller's handlers/sink registration. Runtime's
-// message-thread timer also drives midiConnections_->OnTimerTick() (the
-// self-healing poll-driven reconcile path) every tick, and Start() calls
-// midiConnections_->StartupReconcile() once after Initialize() (which starts
-// the background device-list poller). As of Task 4 of Plan 4, Runtime owns
-// no MIDI UI component at all -- MidiConnections() exposes midiConnections_
+// slot including slot 0) is owned by midiConnections_, an
+// EngineMidiConnections<App> -- see EngineMidiConnections.hpp's class doc
+// comment for the full construction/Start/OnTimerTick/teardown ordering it
+// owns, and MidiConnectionManager.hpp's class doc comment for why the
+// manager underneath it owns every controller's handlers/sink registration.
+// Runtime owns
+// no MIDI UI component at all -- MidiConnections() exposes the manager
 // directly so the shared ControllersPageSurface can read
 // EnumerateNow()/State() to populate its combos/status dots, the same way
-// AudioConfigPage reads DeviceManager() directly. ControllersPageSurface never
-// calls into midiConnections_ to open/close a device itself, though (Task 4
-// review, Important finding 3): every device combo change writes through
+// JuceRuntimeMainServices::RefreshAudio reads DeviceManager() directly for
+// the Audio page. ControllersPageSurface never
+// calls into midiConnections_ to open/close a device itself: every device
+// combo change writes through
 // synth::MidiConfigViewModel::SetEndpointRef and commits via
 // engine.EditInstrument, exactly like every other edit on that page; the
 // rebuilt callback below (SetMidiProcessorsRebuiltHook) is what lets the
 // page notice ANY runtime-config/instrument change -- including a
 // reconcile-driven ref rewrite -- and re-derive its view model.
 //
-// Audio device selection (Task 3 of Plan 4): the actual switch
+// Audio device selection: the actual switch
 // (AudioDeviceSetup mutation, setAudioDeviceSetup, logging) is implemented
 // once, in ApplyAudioDeviceSelection()/ApplyAudioDeviceInputSelection(), and
-// reached from the user changing AudioConfigPage's combo
-// (AudioConfigPage.hpp calls these methods straight from its combo's
-// onChange). Runtime configuration loading will seed the engine's audio
+// reached from the user changing the Audio page's combo
+// (JuceRuntimeMainServices::DispatchAudio calls these methods straight from
+// the dispatched action). Runtime configuration loading will seed the engine's audio
 // device state separately from patch data.
 //
-// Runtime no longer owns a UI component for this (Task 3 of Plan 4 deleted
-// AudioPanel): it exposes DeviceManager() so AudioConfigPage can read
+// Runtime owns no UI component for this: it exposes DeviceManager() so
+// JuceRuntimeMainServices can read
 // device names directly, and two host hooks --
-// SetAudioStatusHook()/SetAudioSyncHook() -- that AudioConfigPage installs
+// SetAudioStatusHook()/SetAudioSyncHook() -- that JuceRuntimeMainServices installs
 // on construction so Runtime can push status text and "re-sync your combo
 // selection" notifications to whichever page instance is currently alive,
 // without Runtime holding a reference to it (MainPane/pages are constructed
@@ -59,15 +51,18 @@
 // selection separately in config.json and is saved from the configuration-page
 // Back flows.
 //
-// MidiPanel retirement (Task 4 of Plan 4): the single-slot MidiPanel
-// component is deleted -- ControllersPage.hpp (a thin JUCE renderer over the
-// JUCE-free synth::MidiConfigViewModel) replaces its device-selection role
+// Runtime owns no MidiPanel instance: the single-slot MidiPanel
+// component is deleted -- ControllersPageSurface (a thin portable-UI surface
+// over the JUCE-free synth::MidiConfigViewModel, rendered by the shared
+// portable renderer through RuntimeMainComponent/JuceRuntimeMainServices)
+// replaces its device-selection role
 // with a genuinely per-controller UI, and its old preset combo is gone
-// entirely (kind defaults are now seeded via ControllersPage's "+" row, per
-// spm-37). Runtime no longer owns a MidiPanel instance; it exposes
-// MidiConnections() so ControllersPage can read EnumerateNow()/State() for
-// display, the same way AudioConfigPage reads DeviceManager() directly
-// instead of Runtime owning AudioPanel -- all WRITES (device selection,
+// entirely (kind defaults are now seeded via the Controllers page's "+"
+// row). It exposes
+// MidiConnections() so ControllersPageSurface can read EnumerateNow()/State() for
+// display, the same way JuceRuntimeMainServices reads DeviceManager()
+// directly for the Audio page instead of Runtime owning AudioPanel -- all
+// WRITES (device selection,
 // mapping edits, adding a controller) go through
 // synth::MidiConfigViewModel + engine.EditInstrument instead (see the
 // paragraph above and SetMidiProcessorsRebuiltHook's doc comment below).
@@ -79,6 +74,7 @@
 #include "synth/PortableUI.hpp"
 #include "synth/ThreadId.hpp"
 
+#include "EngineMidiConnections.hpp"
 #include "HostDataPaths.hpp"
 #include "MidiConnectionManager.hpp"
 
@@ -96,6 +92,16 @@
 
 namespace synth_runtime {
 
+// INFO-logs a patch command's outcome. The one definition every JUCE-facing
+// host that drives a PatchManager command uses to report it -- Runtime<App>
+// itself (below) and synth::runtime_ui::MakeEngineFileCallbacks's onCommand
+// (JuceRuntimeMainServices.hpp) both call this rather than each formatting
+// the same line.
+inline void LogPatchCommand(const char* action, const synth::PatchCommandResult& result) {
+    INFO("%s status=%s requestId=%llu", action, synth::PatchCommandStatusName(result.status),
+         static_cast<unsigned long long>(result.requestId));
+}
+
 template <synth::SynthApplication App>
 class Runtime : private juce::AudioIODeviceCallback, private juce::Timer {
 public:
@@ -103,51 +109,22 @@ public:
         : startTime_(std::chrono::steady_clock::now())
         , midiEpoch_(synth_juce::RuntimeMidiEpoch::Capture(startTime_))
         , engine_([this]() -> std::uint64_t { return NowMicros(); })
-        , midiConnections_(std::make_unique<MidiConnectionManager<App>>(engine_, midiEpoch_)) {
-        // The engine invokes this synchronously, on whichever thread is
-        // performing a rebuild, immediately BEFORE midiProcessors_ is
-        // destroyed/replaced (Initialize()'s rebuilds and
-        // MessageThreadTick()'s rebuild all funnel through
-        // Engine::RebuildMidiProcessors()). Forwarding straight to
-        // midiConnections_ (rather than through a std::function indirection
-        // like onMidiProcessorsRebuilt_) is safe here because midiConnections_
-        // is constructed above, in this same initializer list, before this
-        // lambda can ever run.
-        engine_.SetMidiProcessorsWillRebuildCallback([this] { midiConnections_->OnMidiProcessorsWillRebuild(); });
-
-        // The engine invokes this (on the message thread, from
-        // EditInstrument whenever midiProcessors_ has just been rebuilt.
-        // midiConnections_->OnInstrumentRebuilt() resizes to the current
-        // controller count, reinstalls forwarding, and runs one reconcile
-        // pass (sar-8) -- the same executor path the timer-driven poll uses.
-        // onMidiProcessorsRebuilt_ (wired by MainPane via
-        // SetMidiProcessorsRebuiltHook(), see that method's doc comment) is
-        // ControllersPage's subscription to EVERY rebuild -- not just its
-        // own edits -- so runtime-config or other engine-driven instrument
-        // changes also mark the page dirty (Task 4 review, Critical finding 1:
-        // a page that only dirtied on its own commits or a connection-status
-        // fingerprint missed exactly this class of change, letting a later edit
-        // commit from a stale snapshot).
-        engine_.SetMidiProcessorsRebuiltCallback([this] {
-            midiConnections_->OnInstrumentRebuilt();
-            if (onMidiProcessorsRebuilt_) {
-                onMidiProcessorsRebuilt_();
-            }
-        });
+        , midiConnections_(std::make_unique<EngineMidiConnections<App>>(engine_, midiEpoch_)) {
+        // Wires the external-input-routed signal's storage into the
+        // AppContext apps see, before Start()/engine_.Initialize() can ever
+        // run App::Init(). inputRoutingSignal_ is a member of this Runtime
+        // (constructed above, in the member-init list, before this
+        // constructor body runs), so its address is already stable here.
+        engine_.Context().inputRoutingSignal = &inputRoutingSignal_;
     }
 
     ~Runtime() override {
         deviceManager_.removeAudioCallback(this);
         stopTimer();
-        // Shutdown ordering (binding, per Task 2/3 briefs): stop the MIDI
-        // sender before closing devices, so no in-flight enqueued MIDI is
-        // delivered to a sink that's about to be torn down, THEN
-        // midiConnections_'s own destructor stops/joins its poller BEFORE
-        // closing any device handler (binding, per p3-globals.md: "Shutdown
-        // stops/joins the poller before closing devices").
-        if (synth::MidiSender* sender = engine_.Context().midiSender; sender != nullptr) {
-            sender->Stop();
-        }
+        // Shutdown ordering (binding, stated once in EngineMidiConnections's
+        // own header comment): its destructor stops the MIDI sender before
+        // destroying the manager, so no in-flight enqueued MIDI is delivered
+        // to a sink that's about to be torn down.
         midiConnections_.reset();
         INFO("Runtime shutting down: %s", engine_.Config().appName.c_str());
         synth::AsyncLogQueue::s_instance.DoLog();
@@ -165,7 +142,7 @@ public:
     void SetRuntimeDataPathsOverride(synth::RuntimeDataPaths paths) { dataPathsOverride_ = std::move(paths); }
     const synth::RuntimeDataPaths& DataPaths() const { return dataPaths_; }
 
-    // Startup ordering (binding, per Task 2/3/4 briefs):
+    // Startup ordering (binding):
     //   0. synth::ValidateRuntimeConfig(App::Config()) before anything else
     //   1. resolve/create runtime data paths and configure log directory
     //   2a. wire engine_.SetAudioDeviceChangedCallback to
@@ -185,7 +162,7 @@ public:
     void Start() {
         const synth::RuntimeConfig appConfig = App::Config();
 
-        // Shared JUCE-free validation (sar-31), ahead of the log directory,
+        // Shared JUCE-free validation, ahead of the log directory,
         // the MIDI sender, and any audio device: a negative input request must
         // never reach device negotiation. engine_.Initialize() validates the
         // same config again; this call is what makes the rejection precede
@@ -216,7 +193,7 @@ public:
         engine_.SetRuntimeDataPaths(dataPaths_);
 
         // Wired before Initialize() so future runtime-config-initiated audio
-        // changes can be applied through the same host path. Patch load/revert
+        // changes can be applied through the same host path. Patch load
         // is parameter-only and never fires this callback.
         engine_.SetAudioDeviceChangedCallback([this] { OnEngineAudioDeviceChanged(); });
 
@@ -224,44 +201,31 @@ public:
         INFO("Runtime started: %s", appConfig.appName.c_str());
         const synth::RuntimeConfig& config = engine_.Config();
 
-        // Start the sender before opening MIDI inputs/outputs or starting the
-        // connection poller. Once ingress or the audio callback exists, every
-        // producer therefore has a live consumer.
-        if (synth::MidiSender* sender = engine_.Context().midiSender; sender != nullptr) {
-            sender->Start();
-        }
+        // Startup order (binding, stated once in EngineMidiConnections's own
+        // header comment): starts the sender before opening MIDI
+        // inputs/outputs or starting the connection poller, then runs the
+        // ONE synchronous startup reconcile (resizes midiConnections_ to the
+        // current controller count, reconciles every configured ref against
+        // currently-present devices -- absent -> offline, never a startup
+        // failure -- and starts the background poller). Called
+        // unconditionally here (idempotent, same as the old
+        // always-reopen-at-startup behavior) because Initialize()'s first
+        // RebuildMidiProcessors() call is silent by design — it never
+        // invokes midiProcessorsRebuiltCallback_ (see Engine::Initialize's
+        // doc comment) — so midiConnections_ is never notified during
+        // startup and its handler vectors would otherwise stay unsized.
+        midiConnections_->Start();
 
-        // Startup order (binding): engine init -> sender -> startup/runtime
-        // config applied -> ONE synchronous reconcile -> start poller -> audio
-        // device -> ... StartupReconcile() is that
-        // synchronous reconcile: it resizes midiConnections_ to the current
-        // controller count, reconciles every configured ref against
-        // currently-present devices (absent -> offline, never a startup
-        // failure), and starts the background poller. Called unconditionally
-        // here (idempotent, same as the old always-reopen-at-startup behavior)
-        // because Initialize()'s first RebuildMidiProcessors() call is silent
-        // by design — it never invokes midiProcessorsRebuiltCallback_ (see
-        // Engine::Initialize's doc comment) — so midiConnections_ is never
-        // notified during startup and its handler vectors would otherwise stay
-        // unsized.
-        midiConnections_->StartupReconcile();
-
-        // An input-inclusive initialisation that fails leaves the host with no
-        // device at all, output included, and the returned error is the only
-        // notice. Publish it, then retry output-only so independent output
-        // still runs while the input diagnostic honestly reports `active 0`.
-        const juce::String initialiseError =
-            deviceManager_.initialiseWithDefaultDevices(config.numAudioInputs, config.numAudioOutputs);
+        // No input device opens merely because the application requested
+        // input channels -- the operator selects one explicitly (below, from
+        // the persisted selection, or later via the combo), and only then do
+        // the requested channels get opened. Startup therefore always
+        // initialises output-only; a failure here is output failing to open
+        // at all, and the returned error is the only notice.
+        const juce::String initialiseError = deviceManager_.initialiseWithDefaultDevices(0, config.numAudioOutputs);
         if (initialiseError.isNotEmpty()) {
             INFO("Audio device initialise FAILED: %s", initialiseError.toRawUTF8());
             SetAudioStatus(initialiseError);
-            if (config.numAudioInputs > 0) {
-                const juce::String outputOnlyError =
-                    deviceManager_.initialiseWithDefaultDevices(0, config.numAudioOutputs);
-                if (outputOnlyError.isNotEmpty()) {
-                    INFO("Audio device output-only initialise FAILED: %s", outputOnlyError.toRawUTF8());
-                }
-            }
         }
 
         // Prefer the persisted output device over the platform default, but
@@ -286,9 +250,7 @@ public:
         if (config.numAudioInputs > 0) {
             const juce::String wantedInputName = juce::String(engine_.AudioDeviceSnapshot().inputDeviceName);
             if (wantedInputName.isNotEmpty() && IsEnumeratedInputDevice(wantedInputName)) {
-                juce::AudioDeviceManager::AudioDeviceSetup setup = deviceManager_.getAudioDeviceSetup();
-                setup.inputDeviceName = wantedInputName;
-                if (ApplyInputDeviceSetup(setup, "startup")) {
+                if (ApplyInputDeviceSetup(wantedInputName, "startup")) {
                     ApplyPreferredRateAndBlockSize();
                 }
             } else {
@@ -300,7 +262,7 @@ public:
             }
         }
 
-        // SyncAudioSelection() notifies AudioConfigPage (if one is alive) to
+        // SyncAudioSelection() notifies the Audio page (if one is alive) to
         // re-enumerate devices and re-sync its combo's selection to
         // engine.AudioDeviceSnapshot() as it now stands (post
         // startup-preference handling above). INFO-logged explicitly (not
@@ -327,6 +289,12 @@ public:
         // no-op, so nothing claims an input path that was never opened.
         PublishPendingInputStatus();
 
+        // Derives the startup value of the external-input-routed
+        // signal -- false for a platform-default device, true for a
+        // successfully reapplied persisted selection. See
+        // RefreshInputRoutedState's doc comment.
+        RefreshInputRoutedState();
+
         startTimerHz(config.uiFrameHz > 0 ? config.uiFrameHz : 30);
     }
 
@@ -334,29 +302,28 @@ public:
 
     synth::ui::Surface& AppSurface() { return engine_.Application().PortableSurface(); }
 
-    // The per-controller MIDI connection owner (Task 4 of Plan 4):
-    // ControllersPage's device combo onChange → view-model SetEndpointRef()
+    // The per-controller MIDI connection owner:
+    // the Controllers page's device combo onChange → view-model SetEndpointRef()
     // → engine.EditInstrument() commit → MIDI processors rebuilt callback →
     // MidiConnectionManager reconciles opens/closes the device as needed,
     // mirroring how engine.SetAudioDeviceFromHost works for the audio path
     // (see ApplyAudioDeviceSelection's doc comment).
-    MidiConnectionManager<App>& MidiConnections() { return *midiConnections_; }
+    MidiConnectionManager<App>& MidiConnections() { return midiConnections_->MidiConnections(); }
 
     // The JUCE audio device manager this Runtime drives as
-    // AudioIODeviceCallback target (Task 3 of Plan 4): AudioConfigPage reads
+    // AudioIODeviceCallback target: JuceRuntimeMainServices::RefreshAudio reads
     // it directly (getCurrentDeviceTypeObject()->getDeviceNames(...)) to
-    // populate its combo boxes, the same enumeration AudioPanel used to do
-    // internally before this task deleted it.
+    // populate the Audio page's combo boxes, the same enumeration AudioPanel used to do
+    // internally before it was deleted.
     juce::AudioDeviceManager& DeviceManager() { return deviceManager_; }
 
-    // Installs AudioConfigPage's status sink (Task 3 of Plan 4): invoked by
+    // Installs the Audio page's status sink: invoked by
     // Runtime's own device-switch paths (Start()'s startup preference
     // handling, ApplyAudioDeviceSelection, ApplyAudioDeviceInputSelection,
     // OnEngineAudioDeviceChanged) with human-readable status text whenever
-    // one of those paths has something to report. AudioConfigPage installs
+    // one of those paths has something to report. JuceRuntimeMainServices installs
     // this on construction and clears it (via an empty std::function) from
-    // its destructor, so Runtime never calls into a destroyed page -- see
-    // AudioConfigPage.hpp.
+    // its destructor, so Runtime never calls into a destroyed page.
     //
     // Installing a sink immediately republishes the current status line. A
     // page installed mid-session has missed every line published before it
@@ -369,7 +336,7 @@ public:
         PublishAudioStatus();
     }
 
-    // Installs AudioConfigPage's re-sync hook (Task 3 of Plan 4): invoked
+    // Installs the Audio page's re-sync hook: invoked
     // whenever Runtime has changed the audio device state out from under a
     // live page (startup preference handling or OnEngineAudioDeviceChanged)
     // so the page can re-enumerate devices
@@ -379,36 +346,35 @@ public:
     // way as the status hook.
     void SetAudioSyncHook(std::function<void()> hook) { audioSyncHook_ = std::move(hook); }
 
-    // Installs ControllersPage's rebuild-notification hook (Task 4 review,
-    // Critical finding 1): invoked at the end of
+    // Installs the Controllers page's rebuild-notification hook: invoked at the end of
     // engine_.SetMidiProcessorsRebuiltCallback's lambda (constructor, above),
-    // i.e. on EVERY MIDI-processor rebuild -- not just ones ControllersPage's
+    // i.e. on EVERY MIDI-processor rebuild -- not just ones the Controllers page's
     // own edits triggered. This is what closes the "missed instrument
     // changes" gap: runtime-config or any other engine-driven edit path that
     // changes controller mappings/names/kinds also rebuilds MIDI processors and
-    // fires this hook, so ControllersPage can mark itself dirty regardless of
+    // fires this hook, so the Controllers page can mark itself dirty regardless of
     // who caused the rebuild. Re-entrancy: when
-    // ControllersPage's OWN Commit() is what triggered this rebuild, the hook
+    // the Controllers page's OWN Commit() is what triggered this rebuild, the hook
     // still fires and sets dirty_ again -- harmless, since dirty_ is a plain
     // idempotent bool the page already sets itself in Commit() (see
-    // ControllersPage.hpp's Commit() doc comment). Cleared the same way as
+    // ControllersPageUI.hpp's Commit() doc comment). Cleared the same way as
     // the audio hooks (an empty std::function on page teardown), via
-    // ControllersPage's destructor.
-    void SetMidiProcessorsRebuiltHook(std::function<void()> hook) { onMidiProcessorsRebuilt_ = std::move(hook); }
+    // JuceRuntimeMainServices's destructor.
+    void SetMidiProcessorsRebuiltHook(std::function<void()> hook) { midiConnections_->SetMidiProcessorsRebuiltHook(std::move(hook)); }
 
-    // AudioConfigPage's output combo onChange target (sar-15 semantics
+    // The Audio page's output combo onChange target (semantics
     // unchanged from the deleted AudioPanel::onOutputSelected path): the
     // user picked an output device in the combo, on the message thread
     // (JUCE combo box callbacks run there). Records the selection via
     // engine_.SetAudioDeviceFromHost (so it persists into the next saved
-    // runtime configuration, mirroring how ControllersPage records endpoint selection into
+    // runtime configuration, mirroring how the Controllers page records endpoint selection into
     // the engine's instrument via synth::MidiConfigViewModel::SetEndpointRef
     // + EditInstrument), AND advances the engine's
     // audio-device-state shadow so a later engine-side sync to this exact
     // selection is correctly treated as "already known" -- see
     // SetAudioDeviceFromHost's doc comment; this replaces the old direct
     // `engine_.AudioDevice().outputDeviceName = ...` write, which left the
-    // shadow stale -- Task 3 review findings 1/2) THEN applies the switch.
+    // shadow stale) THEN applies the switch.
     // "System Default" (empty
     // name) clears deviceManager_'s outputDeviceName preference the same
     // way, via the same AudioDeviceSetup path (an empty outputDeviceName +
@@ -424,24 +390,23 @@ public:
         SwitchOutputDevice(outputName, "selection");
         SetAudioStatus(outputName.isEmpty() ? "Audio: System Default" : "Audio: " + outputName);
         SyncAudioSelection();
+        RefreshInputRoutedState();
     }
 
-    // AudioConfigPage's input combo onChange target (Task 3 review, Minor,
-    // preserved from the deleted AudioPanel::onInputSelected path): the user
+    // The Audio page's input combo onChange target (preserved from the
+    // deleted AudioPanel::onInputSelected path): the user
     // picked an input device in the combo, on the message thread. Wired
     // identically to ApplyAudioDeviceSelection above, just for the input
     // device name field: records the selection via
     // engine_.SetAudioDeviceFromHost (same shadow-advancing rationale) then
-    // applies it via AudioDeviceSetup.inputDeviceName + setAudioDeviceSetup,
-    // with the same absent-device handling (an inputName not currently
-    // enumerated is not applied; the status label reports it, matching
-    // SwitchOutputDevice/OnEngineAudioDeviceChanged's "absent -> keep
-    // current, no failure" contract). "System Default" (the empty
-    // host-neutral name) needs exactly the same concrete-name resolution
-    // SwitchOutputDevice performs for outputs: the persisted name stays empty,
-    // but AudioDeviceSetup reads an empty inputDeviceName as "no input device
-    // at all", so passing it through would silently stop capture for an app
-    // that asked for input -- see ResolveInputDeviceName.
+    // applies it via ApplyInputDeviceSetup, with the same absent-device
+    // handling (an inputName not currently enumerated is not applied; the
+    // status label reports it, matching SwitchOutputDevice/
+    // OnEngineAudioDeviceChanged's "absent -> keep current, no failure"
+    // contract). "System Default" (the empty host-neutral name) is passed
+    // through as-is: an empty inputDeviceName is what opens no input device
+    // at all, which is the correct outcome for declining input, not a hazard
+    // to route around.
     void ApplyAudioDeviceInputSelection(const juce::String& inputName) {
         synth::AudioDeviceState newState = engine_.AudioDeviceSnapshot();
         newState.inputDeviceName = inputName.toStdString();
@@ -452,31 +417,30 @@ public:
             INFO("%s", message.toRawUTF8());
             SetAudioStatus(message);
             SyncAudioSelection();
+            RefreshInputRoutedState();
             return;
         }
 
-        juce::AudioDeviceManager::AudioDeviceSetup setup = deviceManager_.getAudioDeviceSetup();
-        setup.inputDeviceName = ResolveInputDeviceName(inputName);
-        if (!ApplyInputDeviceSetup(setup, "selection")) {
+        if (!ApplyInputDeviceSetup(inputName, "selection")) {
             SyncAudioSelection();
+            RefreshInputRoutedState();
             return;
         }
         ApplyPreferredRateAndBlockSize();
         SetAudioStatus(inputName.isEmpty() ? "Audio In: System Default" : "Audio In: " + inputName);
         SyncAudioSelection();
+        RefreshInputRoutedState();
     }
 
-    // The current audio callback load, as a percentage (Plan 4 Task 2,
-    // sru-2 binding: "RollingMax256 of deviceManager_.getCpuUsage() * 100.0,
-    // written once per UI timer tick"). The shell's MainPane<App> writes
-    // this into its RollingMax256 from the timer-driven repaint hook (see
-    // ShellComponent::RepaintAll in Shell.hpp) -- Runtime itself has no
-    // MainPane reference (MainPane owns a Runtime reference, not the other
-    // way around), so it exposes the raw sample here rather than writing
-    // into the pane directly.
+    // The current audio callback load, as a percentage. The shell's
+    // MainPane<App> writes this into its rolling deadline-max window from
+    // the timer-driven repaint hook (see ShellComponent::RepaintAll in
+    // Shell.hpp) -- Runtime itself has no MainPane reference (MainPane owns
+    // a Runtime reference, not the other way around), so it exposes the raw
+    // sample here rather than writing into the pane directly.
     float DeadlineSamplePct() const { return static_cast<float>(deviceManager_.getCpuUsage() * 100.0); }
 
-    // Installs the shell's repaint hook (Task 4): invoked at the end of
+    // Installs the shell's repaint hook: invoked at the end of
     // every timer tick, after the message-thread tick and before DoLog(),
     // so the shell can repaint itself and the app component in lockstep
     // with the engine's UI-state refresh.
@@ -504,7 +468,7 @@ public:
     }
 
     void NewPatch() {
-        const synth::PatchCommandResult result = engine_.Patches().NewPatch();
+        const synth::PatchCommandResult result = engine_.NewPatch();
         LogPatchCommand("NewPatch", result);
     }
 
@@ -528,16 +492,11 @@ public:
     }
 
     void LoadPatch(const std::filesystem::path& path) {
-        const synth::PatchCommandResult result = engine_.Patches().LoadPatch(path);
+        const synth::PatchCommandResult result = engine_.LoadPatch(path);
         LogPatchCommand("LoadPatch", result);
     }
 
     void LoadPatch(const juce::File& file) { LoadPatch(std::filesystem::path(file.getFullPathName().toStdString())); }
-
-    void RevertPatch() {
-        const synth::PatchCommandResult result = engine_.Patches().RevertPatch();
-        LogPatchCommand("RevertPatch", result);
-    }
 
 private:
     // The input channel count the host most recently negotiated or delivered,
@@ -546,7 +505,7 @@ private:
     int ActiveInputChannels() const { return activeInputChannels_.load(std::memory_order_relaxed); }
 
     // The application's requested input count is the ceiling on the logical
-    // input shape it ever sees (sar-6, sar-31). A device that hands us more
+    // input shape it ever sees. A device that hands us more
     // channels than the app asked for is truncated to the requested prefix, so
     // changing hardware never silently widens the app's input shape; a device
     // that hands us fewer reports its actual count, and the requested-but-
@@ -613,41 +572,53 @@ private:
         return deviceType != nullptr && deviceType->getDeviceNames(true).contains(name);
     }
 
-    // Input-side counterpart of SwitchOutputDevice's "System Default"
-    // resolution. The portable Audio page's System Default option is an empty
-    // host-neutral device name, and that empty name is what persists in
-    // config.json -- but AudioDeviceSetup reads an empty inputDeviceName as
-    // "no input device wanted" and opens the device with no capture at all, so
-    // handing "" straight to setAudioDeviceSetup would silently disable input
-    // for an application that requested it. Resolve it to the concrete native
-    // default input device name instead, exactly as SwitchOutputDevice does
-    // for the output side, and leave the persisted name alone.
+    // Recomputes and publishes the external-input-routed signal from
+    // current device state. Routed iff the user-selected input device name
+    // -- engine_.AudioDeviceSnapshot().inputDeviceName, the same persisted
+    // selection Start() applies at startup (:248-263) and
+    // ApplyAudioDeviceInputSelection/OnEngineAudioDeviceChanged apply live --
+    // is non-empty AND matches deviceManager_'s CURRENTLY OPEN input device
+    // (getAudioDeviceSetup().inputDeviceName, with a device actually current).
     //
-    // A zero-input application is left untouched: its "" genuinely means "no
-    // input device", and resolving it would open a capture path (and raise the
-    // macOS microphone prompt) that the application never asked for.
-    juce::String ResolveInputDeviceName(const juce::String& inputName) const {
-        if (inputName.isNotEmpty() || requestedInputChannels_ <= 0) {
-            return inputName;
-        }
-        juce::AudioIODeviceType* deviceType = deviceManager_.getCurrentDeviceTypeObject();
-        if (deviceType == nullptr) {
-            return inputName;
-        }
-        const juce::StringArray names = deviceType->getDeviceNames(true);
-        const int defaultIx = deviceType->getDefaultDeviceIndex(true);
-        if (defaultIx >= 0 && defaultIx < names.size()) {
-            return names[defaultIx];
-        }
-        return inputName;
+    // With no persisted selection, Start() opens no input device at all: the
+    // output device may still be current, but getAudioDeviceSetup() names no
+    // input, so selectedInputName.isNotEmpty() alone already derives false. A
+    // selection that fails to open (see ApplyInputDeviceSetup) leaves the
+    // setup's actual inputDeviceName pointing at whatever
+    // RecoverOutputOnlyDevice restored (never the failed name), so it also
+    // derives false, matching "open and delivering".
+    //
+    // Message-thread only: see InputRoutingSignal::Publish's doc comment
+    // (AppContext.hpp) for why -- the registered app callback runs
+    // synchronously from Publish(), on whichever thread calls this method,
+    // and every caller of this method is a message-thread path (Start(),
+    // ApplyAudioDeviceSelection, ApplyAudioDeviceInputSelection,
+    // OnEngineAudioDeviceChanged), never the audio callback.
+    void RefreshInputRoutedState() {
+        const juce::String selectedInputName = juce::String(engine_.AudioDeviceSnapshot().inputDeviceName);
+        const bool routed = selectedInputName.isNotEmpty() &&
+                            deviceManager_.getCurrentAudioDevice() != nullptr &&
+                            deviceManager_.getAudioDeviceSetup().inputDeviceName == selectedInputName;
+        inputRoutingSignal_.Publish(routed);
     }
 
-    // Applies an AudioDeviceSetup that changes the input device, and owns the
-    // failure path. JUCE stops and deletes the current device before it opens
-    // the requested one and deletes it again if the open fails, so a failed
-    // input switch leaves the host with NO device at all -- output included --
-    // and the returned error string is the only notice anyone gets. Publish
-    // that error through the status line (rather than only INFO-logging it and
+    // Builds and applies the AudioDeviceSetup for `inputDeviceName`, and owns
+    // the failure path. This is the one place that decides both the input
+    // device name and its channel fields: a non-empty name gets
+    // useDefaultInputChannels cleared and the first requestedInputChannels_
+    // bits of inputChannels set, opening exactly the channel shape the
+    // application asked for; an empty name gets useDefaultInputChannels
+    // cleared and inputChannels cleared, opening no input device at all.
+    // Every caller that wants to change the input device -- startup applying
+    // a persisted selection, the operator picking a device from the combo, or
+    // a runtime-config-initiated change -- routes through here rather than
+    // building its own AudioDeviceSetup.
+    //
+    // JUCE stops and deletes the current device before it opens the requested
+    // one and deletes it again if the open fails, so a failed input switch
+    // leaves the host with NO device at all -- output included -- and the
+    // returned error string is the only notice anyone gets. Publish that
+    // error through the status line (rather than only INFO-logging it and
     // then reporting a success that did not happen), then recover a live
     // device so independent output keeps running.
     //
@@ -661,10 +632,18 @@ private:
     // Returns true when the requested setup applied, false when it failed (in
     // which case recovery has already run and the caller must not report
     // success).
-    bool ApplyInputDeviceSetup(const juce::AudioDeviceManager::AudioDeviceSetup& setup,
-                               const char* reason) {
-        const juce::AudioDeviceManager::AudioDeviceSetup lastKnownGood =
-            deviceManager_.getAudioDeviceSetup();
+    bool ApplyInputDeviceSetup(const juce::String& inputDeviceName, const char* reason) {
+        const juce::AudioDeviceManager::AudioDeviceSetup lastKnownGood = deviceManager_.getAudioDeviceSetup();
+        juce::AudioDeviceManager::AudioDeviceSetup setup = lastKnownGood;
+        setup.inputDeviceName = inputDeviceName;
+        setup.useDefaultInputChannels = false;
+        if (inputDeviceName.isNotEmpty()) {
+            juce::BigInteger channels;
+            channels.setRange(0, requestedInputChannels_, true);
+            setup.inputChannels = channels;
+        } else {
+            setup.inputChannels.clear();
+        }
         const juce::String setupError = deviceManager_.setAudioDeviceSetup(setup, true);
         if (setupError.isEmpty()) {
             return true;
@@ -695,7 +674,7 @@ private:
     // device, factored out so SwitchOutputDevice() can re-apply it against
     // whatever device is current after a switch. Logs the setup error
     // string (if any) and the resulting open/playing state, matching the
-    // existing instrumentation pattern (precedent commit adf0181).
+    // existing instrumentation pattern.
     void ApplyPreferredRateAndBlockSize() {
         const synth::RuntimeConfig& config = engine_.Config();
         juce::AudioIODevice* device = deviceManager_.getCurrentAudioDevice();
@@ -729,8 +708,8 @@ private:
     // System Default; a non-empty name must already be confirmed present
     // via IsEnumeratedOutputDevice) via AudioDeviceSetup.outputDeviceName +
     // setAudioDeviceSetup(..., true), logging the setup error string if
-    // non-empty and the resulting open/playing state (precedent commit
-    // adf0181). `reason` is a short tag ("startup"/"selection"/"patch")
+    // non-empty and the resulting open/playing state. `reason` is a short
+    // tag ("startup"/"selection"/"patch")
     // folded into the log line so a session log distinguishes why a switch
     // happened. A successful switch re-fires audioDeviceAboutToStart (JUCE
     // calls it synchronously from setAudioDeviceSetup when the device
@@ -780,7 +759,7 @@ private:
         ApplyPreferredRateAndBlockSize();
     }
 
-    // Forwards to audioStatusHook_ (AudioConfigPage's status sink) when a
+    // Forwards to audioStatusHook_ (the Audio page's status sink) when a
     // page is currently alive and has installed one; a no-op otherwise (e.g.
     // before any page has been shown, or while none is constructed). See
     // SetAudioStatusHook's doc comment.
@@ -815,7 +794,7 @@ private:
     }
 
     // For an input-capable application the status line always leads with the
-    // stable `Input requested N / active M` text (sru-3), with whatever device
+    // stable `Input requested N / active M` text, with whatever device
     // or permission diagnostic is current appended after it -- a missing input
     // device, a failed setup, or a plain selection acknowledgement never
     // displaces the requested/active counts, and none of them stops output.
@@ -833,7 +812,7 @@ private:
         return text;
     }
 
-    // Forwards to audioSyncHook_ (AudioConfigPage's re-sync hook), same
+    // Forwards to audioSyncHook_ (the Audio page's re-sync hook), same
     // no-op-when-absent contract as SetAudioStatus above. See
     // SetAudioSyncHook's doc comment.
     void SyncAudioSelection() {
@@ -842,7 +821,7 @@ private:
         }
     }
 
-    // engine_.SetAudioDeviceChangedCallback's target. Patch load/revert is
+    // engine_.SetAudioDeviceChangedCallback's target. Patch load is
     // parameter-only and never reaches this path; it is reserved for
     // runtime-config-initiated audio changes that are sourced from
     // engine.AudioDeviceSnapshot() instead of a combo pick. The callback
@@ -872,28 +851,25 @@ private:
             SetAudioStatus("Audio: " + outputName);
         }
 
-        // Input-side counterpart (Task 3 review round 2, Minor): the old
+        // Input-side counterpart: the old
         // implementation only ever applied outputDeviceName here, so a patch
         // that changed just the input device would sync the combo's display
         // (SyncAudioSelection() below reads engine_.AudioDeviceSnapshot()
         // directly) without ever actually switching the input device on
         // deviceManager_. Apply it the same way ApplyAudioDeviceInputSelection
-        // does, via the AudioDeviceSetup.inputDeviceName path, still tolerant
-        // of the pre-device-open case (see this method's doc comment): an
-        // empty deviceManager_ device type makes IsEnumeratedInputDevice
-        // return false unconditionally, so this is a no-op until Start()'s
-        // own device-open step runs.
+        // does, via ApplyInputDeviceSetup, still tolerant of the
+        // pre-device-open case (see this method's doc comment): an empty
+        // deviceManager_ device type makes IsEnumeratedInputDevice return
+        // false unconditionally, so this is a no-op until Start()'s own
+        // device-open step runs. The persisted name is passed straight
+        // through, empty included -- an empty inputName is a deliberate "no
+        // input device" choice, not a value to resolve away.
         const juce::String inputName = juce::String(state.inputDeviceName);
         if (inputName.isEmpty() || IsEnumeratedInputDevice(inputName)) {
             if (deviceManager_.getCurrentAudioDevice() != nullptr) {
-                juce::AudioDeviceManager::AudioDeviceSetup setup = deviceManager_.getAudioDeviceSetup();
-                // Same System Default resolution as the combo path: the
-                // persisted empty name must not reach the setup verbatim for an
-                // input-capable app. See ResolveInputDeviceName.
-                const juce::String resolvedInputName = ResolveInputDeviceName(inputName);
-                if (setup.inputDeviceName != resolvedInputName) {
-                    setup.inputDeviceName = resolvedInputName;
-                    if (ApplyInputDeviceSetup(setup, "patch")) {
+                const juce::AudioDeviceManager::AudioDeviceSetup currentSetup = deviceManager_.getAudioDeviceSetup();
+                if (currentSetup.inputDeviceName != inputName) {
+                    if (ApplyInputDeviceSetup(inputName, "patch")) {
                         ApplyPreferredRateAndBlockSize();
                     }
                 }
@@ -905,6 +881,7 @@ private:
         }
 
         SyncAudioSelection();
+        RefreshInputRoutedState();
     }
 
     // Timer tick order (binding): engine message-thread tick -> MIDI
@@ -912,7 +889,7 @@ private:
     // midiConnections_->OnTimerTick() consumes the background poller's dirty
     // flag (if any) and, on a change, re-enumerates authoritatively on this
     // (the message) thread and runs one reconcile pass (the self-healing
-    // path, binding per p3-globals.md's message-thread-executor paragraph).
+    // path, binding on the message thread).
     // Panel repaint after a poll-driven reconcile is intentionally NOT
     // wired here beyond the repaint hook -- Refresh() re-reads
     // engine.InstrumentSnapshot()/midiConnections_ state cheaply enough that
@@ -938,8 +915,7 @@ private:
     }
 
     void LogPatchCommand(const char* action, const synth::PatchCommandResult& result) {
-        INFO("%s status=%s requestId=%llu", action, synth::PatchCommandStatusName(result.status),
-             static_cast<unsigned long long>(result.requestId));
+        synth_runtime::LogPatchCommand(action, result);
     }
 
     // Declared before engine_ so it is initialized first: engine_'s
@@ -950,38 +926,46 @@ private:
     std::chrono::steady_clock::time_point startTime_;
     synth_juce::RuntimeMidiEpoch midiEpoch_;
     juce::AudioDeviceManager deviceManager_;
+
+    // Shutdown ordering (binding): declared before
+    // engine_ so it is destroyed AFTER engine_ -- member destruction runs in
+    // the reverse of declaration order, so a member declared earlier outlives
+    // one declared later. engine_.Context().inputRoutingSignal (wired in the
+    // constructor, above) is a raw pointer into this object, and the engine
+    // -- including its own teardown and the App inside it -- may still read
+    // Context().inputRoutingSignal while engine_ itself is being destroyed.
+    // Declaring inputRoutingSignal_ after engine_ would destroy it first,
+    // leaving that pointer dangling for the whole remainder of engine_'s
+    // teardown. Mirrors BrowserRuntime.hpp, which declares
+    // inputRoutingSignal_ before engine_ for the same reason. See
+    // RefreshInputRoutedState for the JUCE derivation and every call site
+    // that keeps it current.
+    synth::InputRoutingSignal inputRoutingSignal_;
+
     synth::Engine<App> engine_;
     synth::RuntimeDataPaths dataPaths_;
     std::optional<synth::RuntimeDataPaths> dataPathsOverride_;
 
     // Owns every controller slot's MIDI device handlers, connection state,
-    // and background poller (Task 2 of Plan 3) -- see MidiConnectionManager
-    // .hpp's class doc comment. A unique_ptr because it must be constructed
+    // and background poller through one MidiConnectionManager -- see
+    // EngineMidiConnections.hpp's class doc comment for the full wiring
+    // this construct owns. A unique_ptr because it must be constructed
     // after engine_ (it holds a reference to it) and destroyed before
     // engine_ is torn down.
-    std::unique_ptr<MidiConnectionManager<App>> midiConnections_;
-
-    // ControllersPage's rebuild-notification hook (Task 4 review, Critical
-    // finding 1), installed via SetMidiProcessorsRebuiltHook() -- see that
-    // method's doc comment. Invoked at the end of every MIDI-processor
-    // rebuild, AFTER midiConnections_->OnInstrumentRebuilt() has already
-    // reopened/reconciled every slot's connections; empty (a no-op) until
-    // MainPane wires it, and cleared the same way the audio hooks are when
-    // the owning page is torn down.
-    std::function<void()> onMidiProcessorsRebuilt_;
+    std::unique_ptr<EngineMidiConnections<App>> midiConnections_;
 
     // Shell hook: set later by whatever owns the UI, invoked at the end of
     // every timer tick so the app's component(s) can repaint.
     std::function<void()> repaintHook_;
 
-    // AudioConfigPage's status/re-sync hooks (Task 3 of Plan 4) -- see
+    // The Audio page's status/re-sync hooks -- see
     // SetAudioStatusHook()/SetAudioSyncHook()'s doc comments. Empty
     // (default-constructed std::function) whenever no page has installed
     // one, which SetAudioStatus()/SyncAudioSelection() tolerate as a no-op.
     std::function<void(const juce::String&)> audioStatusHook_;
     std::function<void()> audioSyncHook_;
 
-    // The application's validated input request (sar-31). Written once, by
+    // The application's validated input request. Written once, by
     // Start(), before any audio callback can be registered; read from the
     // audio thread thereafter, which is why it needs no synchronization of
     // its own.

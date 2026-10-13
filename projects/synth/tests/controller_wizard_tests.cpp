@@ -1,5 +1,7 @@
 #include "synth/ControllerWizard.hpp"
 
+#include "synth/MidiAppCatalog.hpp"
+
 #ifdef JUCE_MAJOR_VERSION
 #error "controller wizard contracts must not see JUCE headers"
 #endif
@@ -61,28 +63,13 @@ public:
         return true;
     }
 
-    synth::ui::NodeTree BuildTree() override { return {}; }
-
-    void SetActionHandler(ActionHandler handler) override {
-        actionHandler_ = std::move(handler);
-    }
-
-    void DispatchAction(const synth::ui::Action& action) override {
-        if (action.name == "set-name") {
-            name_ = action.value;
-        }
-        if (actionHandler_) {
-            actionHandler_(action);
-        }
-    }
-
+    void SetName(std::string name) { name_ = std::move(name); }
     std::string_view Name() const { return name_; }
 
     static int destroyedCount;
 
 private:
     std::string name_;
-    ActionHandler actionHandler_;
 };
 
 int FirstForm::destroyedCount = 0;
@@ -95,18 +82,13 @@ public:
         error.clear();
         return true;
     }
-
-    synth::ui::NodeTree BuildTree() override { return {}; }
-    void SetActionHandler(ActionHandler) override {}
-    void DispatchAction(const synth::ui::Action&) override {}
 };
 
 class FirstWizard final : public synth::TypedControllerWizard<FirstForm> {
 public:
     std::string_view Id() const override { return "test.first"; }
 
-    std::unique_ptr<synth::ControllerConfigForm>
-    ConfigForm(const std::optional<synth::MidiControllerSlot>&) const override {
+    std::unique_ptr<synth::ControllerConfigForm> ConfigForm() const override {
         return std::make_unique<FirstForm>();
     }
 
@@ -129,8 +111,7 @@ class SecondWizard final : public synth::TypedControllerWizard<SecondForm> {
 public:
     std::string_view Id() const override { return "test.second"; }
 
-    std::unique_ptr<synth::ControllerConfigForm>
-    ConfigForm(const std::optional<synth::MidiControllerSlot>&) const override {
+    std::unique_ptr<synth::ControllerConfigForm> ConfigForm() const override {
         return std::make_unique<SecondForm>();
     }
 
@@ -181,6 +162,28 @@ std::vector<synth::ControllerWizardDescriptor> TestTwisterRegistry() {
                        {"Midi Fighter Twister"})};
 }
 
+// The real (non-stub) registry an app with no device defaults gets: the
+// library's own MfTwister, Launchpad and WRLD.Bldr descriptors, each with a
+// working factory.
+std::vector<synth::ControllerWizardDescriptor> EmptyCatalogLibraryRegistry() {
+    return synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{});
+}
+
+synth::MidiAppDeviceDefault AppDefault(std::string id, std::string displayName,
+                                       synth::MidiProfileKind kind,
+                                       std::initializer_list<std::string> inputAliases,
+                                       std::initializer_list<std::string> outputAliases,
+                                       synth::MidiControllerProfileConfig config) {
+    synth::MidiAppDeviceDefault deviceDefault;
+    deviceDefault.id = std::move(id);
+    deviceDefault.displayName = std::move(displayName);
+    deviceDefault.kind = kind;
+    deviceDefault.inputAliases = inputAliases;
+    deviceDefault.outputAliases = outputAliases;
+    deviceDefault.config = std::move(config);
+    return deviceDefault;
+}
+
 synth::MidiControllerSlot StoredController(std::string name,
                                            synth::MidiEndpointRef input,
                                            synth::MidiEndpointRef output) {
@@ -214,355 +217,6 @@ void RequireDeviceIds(const std::vector<synth::MidiDeviceInfoRef>& devices,
     }
 }
 
-const synth::ui::Node* FindNodeById(const synth::ui::NodeTree& tree, std::string_view id) {
-    for (const synth::ui::Node& node : tree.nodes) {
-        if (node.id.value == id) {
-            return &node;
-        }
-    }
-    return nullptr;
-}
-
-const synth::ui::Node* FindParentOf(const synth::ui::NodeTree& tree, std::string_view childId) {
-    for (const synth::ui::Node& node : tree.nodes) {
-        for (const synth::ui::NodeId& child : node.children) {
-            if (child.value == childId) {
-                return &node;
-            }
-        }
-    }
-    return nullptr;
-}
-
-// Resolves a form node's position in the form's own coordinate space the way a
-// host does: every child's bounds are parent-local, so absolute position is the
-// sum of its ancestors' origins.
-synth::ui::Bounds FormBounds(const synth::ui::NodeTree& tree, const std::string& id) {
-    const synth::ui::Node* node = FindNodeById(tree, id);
-    if (node == nullptr) {
-        throw std::runtime_error("form node missing: " + id);
-    }
-    synth::ui::Bounds bounds = node->bounds;
-    std::string childId = id;
-    bool climbing = true;
-    while (climbing) {
-        climbing = false;
-        for (const synth::ui::Node& candidate : tree.nodes) {
-            for (const synth::ui::NodeId& child : candidate.children) {
-                if (child.value != childId) {
-                    continue;
-                }
-                bounds.x += candidate.bounds.x;
-                bounds.y += candidate.bounds.y;
-                childId = candidate.id.value;
-                climbing = true;
-                break;
-            }
-            if (climbing) {
-                break;
-            }
-        }
-    }
-    return bounds;
-}
-
-std::string TwisterButtonField(std::size_t buttonIx, std::string_view field) {
-    return "controller-wizard.twister.button." + std::to_string(buttonIx) + "." + std::string(field);
-}
-
-std::vector<const synth::ui::Node*> NodesOfKind(const synth::ui::NodeTree& tree,
-                                                synth::ui::NodeKind kind) {
-    std::vector<const synth::ui::Node*> result;
-    for (const synth::ui::Node& node : tree.nodes) {
-        if (node.kind == kind) {
-            result.push_back(&node);
-        }
-    }
-    return result;
-}
-
-TEST_CASE(MfTwisterConfigFormPlacesSixButtonsInTwoColumnsOfThree) {
-    synth::MfTwisterConfigForm form;
-    const synth::ui::NodeTree tree = form.BuildTree();
-
-    const synth::ui::Bounds slot = FormBounds(tree, "controller-wizard.twister.encoder-slot");
-    REQUIRE_TRUE(slot.width == 160.0f && slot.height > 0.0f);
-
-    std::vector<synth::ui::Bounds> message;
-    for (std::size_t buttonIx = 0; buttonIx < synth::MfTwisterConfigForm::kButtonCount; ++buttonIx) {
-        const synth::ui::Bounds labelBounds = FormBounds(tree, TwisterButtonField(buttonIx, "label"));
-        const synth::ui::Bounds messageCaptionBounds =
-            FormBounds(tree, TwisterButtonField(buttonIx, "message") + ".caption");
-        const synth::ui::Bounds messageBounds = FormBounds(tree, TwisterButtonField(buttonIx, "message"));
-        const synth::ui::Bounds argumentCaptionBounds =
-            FormBounds(tree, TwisterButtonField(buttonIx, "argument") + ".caption");
-        const synth::ui::Bounds argumentBounds = FormBounds(tree, TwisterButtonField(buttonIx, "argument"));
-        REQUIRE_TRUE(labelBounds.width > 0.0f && labelBounds.height > 0.0f);
-        REQUIRE_TRUE(messageCaptionBounds.width > 0.0f && messageCaptionBounds.height > 0.0f);
-        REQUIRE_TRUE(messageBounds.width > 0.0f && messageBounds.height > 0.0f);
-        REQUIRE_TRUE(argumentCaptionBounds.width > 0.0f && argumentCaptionBounds.height > 0.0f);
-        REQUIRE_TRUE(argumentBounds.width > 0.0f && argumentBounds.height > 0.0f);
-        REQUIRE_TRUE(messageBounds.x >= labelBounds.x + labelBounds.width);
-        REQUIRE_TRUE(argumentBounds.x >= messageBounds.x + messageBounds.width);
-        REQUIRE_TRUE(messageCaptionBounds.x == messageBounds.x);
-        REQUIRE_TRUE(argumentCaptionBounds.x == argumentBounds.x);
-        REQUIRE_TRUE(argumentCaptionBounds.y == messageCaptionBounds.y);
-        REQUIRE_TRUE(labelBounds.y == messageCaptionBounds.y);
-        REQUIRE_TRUE(messageBounds.y > messageCaptionBounds.y);
-        REQUIRE_TRUE(argumentBounds.y == messageBounds.y);
-        message.push_back(messageBounds);
-    }
-
-    // Each column names itself above its first button row.
-    for (std::size_t column = 0; column < 2; ++column) {
-        const synth::ui::Bounds heading = FormBounds(
-            tree, "controller-wizard.twister.column." + std::to_string(column) + ".heading");
-        REQUIRE_TRUE(heading.width > 0.0f && heading.height > 0.0f);
-        REQUIRE_TRUE(heading.y + heading.height <= message[column * 3].y);
-        REQUIRE_TRUE(heading.x == FormBounds(tree, TwisterButtonField(column * 3, "label")).x);
-    }
-
-    // Buttons 0-2 are the first column, buttons 3-5 the second, in CC order.
-    for (std::size_t row = 0; row < 3; ++row) {
-        REQUIRE_TRUE(message[row].x == message[0].x);
-        REQUIRE_TRUE(message[row + 3].x == message[3].x);
-        REQUIRE_TRUE(message[row + 3].y == message[row].y);
-    }
-    REQUIRE_TRUE(message[1].y > message[0].y);
-    REQUIRE_TRUE(message[2].y > message[1].y);
-    REQUIRE_TRUE(message[3].x > message[0].x + message[0].width);
-
-    // The one controller-wide Encoder Slot precedes both columns, and the form
-    // reports an intrinsic height that covers everything it laid out.
-    REQUIRE_TRUE(message[0].y >= slot.y + slot.height);
-    REQUIRE_TRUE(tree.nodes.front().bounds.height >= message[2].y + message[2].height);
-}
-
-// Task 7.1 replaced every container extent this form used to compute with
-// `Extent::Intrinsic()`. These are the numbers that arithmetic produced, pinned
-// as literals so the swap is provably a no-op on screen rather than a claim
-// that it is one -- and so a later change to a declared leaf extent has to be a
-// decision rather than a silent reflow of the product owner's signed-off
-// appearance.
-TEST_CASE(MfTwisterConfigFormResolvesItsExtentsFromItsDeclarationsAlone) {
-    synth::MfTwisterConfigForm form;
-    const synth::ui::NodeTree tree = form.BuildTree();
-
-    const synth::ui::Node* body = FindNodeById(tree, "controller-wizard.twister.body");
-    REQUIRE_TRUE(body != nullptr);
-    REQUIRE_TRUE(body->bounds.width == 684.0f);
-    REQUIRE_TRUE(body->bounds.height == 294.0f);
-
-    const synth::ui::Node* columns = FindNodeById(tree, "controller-wizard.twister.columns");
-    REQUIRE_TRUE(columns != nullptr);
-    REQUIRE_TRUE(columns->bounds.width == 668.0f);
-    REQUIRE_TRUE(columns->bounds.height == 244.0f);
-
-    for (const char* columnId : {"controller-wizard.twister.column.0",
-                                 "controller-wizard.twister.column.1"}) {
-        const synth::ui::Node* column = FindNodeById(tree, columnId);
-        REQUIRE_TRUE(column != nullptr);
-        REQUIRE_TRUE(column->bounds.width == 326.0f);
-        REQUIRE_TRUE(column->bounds.height == 244.0f);
-    }
-
-    const synth::ui::Node* slotRow = FindNodeById(tree, "controller-wizard.twister.slot");
-    REQUIRE_TRUE(slotRow != nullptr);
-    REQUIRE_TRUE(slotRow->bounds.width == 258.0f);
-
-    const synth::ui::Node* fields = FindNodeById(tree, "controller-wizard.twister.button.0.fields");
-    REQUIRE_TRUE(fields != nullptr);
-    REQUIRE_TRUE(fields->bounds.width == 248.0f);
-    REQUIRE_TRUE(fields->bounds.height == 46.0f);
-
-    // The standalone preview surface is a surface the form is rendered INTO,
-    // never a size it derives: the body keeps its own measurements inside it,
-    // and the leftover is the preview's, not the form's.
-    REQUIRE_TRUE(tree.nodes.front().bounds.width == 1024.0f);
-    REQUIRE_TRUE(tree.nodes.front().bounds.height == 768.0f);
-    REQUIRE_TRUE(body->bounds.width < tree.nodes.front().bounds.width);
-
-    // THE WARNED STATE, which is the whole reason `kColumnWidth` and
-    // `kButtonRowHeight` survived task 7.1's cleanup. The inline argument error
-    // is out of flow and its row reserves a fixed band for it. Make it in-flow
-    // and its intrinsic cross extent propagates into every ancestor's: the
-    // message reserves 424px against a 326px column, so the column would widen
-    // by a third and shove the second column sideways the moment a field went
-    // invalid. Nothing above this point would notice, because everything above
-    // it renders a valid form.
-    //
-    // So: show the error, and require every extent to be the number it was.
-    // The argument field is only enabled -- and therefore only validated -- for
-    // the messages that take one, so the message is switched first; with the
-    // default `HoldReset` there is no error node to show and this pin would
-    // have measured the clean form twice.
-    form.buttons[0].message = synth::UISystemMessage::SceneSelect;
-    form.buttons[0].argumentText = "1x";
-    const synth::ui::NodeTree warned = form.BuildTree();
-
-    const synth::ui::Node* warnedError =
-        FindNodeById(warned, "controller-wizard.twister.button.0.argument.error");
-    REQUIRE_TRUE(warnedError != nullptr);
-    REQUIRE_TRUE(warnedError->bounds.width > 0.0f && warnedError->bounds.height > 0.0f);
-
-    const synth::ui::Node* warnedBody = FindNodeById(warned, "controller-wizard.twister.body");
-    REQUIRE_TRUE(warnedBody != nullptr);
-    REQUIRE_TRUE(warnedBody->bounds.width == 684.0f);
-    REQUIRE_TRUE(warnedBody->bounds.height == 294.0f);
-
-    const synth::ui::Node* warnedColumns = FindNodeById(warned, "controller-wizard.twister.columns");
-    REQUIRE_TRUE(warnedColumns != nullptr);
-    REQUIRE_TRUE(warnedColumns->bounds.width == 668.0f);
-
-    for (const char* columnId : {"controller-wizard.twister.column.0",
-                                 "controller-wizard.twister.column.1"}) {
-        const synth::ui::Node* warnedColumn = FindNodeById(warned, columnId);
-        REQUIRE_TRUE(warnedColumn != nullptr);
-        REQUIRE_TRUE(warnedColumn->bounds.width == 326.0f);
-        REQUIRE_TRUE(warnedColumn->bounds.height == 244.0f);
-    }
-
-    // The second column has not moved, which is the visible symptom an in-flow
-    // error would produce first.
-    REQUIRE_TRUE(FindNodeById(warned, "controller-wizard.twister.column.1")->bounds.x ==
-                 FindNodeById(tree, "controller-wizard.twister.column.1")->bounds.x);
-
-    // And the reserved band is doing its job: the error is inside the row that
-    // reserved it, rather than overhanging into the row below.
-    const synth::ui::Node* warnedRow = FindNodeById(warned, "controller-wizard.twister.button.0");
-    REQUIRE_TRUE(warnedRow != nullptr);
-    REQUIRE_TRUE(warnedRow->bounds.height == 68.0f);
-    REQUIRE_TRUE(warnedError->bounds.y + warnedError->bounds.height <= warnedRow->bounds.height);
-}
-
-TEST_CASE(MfTwisterConfigFormBuildsRootlessSubtreeForWizardHosts) {
-    synth::MfTwisterConfigForm form;
-    const synth::ui::Subtree subtree = form.BuildSubtree();
-    REQUIRE_TRUE(FindNodeById(subtree.tree, "controller-wizard.twister") == nullptr);
-    const synth::ui::Node* body = FindNodeById(subtree.tree, "controller-wizard.twister.body");
-    REQUIRE_TRUE(body != nullptr && body->kind == synth::ui::NodeKind::Section);
-    REQUIRE_TRUE(FindParentOf(subtree.tree, body->id.value) == nullptr);
-    REQUIRE_TRUE(subtree.layout.at("controller-wizard.twister.body").formGrid);
-    REQUIRE_TRUE(subtree.layout.at("controller-wizard.twister.column.0").formGrid);
-    REQUIRE_TRUE(subtree.layout.at("controller-wizard.twister.column.1").formGrid);
-    REQUIRE_TRUE(FindNodeById(subtree.tree, "controller-wizard.twister.encoder-slot") != nullptr);
-    REQUIRE_TRUE(FindNodeById(subtree.tree, "controller-wizard.twister.columns") != nullptr);
-    REQUIRE_TRUE(FindParentOf(subtree.tree, "controller-wizard.twister.column.0")->id.value ==
-                 "controller-wizard.twister.columns");
-
-    synth::ui::Builder host;
-    host.Root("host", {0.0f, 0.0f, 640.0f, 420.0f});
-    host.Splice(form.BuildSubtree());
-    const synth::ui::NodeTree hosted = host.Build({0.0f, 0.0f, 640.0f, 420.0f});
-    const synth::ui::Node* root = FindNodeById(hosted, "host");
-    REQUIRE_TRUE(root != nullptr);
-    REQUIRE_TRUE(root->children.size() == 1);
-    REQUIRE_TRUE(root->children.front().value == "controller-wizard.twister.body");
-}
-
-TEST_CASE(MfTwisterConfigFormBuildsClosedSixButtonSurfaceAndRoutesPortableActions) {
-    synth::MfTwisterConfigForm form;
-    const synth::ui::NodeTree initialTree = form.BuildTree();
-
-    const synth::ui::Node* slot =
-        FindNodeById(initialTree, "controller-wizard.twister.encoder-slot");
-    REQUIRE_TRUE(slot != nullptr);
-    REQUIRE_TRUE(slot->kind == synth::ui::NodeKind::TextField);
-    REQUIRE_TRUE(slot->text == "0");
-
-    const std::vector<const synth::ui::Node*> combos =
-        NodesOfKind(initialTree, synth::ui::NodeKind::ComboBox);
-    const std::vector<const synth::ui::Node*> arguments =
-        NodesOfKind(initialTree, synth::ui::NodeKind::TextField);
-    REQUIRE_TRUE(combos.size() == synth::MfTwisterConfigForm::kButtonCount);
-    REQUIRE_TRUE(arguments.size() == synth::MfTwisterConfigForm::kButtonCount + 1);
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.button.0.message") != nullptr);
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.button.5.message") != nullptr);
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.button.0.argument") != nullptr);
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.button.5.argument") != nullptr);
-    // No backend paints a container node's own label, so the column names and
-    // the side-button names are rendered Label children, not Section/Row labels.
-    for (const char* columnId : {"controller-wizard.twister.column.0",
-                                 "controller-wizard.twister.column.1"}) {
-        REQUIRE_TRUE(FindNodeById(initialTree, columnId)->label.empty());
-    }
-    const synth::ui::Node* leftHeading =
-        FindNodeById(initialTree, "controller-wizard.twister.column.0.heading");
-    const synth::ui::Node* rightHeading =
-        FindNodeById(initialTree, "controller-wizard.twister.column.1.heading");
-    REQUIRE_TRUE(leftHeading != nullptr && leftHeading->kind == synth::ui::NodeKind::Label &&
-                 leftHeading->text == "Left (CC 8-10)");
-    REQUIRE_TRUE(rightHeading != nullptr && rightHeading->kind == synth::ui::NodeKind::Label &&
-                 rightHeading->text == "Right (CC 11-13)");
-    for (std::size_t buttonIx = 0; buttonIx < synth::MfTwisterConfigForm::kButtonCount; ++buttonIx) {
-        const synth::ui::Node* buttonRow =
-            FindNodeById(initialTree, "controller-wizard.twister.button." + std::to_string(buttonIx));
-        REQUIRE_TRUE(buttonRow != nullptr && buttonRow->label.empty());
-        const synth::ui::Node* buttonLabel =
-            FindNodeById(initialTree, TwisterButtonField(buttonIx, "label"));
-        // One-based, so a "Button N" refusal names a row the user can see.
-        REQUIRE_TRUE(buttonLabel != nullptr && buttonLabel->kind == synth::ui::NodeKind::Label &&
-                     buttonLabel->text == "Button " + std::to_string(buttonIx + 1));
-    }
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.column.0")->children.size() == 4);
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.column.1")->children.size() == 4);
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.column.0")->children[0].value ==
-                 "controller-wizard.twister.column.0.heading");
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.column.0")->children[1].value ==
-                 "controller-wizard.twister.button.0");
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.column.0")->children[3].value ==
-                 "controller-wizard.twister.button.2");
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.column.1")->children[1].value ==
-                 "controller-wizard.twister.button.3");
-    REQUIRE_TRUE(FindNodeById(initialTree, "controller-wizard.twister.column.1")->children[3].value ==
-                 "controller-wizard.twister.button.5");
-
-    const std::vector<std::string> expectedLabels = {
-        "Toggle Reset", "Hold Reset", "Toggle Random", "Hold Random",
-        "Toggle Random Mod", "Hold Random Mod", "Toggle Gesture Select",
-        "Hold Gesture Select", "Bank Select", "Next Bank", "Previous Bank",
-        "Start", "Continue", "Stop", "Clock", "Scene Select"};
-    REQUIRE_TRUE(combos.front()->options.size() == expectedLabels.size());
-    for (std::size_t ix = 0; ix < expectedLabels.size(); ++ix) {
-        REQUIRE_TRUE(combos.front()->options[ix].label == expectedLabels[ix]);
-    }
-    REQUIRE_TRUE(combos.front()->selectedOption == "hold-reset");
-    REQUIRE_TRUE(combos[1]->selectedOption == "hold-random");
-    REQUIRE_TRUE(combos[2]->selectedOption == "hold-random-mod");
-    REQUIRE_TRUE(combos[3]->selectedOption == "next-bank");
-    REQUIRE_TRUE(combos[4]->selectedOption == "start");
-    REQUIRE_TRUE(combos[5]->selectedOption == "previous-bank");
-    REQUIRE_TRUE(!FindNodeById(initialTree, "controller-wizard.twister.button.3.argument")->enabled);
-
-    form.DispatchAction(synth::ui::Action::WithValue(
-        "controller-wizard.twister.encoder-slot", "17"));
-    form.DispatchAction(synth::ui::Action::WithValue(
-        "controller-wizard.twister.button.3.message", "scene-select"));
-    form.DispatchAction(synth::ui::Action::WithValue(
-        "controller-wizard.twister.button.3.argument", "6"));
-    const synth::ui::NodeTree editedTree = form.BuildTree();
-    REQUIRE_TRUE(FindNodeById(editedTree, "controller-wizard.twister.encoder-slot")->text == "17");
-    REQUIRE_TRUE(FindNodeById(editedTree, "controller-wizard.twister.button.3.message")->selectedOption ==
-                 "scene-select");
-    REQUIRE_TRUE(FindNodeById(editedTree, "controller-wizard.twister.button.3.argument")->enabled);
-    REQUIRE_TRUE(FindNodeById(editedTree, "controller-wizard.twister.button.3.argument")->text == "6");
-
-    const std::vector<std::pair<std::string, bool>> argumentEnabled = {
-        {"toggle-reset", false}, {"hold-reset", false},
-        {"toggle-random", false}, {"hold-random", false},
-        {"toggle-random-mod", false}, {"hold-random-mod", false},
-        {"toggle-gesture-select", true}, {"hold-gesture-select", true},
-        {"bank-select", true}, {"next-bank", false}, {"previous-bank", false},
-        {"start", false}, {"continue", false}, {"stop", false},
-        {"clock", false}, {"scene-select", true}};
-    for (const auto& [messageId, enabled] : argumentEnabled) {
-        form.DispatchAction(synth::ui::Action::WithValue(
-            "controller-wizard.twister.button.0.message", messageId));
-        REQUIRE_TRUE(FindNodeById(form.BuildTree(), "controller-wizard.twister.button.0.argument")->enabled ==
-                     enabled);
-    }
-}
-
 TEST_CASE(MfTwisterConfigFormValidatesExactSizeTIntegerTextAndIgnoresDisabledArguments) {
     synth::MfTwisterConfigForm form;
     std::string error;
@@ -593,20 +247,9 @@ TEST_CASE(MfTwisterConfigFormValidatesExactSizeTIntegerTextAndIgnoresDisabledArg
         REQUIRE_TRUE(!form.Validate(error));
         REQUIRE_TRUE(!error.empty());
     }
-    form.buttons[0].argumentText = "1x";
-    const synth::ui::NodeTree invalidTree = form.BuildTree();
-    const synth::ui::Node* argumentError =
-        FindNodeById(invalidTree, "controller-wizard.twister.button.0.argument.error");
-    REQUIRE_TRUE(argumentError != nullptr);
-    REQUIRE_TRUE(FindParentOf(invalidTree, argumentError->id.value)->id.value ==
-                 "controller-wizard.twister.button.0");
-    const synth::ui::Bounds errorBounds = FormBounds(invalidTree, argumentError->id.value);
-    const synth::ui::Bounds buttonBounds = FormBounds(invalidTree, "controller-wizard.twister.button.0");
-    REQUIRE_TRUE(errorBounds.y + errorBounds.height <= buttonBounds.y + buttonBounds.height);
+
     form.buttons[0].message = synth::UISystemMessage::NextParamBank;
     REQUIRE_TRUE(form.Validate(error));
-    const synth::ui::NodeTree disabledTree = form.BuildTree();
-    REQUIRE_TRUE(FindNodeById(disabledTree, "controller-wizard.twister.button.0.argument.error") == nullptr);
 
     form.buttons[0].message = synth::UISystemMessage::ParamIncDec;
     REQUIRE_TRUE(!form.Validate(error));
@@ -621,31 +264,17 @@ TEST_CASE(UISystemMessageHelpersExposeCatalogLabelsAndPreserveBankSlotArguments)
     REQUIRE_TRUE(synth::FindUISystemMessageChoice(synth::UISystemMessage::SceneSelect) != nullptr);
 
     const synth::MidiControllerSystemMessageAssociation next =
-        synth::MakeUISystemMessageAssociation(synth::UISystemMessage::NextParamBank, 23);
+        synth::MakeUISystemMessageAssociation(
+            *synth::FindUISystemMessageChoice(synth::UISystemMessage::NextParamBank), 23);
     REQUIRE_TRUE(next.press.type == synth::MessageIn::Type::NextParamBank);
     REQUIRE_TRUE(next.press.slotIx == 23);
     REQUIRE_TRUE(next.feedback.type == synth::MessageIn::Type::NextParamBank);
     REQUIRE_TRUE(next.feedback.slotIx == 23);
 }
 
-TEST_CASE(ConfigFormOwnsStateAndDispatchActionMutatesIt) {
-    FirstForm::destroyedCount = 0;
-    FirstWizard wizard;
-    {
-        std::unique_ptr<synth::ControllerConfigForm> form = wizard.ConfigForm(std::nullopt);
-        REQUIRE_TRUE(form != nullptr);
-        REQUIRE_TRUE(dynamic_cast<FirstForm*>(form.get()) != nullptr);
-        REQUIRE_TRUE(dynamic_cast<FirstForm*>(form.get())->Name().empty());
-
-        form->DispatchAction(synth::ui::Action::WithValue("set-name", "Controller One"));
-        REQUIRE_TRUE(dynamic_cast<FirstForm*>(form.get())->Name() == "Controller One");
-    }
-    REQUIRE_TRUE(FirstForm::destroyedCount == 1);
-}
-
 TEST_CASE(TypedWizardRejectsInvalidFormBeforeGeneration) {
     FirstWizard wizard;
-    std::unique_ptr<synth::ControllerConfigForm> form = wizard.ConfigForm(std::nullopt);
+    std::unique_ptr<synth::ControllerConfigForm> form = wizard.ConfigForm();
     const synth::ControllerWizard& baseWizard = wizard;
 
     const synth::WizardGenerationResult result = baseWizard.GenerateProfile(*form, Context());
@@ -657,8 +286,8 @@ TEST_CASE(TypedWizardRejectsInvalidFormBeforeGeneration) {
 
 TEST_CASE(TypedWizardGeneratesProfileFromItsConcreteForm) {
     FirstWizard wizard;
-    std::unique_ptr<synth::ControllerConfigForm> form = wizard.ConfigForm(std::nullopt);
-    form->DispatchAction(synth::ui::Action::WithValue("set-name", "Controller One"));
+    std::unique_ptr<synth::ControllerConfigForm> form = wizard.ConfigForm();
+    dynamic_cast<FirstForm&>(*form).SetName("Controller One");
     const synth::ControllerWizard& baseWizard = wizard;
 
     const synth::WizardGenerationResult result = baseWizard.GenerateProfile(*form, Context());
@@ -673,7 +302,7 @@ TEST_CASE(TypedWizardGeneratesProfileFromItsConcreteForm) {
 TEST_CASE(TypedWizardRejectsDifferentConcreteFormWithoutGeneration) {
     FirstWizard first;
     SecondWizard second;
-    std::unique_ptr<synth::ControllerConfigForm> secondForm = second.ConfigForm(std::nullopt);
+    std::unique_ptr<synth::ControllerConfigForm> secondForm = second.ConfigForm();
     const synth::ControllerWizard& firstBase = first;
 
     const synth::WizardGenerationResult result = firstBase.GenerateProfile(*secondForm, Context());
@@ -686,11 +315,11 @@ TEST_CASE(TypedWizardRejectsDifferentConcreteFormWithoutGeneration) {
 
 TEST_CASE(MfTwisterWizardGeneratesCompleteActiveProfileFromItsForm) {
     std::unique_ptr<synth::ControllerWizard> wizard =
-        synth::MakeControllerWizard("com.sheaf.midi-fighter-twister");
+        synth::MakeControllerWizard(EmptyCatalogLibraryRegistry(), "com.sheaf.midi-fighter-twister");
     REQUIRE_TRUE(wizard != nullptr);
     REQUIRE_TRUE(wizard->Id() == "com.sheaf.midi-fighter-twister");
 
-    std::unique_ptr<synth::ControllerConfigForm> baseForm = wizard->ConfigForm(std::nullopt);
+    std::unique_ptr<synth::ControllerConfigForm> baseForm = wizard->ConfigForm();
     auto* form = dynamic_cast<synth::MfTwisterConfigForm*>(baseForm.get());
     REQUIRE_TRUE(form != nullptr);
     form->encoderSlotText = "4";
@@ -774,108 +403,11 @@ TEST_CASE(MfTwisterWizardGeneratesCompleteActiveProfileFromItsForm) {
     REQUIRE_TRUE(profile.systemMessages[5].press.slotIx == 4);
 }
 
-TEST_CASE(MfTwisterSeedExtractionRequiresOneExactRepresentableProfileShape) {
-    synth::MfTwisterControllerWizard wizard;
-    synth::MfTwisterConfigForm source;
-    source.encoderSlotText = "4";
-    source.buttons[0] = {.message = synth::UISystemMessage::ToggleGestureSelect, .argumentText = "1"};
-    source.buttons[1] = {.message = synth::UISystemMessage::HoldGestureSelect, .argumentText = "2"};
-    source.buttons[2] = {.message = synth::UISystemMessage::SelectParamBank, .argumentText = "3"};
-    source.buttons[3] = {.message = synth::UISystemMessage::SelectParamBank, .argumentText = "7"};
-    source.buttons[4] = {.message = synth::UISystemMessage::SceneSelect, .argumentText = "5"};
-    source.buttons[5] = {.message = synth::UISystemMessage::PrevParamBank, .argumentText = "ignored"};
-    const synth::WizardGenerationResult generated = wizard.GenerateProfile(source, Context());
-    REQUIRE_TRUE(generated);
-
-    const auto seeded = synth::ExtractMfTwisterWizardSeed(generated.controller->config);
-    REQUIRE_TRUE(seeded.has_value());
-    REQUIRE_TRUE(seeded->encoderSlotText == "4");
-    REQUIRE_TRUE(seeded->buttons[0].message == synth::UISystemMessage::ToggleGestureSelect &&
-                 seeded->buttons[0].argumentText == "1");
-    REQUIRE_TRUE(seeded->buttons[1].message == synth::UISystemMessage::HoldGestureSelect &&
-                 seeded->buttons[1].argumentText == "2");
-    REQUIRE_TRUE(seeded->buttons[2].message == synth::UISystemMessage::SelectParamBank &&
-                 seeded->buttons[2].argumentText == "3");
-    REQUIRE_TRUE(seeded->buttons[3].message == synth::UISystemMessage::SelectParamBank &&
-                 seeded->buttons[3].argumentText == "7");
-    REQUIRE_TRUE(seeded->buttons[4].message == synth::UISystemMessage::SceneSelect &&
-                 seeded->buttons[4].argumentText == "5");
-    REQUIRE_TRUE(seeded->buttons[5].message == synth::UISystemMessage::PrevParamBank &&
-                 seeded->buttons[5].argumentText == "0");
-
-    const auto rejects = [&](auto mutate) {
-        synth::MidiControllerProfileConfig incompatible = generated.controller->config;
-        mutate(incompatible);
-        REQUIRE_TRUE(!synth::ExtractMfTwisterWizardSeed(incompatible).has_value());
-    };
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.analogInput = synth::AnalogMidiInConfig{};
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.pressureInput = synth::PolyphonicPressureMidiInConfig{};
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderInput->turns.pop_back();
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderInput->turns.push_back(config.encoderInput->turns.front());
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderInput->pushes[0].control.cc += 1;
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderInput->pushes.pop_back();
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderInput->turns[0].slotIx = 8;
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderInput->pushes[0].slotIx = 8;
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderOutput->mappings[0].position = 15;
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderOutput->mappings.pop_back();
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderOutput->mappings.push_back(config.encoderOutput->mappings.front());
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.encoderOutput->mappings[0].slotIx = 8;
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.systemMessages.pop_back();
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.systemMessages.push_back(config.systemMessages.front());
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.systemMessages[0].control->cc = 99;
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.systemMessages[1].control->cc = config.systemMessages[0].control->cc;
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.systemMessages[0].outputFeedback = true;
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.systemMessages[1].release.reset();
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.systemMessages[0].feedback = synth::MessageIn::Clock(0);
-    });
-    rejects([](synth::MidiControllerProfileConfig& config) {
-        config.systemMessages[3].press.slotIx = 2;
-        config.systemMessages[3].feedback.slotIx = 2;
-    });
-}
-
 TEST_CASE(MfTwisterWizardRefusesInvalidFormsAtomically) {
     std::unique_ptr<synth::ControllerWizard> wizard =
-        synth::MakeControllerWizard("com.sheaf.midi-fighter-twister");
+        synth::MakeControllerWizard(EmptyCatalogLibraryRegistry(), "com.sheaf.midi-fighter-twister");
     REQUIRE_TRUE(wizard != nullptr);
-    std::unique_ptr<synth::ControllerConfigForm> baseForm = wizard->ConfigForm(std::nullopt);
+    std::unique_ptr<synth::ControllerConfigForm> baseForm = wizard->ConfigForm();
     auto* form = dynamic_cast<synth::MfTwisterConfigForm*>(baseForm.get());
     REQUIRE_TRUE(form != nullptr);
     form->encoderSlotText = "not-a-slot";
@@ -888,20 +420,261 @@ TEST_CASE(MfTwisterWizardRefusesInvalidFormsAtomically) {
     REQUIRE_TRUE(form->encoderSlotText == "not-a-slot");
 }
 
-TEST_CASE(ControllerWizardRegistryExposesStableMfTwisterDescriptor) {
-    const std::vector<synth::ControllerWizardDescriptor>& registry =
-        synth::ControllerWizardRegistry();
+TEST_CASE(MakeControllerWizardRegistryWithEmptyCatalogReturnsTwisterLaunchpadAndWrldBldr) {
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{});
 
-    REQUIRE_TRUE(!registry.empty());
-    REQUIRE_TRUE(registry.front().id == "com.sheaf.midi-fighter-twister");
-    REQUIRE_TRUE(registry.front().displayName == "MIDI Fighter Twister");
-    REQUIRE_TRUE(registry.front().kind == synth::MidiProfileKind::MfTwister);
-    REQUIRE_TRUE(registry.front().inputAliases.size() == 1);
-    REQUIRE_TRUE(registry.front().inputAliases[0] == "Midi Fighter Twister");
-    REQUIRE_TRUE(registry.front().outputAliases.size() == 1);
-    REQUIRE_TRUE(registry.front().outputAliases[0] == "Midi Fighter Twister");
-    REQUIRE_TRUE(synth::MakeControllerWizard("missing.wizard") == nullptr);
-    REQUIRE_TRUE(synth::MakeControllerWizard("com.sheaf.midi-fighter-twister") != nullptr);
+    REQUIRE_TRUE(registry.size() == 3);
+    REQUIRE_TRUE(registry[0].id == "com.sheaf.midi-fighter-twister");
+    REQUIRE_TRUE(registry[0].displayName == "MIDI Fighter Twister");
+    REQUIRE_TRUE(registry[0].kind == synth::MidiProfileKind::MfTwister);
+    REQUIRE_TRUE(registry[0].inputAliases.size() == 1);
+    REQUIRE_TRUE(registry[0].inputAliases[0] == "Midi Fighter Twister");
+    REQUIRE_TRUE(registry[0].outputAliases.size() == 1);
+    REQUIRE_TRUE(registry[0].outputAliases[0] == "Midi Fighter Twister");
+    REQUIRE_TRUE(synth::MakeControllerWizard(registry, "missing.wizard") == nullptr);
+    REQUIRE_TRUE(synth::MakeControllerWizard(registry, "com.sheaf.midi-fighter-twister") != nullptr);
+
+    REQUIRE_TRUE(registry[1].id == "library.launchpad");
+    REQUIRE_TRUE(registry[1].displayName == "Launchpad");
+    REQUIRE_TRUE(registry[1].kind == synth::MidiProfileKind::Launchpad);
+    REQUIRE_TRUE(registry[1].inputAliases.empty());
+    REQUIRE_TRUE(registry[1].outputAliases.empty());
+
+    REQUIRE_TRUE(registry[2].id == "library.wrldbldr");
+    REQUIRE_TRUE(registry[2].displayName == "WRLD.Bldr");
+    REQUIRE_TRUE(registry[2].kind == synth::MidiProfileKind::WrldBldr);
+    REQUIRE_TRUE(registry[2].inputAliases.empty());
+    REQUIRE_TRUE(registry[2].outputAliases.empty());
+
+    std::unique_ptr<synth::ControllerWizard> launchpadWizard =
+        synth::MakeControllerWizard(registry, "library.launchpad");
+    REQUIRE_TRUE(launchpadWizard != nullptr);
+    std::unique_ptr<synth::ControllerConfigForm> launchpadForm = launchpadWizard->ConfigForm();
+    REQUIRE_TRUE(launchpadForm != nullptr);
+    const synth::WizardGenerationResult launchpadResult =
+        launchpadWizard->GenerateProfile(*launchpadForm, Context());
+    REQUIRE_TRUE(launchpadResult);
+    REQUIRE_TRUE(launchpadResult.controller->kind == synth::MidiProfileKind::Launchpad);
+    REQUIRE_TRUE(launchpadResult.controller->wizardId == "library.launchpad");
+    const synth::MidiControllerProfileConfig expectedLaunchpad = synth::LaunchpadDefaultProfileConfig();
+    {
+        synth::JsonArena arena(1024 * 1024);
+        const std::string actualJson =
+            synth::ToJSON(arena, launchpadResult.controller->config).Dumps(0);
+        const std::string expectedJson = synth::ToJSON(arena, expectedLaunchpad).Dumps(0);
+        REQUIRE_TRUE(actualJson == expectedJson);
+    }
+
+    std::unique_ptr<synth::ControllerWizard> wrldbldrWizard =
+        synth::MakeControllerWizard(registry, "library.wrldbldr");
+    REQUIRE_TRUE(wrldbldrWizard != nullptr);
+    std::unique_ptr<synth::ControllerConfigForm> wrldbldrForm = wrldbldrWizard->ConfigForm();
+    REQUIRE_TRUE(wrldbldrForm != nullptr);
+    const synth::WizardGenerationResult wrldbldrResult =
+        wrldbldrWizard->GenerateProfile(*wrldbldrForm, Context());
+    REQUIRE_TRUE(wrldbldrResult);
+    REQUIRE_TRUE(wrldbldrResult.controller->kind == synth::MidiProfileKind::WrldBldr);
+    REQUIRE_TRUE(wrldbldrResult.controller->wizardId == "library.wrldbldr");
+    const synth::MidiControllerProfileConfig expectedWrldBldr = synth::WrldBldrDefaultProfileConfig();
+    {
+        synth::JsonArena arena(1024 * 1024);
+        const std::string actualJson =
+            synth::ToJSON(arena, wrldbldrResult.controller->config).Dumps(0);
+        const std::string expectedJson = synth::ToJSON(arena, expectedWrldBldr).Dumps(0);
+        REQUIRE_TRUE(actualJson == expectedJson);
+    }
+}
+
+TEST_CASE(MakeControllerWizardRegistryReturnsCatalogDefaultsThenLibraryForUncoveredKinds) {
+    // The catalog covers MfTwister and Generic; Launchpad and WRLD.Bldr have
+    // no catalog device, so a device of each stays reachable as a starting
+    // point via the library descriptors, appended after the catalog's own
+    // (frogg3rs' real shape: its six devices cover MfTwister/Generic/
+    // Launchpad, so only WRLD.Bldr gets a library descriptor appended).
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.twister", "MIDI Fighter Twister", synth::MidiProfileKind::MfTwister,
+        {"Midi Fighter Twister"}, {"Midi Fighter Twister"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, synth::MidiControllerProfileConfig{}));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    REQUIRE_TRUE(registry.size() == 4);
+    REQUIRE_TRUE(registry[0].id == "froggers.twister");
+    REQUIRE_TRUE(registry[0].displayName == "MIDI Fighter Twister");
+    REQUIRE_TRUE(registry[0].kind == synth::MidiProfileKind::MfTwister);
+    REQUIRE_TRUE(registry[0].inputAliases.size() == 1);
+    REQUIRE_TRUE(registry[0].inputAliases[0] == "Midi Fighter Twister");
+    REQUIRE_TRUE(registry[0].outputAliases.size() == 1);
+    REQUIRE_TRUE(registry[0].outputAliases[0] == "Midi Fighter Twister");
+    REQUIRE_TRUE(registry[1].id == "froggers.apc40.generic");
+    REQUIRE_TRUE(registry[1].displayName == "Akai APC40 mkII (Generic)");
+    REQUIRE_TRUE(registry[1].kind == synth::MidiProfileKind::Generic);
+    REQUIRE_TRUE(registry[1].inputAliases.size() == 1);
+    REQUIRE_TRUE(registry[1].inputAliases[0] == "APC40 mkII");
+    REQUIRE_TRUE(registry[1].outputAliases.size() == 1);
+    REQUIRE_TRUE(registry[1].outputAliases[0] == "APC40 mkII");
+    REQUIRE_TRUE(registry[2].id == "library.launchpad");
+    REQUIRE_TRUE(registry[2].displayName == "Launchpad");
+    REQUIRE_TRUE(registry[2].kind == synth::MidiProfileKind::Launchpad);
+    REQUIRE_TRUE(registry[3].id == "library.wrldbldr");
+    REQUIRE_TRUE(registry[3].displayName == "WRLD.Bldr");
+    REQUIRE_TRUE(registry[3].kind == synth::MidiProfileKind::WrldBldr);
+}
+
+TEST_CASE(MakeControllerWizardRegistryOmitsLibraryDevicesForKindsTheCatalogAlreadyCovers) {
+    // frogg3rs' real shape: MfTwister, Generic and Launchpad are all covered
+    // by catalog devices (two Launchpad-kind entries here stand in for its
+    // three), so only WRLD.Bldr -- the one kind with no catalog device --
+    // gets a library descriptor appended.
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.twister", "MIDI Fighter Twister", synth::MidiProfileKind::MfTwister,
+        {"Midi Fighter Twister"}, {"Midi Fighter Twister"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.launchpad.x", "Launchpad X", synth::MidiProfileKind::Launchpad,
+        {"Launchpad X"}, {"Launchpad X"}, synth::MidiControllerProfileConfig{}));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    REQUIRE_TRUE(registry.size() == 4);
+    REQUIRE_TRUE(registry[0].id == "froggers.twister");
+    REQUIRE_TRUE(registry[1].id == "froggers.apc40.generic");
+    REQUIRE_TRUE(registry[2].id == "froggers.launchpad.x");
+    REQUIRE_TRUE(registry[3].id == "library.wrldbldr");
+    REQUIRE_TRUE(registry[3].displayName == "WRLD.Bldr");
+    REQUIRE_TRUE(registry[3].kind == synth::MidiProfileKind::WrldBldr);
+}
+
+// The suppression rule is symmetric across the two library kinds: a catalog
+// covering WRLD.Bldr must omit exactly that library entry (and no other),
+// while a catalog covering neither still gets both. Without this, a check
+// that always appended the WRLD.Bldr library entry regardless of catalog
+// coverage would pass every other registry test in this file, since none of
+// them give WRLD.Bldr its own catalog device to be covered by.
+TEST_CASE(MakeControllerWizardRegistryOmitsTheLibraryWrldBldrEntryWhenTheCatalogAlreadyCoversWrldBldr) {
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.wrld", "WRLD.Bldr", synth::MidiProfileKind::WrldBldr, {"WRLD.Bldr"}, {"WRLD.Bldr"},
+        synth::MidiControllerProfileConfig{}));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    // The catalog's own WRLD.Bldr device, plus library entries for the two
+    // kinds it does not cover (MfTwister, Launchpad) -- not a third entry
+    // for WRLD.Bldr.
+    REQUIRE_TRUE(registry.size() == 3);
+    REQUIRE_TRUE(registry[0].id == "froggers.wrld");
+    bool sawLibraryWrldBldr = false;
+    bool sawMfTwister = false;
+    bool sawLibraryLaunchpad = false;
+    for (const synth::ControllerWizardDescriptor& descriptor : registry) {
+        sawLibraryWrldBldr = sawLibraryWrldBldr || descriptor.id == "library.wrldbldr";
+        sawMfTwister = sawMfTwister || descriptor.kind == synth::MidiProfileKind::MfTwister;
+        sawLibraryLaunchpad = sawLibraryLaunchpad || descriptor.id == "library.launchpad";
+    }
+    // A catalog-covered WRLD.Bldr gets no library.wrldbldr entry, while
+    // MfTwister and Launchpad -- kinds this catalog does not cover -- still
+    // get theirs.
+    REQUIRE_TRUE(!sawLibraryWrldBldr);
+    REQUIRE_TRUE(sawMfTwister);
+    REQUIRE_TRUE(sawLibraryLaunchpad);
+}
+
+// An app whose catalog sets an empty libraryDeviceKinds (Frogg3rs) offers
+// only its own presets: no library descriptor is appended for a kind its
+// device defaults do not cover, even though the default libraryDeviceKinds
+// would otherwise offer one.
+TEST_CASE(MakeControllerWizardRegistryWithEmptyLibraryDeviceKindsReturnsOnlyCatalogDefaults) {
+    synth::MidiAppCatalog catalog;
+    catalog.libraryDeviceKinds.clear();
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.twister", "MIDI Fighter Twister", synth::MidiProfileKind::MfTwister,
+        {"Midi Fighter Twister"}, {"Midi Fighter Twister"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, synth::MidiControllerProfileConfig{}));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    REQUIRE_TRUE(registry.size() == 2);
+    REQUIRE_TRUE(registry[0].id == "froggers.twister");
+    REQUIRE_TRUE(registry[1].id == "froggers.apc40.generic");
+}
+
+TEST_CASE(AppDefaultControllerWizardValidatesEmptyFormAndGeneratesTheStoredConfig) {
+    synth::MidiControllerProfileConfig storedConfig;
+    storedConfig.analogInput =
+        synth::AnalogMidiInConfig{.sceneBlend = synth::MidiControlAddress{.channel = 5, .cc = 9}};
+
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, storedConfig));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+    // The one catalog device plus a library descriptor for each of the three
+    // kinds this Generic-only catalog does not cover (MfTwister, Launchpad,
+    // WRLD.Bldr); this test is about AppDefaultControllerWizard's own
+    // descriptor, unaffected by the other three being present too.
+    REQUIRE_TRUE(registry.size() == 4);
+
+    std::unique_ptr<synth::ControllerWizard> wizard =
+        synth::MakeControllerWizard(registry, "froggers.apc40.generic");
+    REQUIRE_TRUE(wizard != nullptr);
+    REQUIRE_TRUE(wizard->Id() == "froggers.apc40.generic");
+
+    std::unique_ptr<synth::ControllerConfigForm> form = wizard->ConfigForm();
+    REQUIRE_TRUE(form != nullptr);
+    std::string error = "not-yet-cleared";
+    REQUIRE_TRUE(form->Validate(error));
+    REQUIRE_TRUE(error.empty());
+
+    const synth::WizardGenerationResult result = wizard->GenerateProfile(*form, Context());
+    REQUIRE_TRUE(result);
+    REQUIRE_TRUE(result.controller->name == "ignored-by-form");
+    REQUIRE_TRUE(result.controller->kind == synth::MidiProfileKind::Generic);
+    REQUIRE_TRUE(result.controller->disposition == synth::MidiControllerDisposition::Active);
+    REQUIRE_TRUE(result.controller->wizardId == "froggers.apc40.generic");
+    REQUIRE_TRUE(result.controller->input.identifier == "in-id");
+    REQUIRE_TRUE(result.controller->output.identifier == "out-id");
+    REQUIRE_TRUE(result.controller->config.analogInput.has_value());
+    REQUIRE_TRUE(result.controller->config.analogInput->sceneBlend.has_value());
+    REQUIRE_TRUE(result.controller->config.analogInput->sceneBlend->channel == 5);
+    REQUIRE_TRUE(result.controller->config.analogInput->sceneBlend->cc == 9);
+}
+
+TEST_CASE(DiscoveryWithAppRegistryClassifiesDeviceByFirstDefaultsInputAlias) {
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.twister", "MIDI Fighter Twister", synth::MidiProfileKind::MfTwister,
+        {"Midi Fighter Twister"}, {"Midi Fighter Twister"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, synth::MidiControllerProfileConfig{}));
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    const synth::MidiDeviceList devices = Devices(
+        {Device("in-1", "Midi Fighter Twister")}, {Device("out-1", "Midi Fighter Twister")});
+
+    const synth::WizardDiscovery discovery =
+        synth::DiscoverControllerWizards(devices, synth::MidiInstrumentConfig{}, registry);
+
+    REQUIRE_TRUE(discovery.available.size() == 1);
+    RequireCandidate(discovery.available[0], "froggers.twister", "MIDI Fighter Twister",
+                     synth::MidiProfileKind::MfTwister, "in-1", "out-1");
 }
 
 TEST_CASE(DiscoveryMatchesMidiFighterTwisterByCaseInsensitiveExactAlias) {
