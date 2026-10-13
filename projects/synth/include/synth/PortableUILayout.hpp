@@ -842,7 +842,17 @@ struct Resolver {
             cells[0]->bounds.x = rowOpts.padding;
             cells[0]->bounds.width = labelColumnWidth;
             cells[1]->bounds.x = controlOffset;
-            cells[1]->bounds.width = std::max(0.0f, row->bounds.width - controlOffset - rowOpts.padding);
+            // The control cell's width does two jobs: size a weighted control to
+            // fill the column, and rescue a row whose cells overran after the
+            // label column was realigned above (see
+            // RequireContainerHoldsItsChildren). A non-weighted control keeps its
+            // already-resolved width -- e.g. Intrinsic sized to its own caption --
+            // clamped to whatever the column has left, so it never overruns.
+            const float remainingWidth = std::max(0.0f, row->bounds.width - controlOffset - rowOpts.padding);
+            const LayoutOptions& controlOpts = LayoutFor(layoutByNodeId, cells[1]->id, fallback);
+            cells[1]->bounds.width = controlOpts.main.mode == Extent::Mode::Weighted
+                                          ? remainingWidth
+                                          : std::min(cells[1]->bounds.width, remainingWidth);
             float extraCursor = cells[1]->bounds.x + cells[1]->bounds.width + rowOpts.gap;
             for (std::size_t i = 2; i < cells.size(); ++i)
             {

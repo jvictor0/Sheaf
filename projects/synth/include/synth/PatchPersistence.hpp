@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -30,19 +31,29 @@ JSON ToJSON(JsonArena& arena, const AudioDeviceState& state);
 bool FromJSON(JSON json, AudioDeviceState& state);
 
 inline constexpr const char* kRuntimeConfigSchema = "sheaf.synth.runtime-config";
-inline constexpr int kRuntimeConfigSchemaVersion = 2;
+inline constexpr int kRuntimeConfigSchemaVersion = 3;
 
 JSON ToJSON(JsonArena& arena, const SyncConfig& config);
 bool FromJSON(JSON json, SyncConfig& config);
 
+// lastPatchVersion is the patch version file the player last opened or
+// saved, relative to the patches root, as a player-facing record separate
+// from the instrument/audio/sync state above: absent (nullopt) means a
+// configuration written before this record existed; present and empty means
+// New was the last action (no patch is open); present and non-empty names
+// the version file to reopen at launch. BuildRuntimeConfigJSON omits the key
+// entirely when the caller passes nullopt, so a caller that does not know
+// about this record writes exactly what it always has.
 JSON BuildRuntimeConfigJSON(JsonArena& arena,
                             const MidiInstrumentConfig& instrument,
                             const AudioDeviceState& audioDevice,
-                            const SyncConfig& sync);
+                            const SyncConfig& sync,
+                            const std::optional<std::string>& lastPatchVersion = std::nullopt);
 bool LoadRuntimeConfigJSON(JSON root,
                            MidiInstrumentConfig& instrument,
                            AudioDeviceState& audioDevice,
-                           SyncConfig& sync);
+                           SyncConfig& sync,
+                           std::optional<std::string>* lastPatchVersion = nullptr);
 bool ValidateRuntimeConfigJSON(JSON root);
 
 enum class RuntimeConfigFileStatus {
@@ -55,27 +66,42 @@ enum class RuntimeConfigFileStatus {
 RuntimeConfigFileStatus LoadRuntimeConfigFile(const std::filesystem::path& configFile,
                                               MidiInstrumentConfig& instrument,
                                               AudioDeviceState& audioDevice,
-                                              SyncConfig& sync);
+                                              SyncConfig& sync,
+                                              std::optional<std::string>* lastPatchVersion = nullptr);
 RuntimeConfigFileStatus SaveRuntimeConfigFile(const std::filesystem::path& configFile,
                                               const MidiInstrumentConfig& instrument,
                                               const AudioDeviceState& audioDevice,
-                                              const SyncConfig& sync);
+                                              const SyncConfig& sync,
+                                              const std::optional<std::string>& lastPatchVersion = std::nullopt);
 const char* RuntimeConfigFileStatusName(RuntimeConfigFileStatus status);
 
 JSON BuildPatchJSON(JsonArena& arena, std::string_view patchName,
                     const ParameterManager& manager,
                     const MidiInstrumentConfig& instrument,
-                    const AudioDeviceState& audioDevice = {});
-// MIDI/audio arguments are retained for source compatibility with existing
-// callers, but patch JSON is parameter-only. Runtime MIDI/audio configuration
-// and sync policy are persisted separately through
+                    const AudioDeviceState& audioDevice = {},
+                    bool carryInstrument = false);
+// The audioDevice argument is retained for source compatibility with
+// existing callers; patch JSON never carries audio device state. Runtime
+// MIDI/audio configuration and sync policy are persisted separately through
 // BuildRuntimeConfigJSON/LoadRuntimeConfigJSON.
-// Legacy midiInstrument/audioDevice sections in patch JSON are tolerated and
-// ignored. Patch load applies parameter values only and leaves runtime
-// MIDI/audio/sync state untouched.
+//
+// Patch JSON is parameter-only unless the caller opts in: with
+// carryInstrument false, BuildPatchJSON writes schemaVersion 1 and no
+// midiInstrument section, byte-for-byte what a parameter-only patch has
+// always written. With carryInstrument true, it writes schemaVersion 2 and
+// a midiInstrument section holding the live instrument.
+//
+// LoadPatchJSON always applies parameter values only; the live instrument
+// argument passed to it is never read or modified. When loadedInstrument is
+// non-null and the root is schemaVersion 2 with a midiInstrument section
+// that parses, the parsed instrument is handed back through
+// *loadedInstrument for the caller to apply itself. In every other case
+// (loadedInstrument null, schemaVersion 1, section absent, section
+// unparseable) *loadedInstrument is left unset.
 bool LoadPatchJSON(JSON root, ParameterManager& manager,
                    MidiInstrumentConfig& instrument,
-                   AudioDeviceState* audioDevice = nullptr);
+                   AudioDeviceState* audioDevice = nullptr,
+                   std::optional<MidiInstrumentConfig>* loadedInstrument = nullptr);
 bool ValidatePatchJSON(JSON root);
 
 std::string TimestampPatchFilename(std::chrono::system_clock::time_point now);
@@ -159,7 +185,6 @@ private:
 
 struct PatchSerializationContext {
     std::size_t initialArenaCapacity = 256 * 1024;
-    std::size_t maxArenaCapacity = 8 * 1024 * 1024;
 
     // Caller-owned serialization arena. When non-null, ApplyPatchMessage resets
     // and reuses this arena for SerializeToJSON instead of heap-allocating one
@@ -174,11 +199,13 @@ struct PatchSerializationContext {
     // making the next ApplyPatchMessage call that reuses this same arena,
     // since that call resets the arena and clobbers the previous document's
     // backing memory. The caller must also keep the arena alive until the
-    // document has been consumed. PatchManager satisfies this automatically
-    // via its single-pending-save gate (HasPendingSave()/pendingSave_), which
-    // never issues a new serialize request while a prior one is outstanding —
-    // as long as all serialize requests flow through PatchManager, this
-    // ordering is guaranteed for you.
+    // document has been consumed. PatchManager satisfies this automatically:
+    // a host's own snapshot request (RequestHostSnapshot) is a serialize
+    // request exactly like a save, and PatchManager keeps at most one
+    // serialize request outstanding at a time, holding a save asked for
+    // while a snapshot is outstanding rather than issuing it early — as long
+    // as every serialize request, a host snapshot included, flows through
+    // PatchManager, this ordering is guaranteed for you.
     JsonArena* arena = nullptr;
 };
 
@@ -195,7 +222,9 @@ PatchApplyStatus ApplyPatchMessage(
     const PatchMessageIn& message, ParameterManager& manager,
     MidiInstrumentConfig& instrument, const MidiInstrumentConfig& defaultInstrument,
     AudioDeviceState& audioDevice, const AudioDeviceState& defaultAudioDevice,
-    MessageOutBus& outputBus, PatchSerializationContext context = {});
+    MessageOutBus& outputBus, PatchSerializationContext context = {},
+    bool carryInstrument = false,
+    std::optional<MidiInstrumentConfig>* loadedInstrument = nullptr);
 
 // Printf-safe (%s) status-name helpers for slog-7 INFO logging (Engine.hpp's
 // MessageThreadTick/ProcessBlock and the runtime shell's LogPatchCommand
@@ -229,20 +258,52 @@ const char* PatchCommandStatusName(PatchCommandStatus status);
 
 class PatchManager {
 public:
+    // parameterManager, when non-null, is the ParameterManager whose groups
+    // LoadPatchVersion provisions storage into (via
+    // ParameterManager::ProvisionStorageForPatchValues) immediately before
+    // pushing a parsed LoadFromJSON message, so a Load never reaches
+    // ApplyPatchMessage short of the storage its own depths need. Null is
+    // tolerated (no provisioning) for callers -- test fixtures that drive
+    // PatchManager directly, never through Engine -- that never exercise a
+    // patch needing more storage than they already provisioned by hand.
     explicit PatchManager(PatchMessageInBus* inputBus = nullptr, MessageOutBus* outputBus = nullptr,
+                          ParameterManager* parameterManager = nullptr,
                           std::size_t initialArenaCapacity = 256 * 1024);
 
     void SetBuses(PatchMessageInBus* inputBus, MessageOutBus* outputBus);
     const std::optional<std::filesystem::path>& CurrentPatchDirectory() const { return currentPatchDirectory_; }
     bool HasPendingSave() const { return pendingSave_.has_value(); }
 
+    // Records directory as the current patch directory without pushing any
+    // patch message, and without touching pendingSave_, heldSave_ or an
+    // outstanding snapshot request. A host names its restored current patch
+    // this way (Engine::NameCurrentPatch), which has already resolved and
+    // validated directory; this setter trusts its caller and does no
+    // validation of its own.
+    void SetCurrentPatchDirectory(std::optional<std::filesystem::path> directory) {
+        currentPatchDirectory_ = std::move(directory);
+    }
+
     PatchCommandResult NewPatch();
     PatchCommandResult SavePatch();
     PatchCommandResult SavePatchAs(const std::filesystem::path& patchDir);
     PatchCommandResult SavePatchAsOverwrite(const std::filesystem::path& patchDir);
     PatchCommandResult LoadPatch(const std::filesystem::path& path);
-    PatchCommandResult RevertPatch();
     PatchCommandResult ProcessResponses(std::chrono::system_clock::time_point now = std::chrono::system_clock::now());
+
+    // A host's own request for a serialized snapshot of the live patch,
+    // answered through the consumer SetHostSnapshotConsumer installs rather
+    // than by writing a file. Answers Busy and pushes nothing while a
+    // snapshot, a save, or a save held behind an outstanding snapshot is
+    // already outstanding; QueueFull when the push itself fails. At most one
+    // snapshot request is outstanding at a time.
+    PatchCommandResult RequestHostSnapshot(std::string patchName);
+
+    // Installs the callback ProcessResponses calls, on its own caller's
+    // thread, with the snapshot document as soon as it pops the matching
+    // response off the output bus. The document is only valid for the
+    // duration of that call.
+    void SetHostSnapshotConsumer(std::function<void(JsonDocument&)> consumer);
 
 private:
     struct PendingSave {
@@ -264,8 +325,19 @@ private:
 
     PatchMessageInBus* inputBus_ = nullptr;
     MessageOutBus* outputBus_ = nullptr;
+    ParameterManager* parameterManager_ = nullptr;
     std::optional<std::filesystem::path> currentPatchDirectory_;
     std::optional<PendingSave> pendingSave_;
+    // A save, save-as, or save-as-overwrite requested while a host snapshot
+    // is outstanding: its own preconditions (current patch present, target
+    // directory existing or not) already passed, but it has not yet reached
+    // the input bus. ProcessResponses dispatches it, through
+    // DispatchSerialize, right after the snapshot's consumer returns.
+    std::optional<PendingSave> heldSave_;
+    // The request id of a host snapshot pushed by RequestHostSnapshot and not
+    // yet answered by ProcessResponses.
+    std::optional<std::uint64_t> outstandingSnapshotRequestId_;
+    std::function<void(JsonDocument&)> hostSnapshotConsumer_;
     std::uint64_t nextRequestId_ = 1;
     std::size_t initialArenaCapacity_ = 256 * 1024;
 };

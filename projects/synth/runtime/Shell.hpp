@@ -1,20 +1,22 @@
 #pragma once
 
 // synth_runtime::ShellComponent / SYNTH_RUNTIME_MAIN — the generic JUCE
-// window chrome that wraps a synth_runtime::Runtime<App> (Task 2) into a
-// runnable application (Plan 3 Task 4).
+// window chrome that wraps a synth_runtime::Runtime<App> into a
+// runnable application.
 //
-// ShellComponent is a thin MainPane<App> host (Plan 4 Task 2, sru-1): it
+// ShellComponent is a thin MainPane<App> host: it
 // constructs a single MainPane<App>, `addAndMakeVisible`s it, and its
 // resized() fills the shell's full bounds with it. The former patch-command
-// row (New/Save/Save As/Load/Revert + patch name + status label), the
+// row (New/Save/Save As/Load + patch name + status label), the
 // MidiPanel strip, and the AudioPanel strip are gone from this layout --
 // MainPane's sidebar (Audio/Controllers/File) and content host are the only
-// chrome now. MainPane's Audio, File, and Controllers pages
-// (AudioConfigPage.hpp / FilePage.hpp / ControllersPage.hpp) are all real as
-// of Task 4 of Plan 4, which also deleted MidiPanel.hpp outright -- Runtime
+// chrome now. MainPane's Audio, Controllers, Sync, and File pages are all
+// resolved node trees built by RuntimeMainComponent (with
+// JuceRuntimeMainServices supplying the JUCE-side data) and drawn by the
+// shared portable renderer, not standalone JUCE components constructed one
+// per page. MidiPanel.hpp is deleted outright -- Runtime
 // no longer constructs or owns any MIDI UI component (see Runtime.hpp's
-// MidiConnections() accessor, which ControllersPage reads directly).
+// MidiConnections() accessor, which the Controllers page reads directly).
 //
 // Runtime's timer-driven repaint hook (Runtime::Start() calls it at the end
 // of every tick) is wired to repaint the shell, which now just means
@@ -41,33 +43,111 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include <algorithm>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
 
 namespace synth_runtime {
 
+// sprs-20: the shell no longer sizes its window to the composite (a phone-
+// width app root plus the sidebar can be far narrower than that composite,
+// see design.md section 2's "JUCE shell" note), so the pane can no longer
+// simply fill the shell's own bounds. Instead the pane is sized to the
+// larger of the shell and the last composite MainPane reports
+// (RuntimeMainComponent::ComposedBounds(), sprs-19) in each dimension,
+// scaled down (never up) so its width fits the shell, and wrapped in a
+// vertical-only juce::Viewport so a scaled-down composite that is still
+// taller than the shell scrolls rather than clips.
 template <synth::SynthApplication App>
 class ShellComponent : public juce::Component {
 public:
     explicit ShellComponent(Runtime<App>& runtime) : mainPane_(runtime) {
-        addAndMakeVisible(mainPane_);
+        viewport_.setViewedComponent(&mainPane_, false);
+        // Vertical scrolling only: the pane is scaled to fit the shell's
+        // width (scale = min(1, shell width / pane width)). A visible
+        // vertical scrollbar narrows the viewport's content area by its
+        // thickness, leaving the pane that much wider than the area, and
+        // drag-to-scroll then moves it sideways by that much. On touch
+        // platforms no scrollbar is drawn, so the pane fills the width
+        // exactly; dragging and the wheel still scroll vertically.
+#if JUCE_ANDROID || JUCE_IOS
+        viewport_.setScrollBarsShown(false, false, true, false);
+#else
+        viewport_.setScrollBarsShown(true, false);
+#endif
+        // Every input source scrolls on drag (not just touch, JUCE's
+        // "nonHover" default) so a mouse-driven desktop shell scrolls too; a
+        // node that takes drags (a knob, an encoder) opts out with
+        // juce::Component::setViewportIgnoreDragFlag(true)
+        // (PortableJuceBackend.hpp's RetainedDrawComponent::SetNode), so a
+        // drag starting on it reaches the control instead of scrolling.
+        viewport_.setScrollOnDragMode(juce::Viewport::ScrollOnDragMode::all);
+        addAndMakeVisible(viewport_);
     }
 
     // Called by Runtime's timer-driven repaint hook (wired in the
     // application wrapper's initialise(), after Start()) once per UI frame.
+    // The composite can change between ticks with no shell resize at all --
+    // a self-sized app surface (sprs-19) dispatching a new declared width is
+    // the case that matters here -- so the pane is re-laid-out on every
+    // refresh, not only on resized(). The pane is not repainted wholesale
+    // here: every node repaints itself when what it draws changed.
     void RepaintAll() {
         mainPane_.RefreshOnTick();
-        mainPane_.repaint();
+        LayoutMainPane(false);
     }
 
-    void resized() override { mainPane_.setBounds(getLocalBounds()); }
+    void resized() override {
+        viewport_.setBounds(getLocalBounds());
+        LayoutMainPane(true);
+    }
 
     MainPane<App>& GetMainPane() { return mainPane_; }
 
 private:
+    // Sizes and scales mainPane_ to fit the shell, then offers the shell's
+    // own bounds (sidebar-free) as the pane's content extent so an
+    // extent-aware app (sprs-13) tracks the actual window, not the pane's
+    // own (possibly stale or scaled) JUCE size. This runs the pane's
+    // resized() first (via setSize, offering the PANE's own bounds, wrong
+    // whenever pane != shell) and then corrects it: the last extent offered
+    // is always the shell's, per sprs-20.
+    //
+    // Laying out ends in OfferContentExtent(), which rebuilds the renderer's
+    // whole tree, so a tick in which neither the shell's size nor the
+    // composite's bounds changed skips it: RefreshOnTick() has already
+    // rebuilt the tree once this tick, and with nothing changed the pane's
+    // setSize() would not have re-offered its own bounds, so the last extent
+    // offered is still the shell's.
+    void LayoutMainPane(bool force) {
+        const synth::ui::Bounds composite = mainPane_.ComposedBounds();
+        const juce::Rectangle<int> shellBounds = getLocalBounds();
+        if (!force && shellBounds == lastShellBounds_ && composite.width == lastComposite_.width
+            && composite.height == lastComposite_.height) {
+            return;
+        }
+        lastShellBounds_ = shellBounds;
+        lastComposite_ = composite;
+        const float shellWidth = static_cast<float>(getWidth());
+        const float shellHeight = static_cast<float>(getHeight());
+        const float paneWidth = std::max(shellWidth, composite.width);
+        const float paneHeight = std::max(shellHeight, composite.height);
+        const float scale = paneWidth > 0.0f ? std::min(1.0f, shellWidth / paneWidth) : 1.0f;
+        mainPane_.setSize(static_cast<int>(paneWidth), static_cast<int>(paneHeight));
+        mainPane_.setTransform(juce::AffineTransform::scale(scale));
+        mainPane_.OfferContentExtent(synth_juce::JuceToUiBounds(getLocalBounds().toFloat()));
+    }
+
+    // Declared in this order so mainPane_ constructs before viewport_ needs
+    // to reference it, and so viewport_ (which holds a non-owning pointer
+    // to it) is destroyed first, in reverse declaration order.
     MainPane<App> mainPane_;
+    juce::Viewport viewport_;
+    juce::Rectangle<int> lastShellBounds_;
+    synth::ui::Bounds lastComposite_;
 };
 
 template <synth::SynthApplication App>
@@ -75,11 +155,20 @@ class RuntimeShellSession {
 public:
     // Launcher-side shell seam for apps that need caller-supplied data paths.
     // Call from the JUCE message thread after synth::SetCurrentThreadId has
-    // identified it as synth::ThreadId::Message.
-    explicit RuntimeShellSession(std::optional<synth::RuntimeDataPaths> paths = std::nullopt) {
+    // identified it as synth::ThreadId::Message. `beforeStart`, when set, runs
+    // just before Start(). No production caller passes one (real launches
+    // always take the real platform devices); a test supplies it to register
+    // a synthetic audio device type first, since Start() otherwise reaches
+    // real hardware with no seam to intervene afterward (JUCE only creates
+    // the real platform device types when its type list is still empty).
+    explicit RuntimeShellSession(std::optional<synth::RuntimeDataPaths> paths = std::nullopt,
+                                 std::function<void(Runtime<App>&)> beforeStart = {}) {
         runtime_ = std::make_unique<Runtime<App>>();
         if (paths.has_value()) {
             runtime_->SetRuntimeDataPathsOverride(std::move(*paths));
+        }
+        if (beforeStart) {
+            beforeStart(*runtime_);
         }
         runtime_->Start();
         shell_ = std::make_unique<ShellComponent<App>>(*runtime_);
@@ -116,17 +205,21 @@ public:
 template <synth::SynthApplication App>
 class RuntimeSessionOwnerFor final : public RuntimeSessionOwner {
 public:
-    explicit RuntimeSessionOwnerFor(synth::RuntimeDataPaths paths) : session_(std::move(paths)) {}
+    explicit RuntimeSessionOwnerFor(synth::RuntimeDataPaths paths,
+                                    std::function<void(Runtime<App>&)> beforeStart = {})
+        : session_(std::move(paths), std::move(beforeStart)) {}
 
     juce::Component& Component() override { return session_.Component(); }
+    Runtime<App>& GetRuntime() { return session_.GetRuntime(); }
 
 private:
     RuntimeShellSession<App> session_;
 };
 
 template <synth::SynthApplication App>
-std::unique_ptr<RuntimeSessionOwner> MakeRuntimeSessionOwner(synth::RuntimeDataPaths paths) {
-    return std::make_unique<RuntimeSessionOwnerFor<App>>(std::move(paths));
+std::unique_ptr<RuntimeSessionOwner> MakeRuntimeSessionOwner(
+    synth::RuntimeDataPaths paths, std::function<void(Runtime<App>&)> beforeStart = {}) {
+    return std::make_unique<RuntimeSessionOwnerFor<App>>(std::move(paths), std::move(beforeStart));
 }
 
 // The application wrapper instantiated by SYNTH_RUNTIME_MAIN(AppType). Owns
