@@ -20,6 +20,11 @@ export const browserRuntimeModules = Object.freeze([
   "midi.js",
   "package-loader.js",
   "persistence.js",
+  // Sorts before protocol.js and is imported by it: the versions live in a
+  // module Node can load from source, so a .js needs nothing built first. The extension is load-bearing: the site
+// packager copies dist/src/*.js into the browser runtime and drops .mjs as
+// Node-only tooling, so a module the browser fetches cannot be one.
+  "protocol-versions.js",
   "protocol.js",
   "ui.js",
   "worker.js",
@@ -140,7 +145,7 @@ function rollbackHtml(catalog, app) {
 `;
 }
 
-// tasks.md 7.5a. A whole-catalog publication ships apps the shipped runtime has
+// A whole-catalog publication ships apps the shipped runtime has
 // to be able to decode, and the only thing that decides that is the version
 // compiled into each module -- not the catalog metadata, which is written from
 // the manifest and would happily describe a stale build as current. Version 2

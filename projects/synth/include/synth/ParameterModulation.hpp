@@ -28,6 +28,7 @@ class Visualizer;
 namespace synth {
 
 class GridManager;
+class MasterClock;
 
 using ParameterId = std::uint32_t;
 using PhysicalEncoderId = std::uint32_t;
@@ -37,6 +38,16 @@ using GestureMask = std::uint64_t;
 enum class RangeKind {
     Unipolar,
     Bipolar,
+};
+
+// Selects which law Parameter::ComputeAtDepth applies to a TARGET parameter's
+// own routes under ModulationBlendMode::kAttenuverter: kBipolar is the
+// existing signed attenuverter law (unchanged for every parameter that does
+// not opt in); kOneWayAmount is the one-sided "every route only ever adds"
+// law an app opts a specific parameter into via ParameterConfig.
+enum class ModulationTargetKind {
+    kBipolar,
+    kOneWayAmount,
 };
 
 float ClampToRange(float value, RangeKind range);
@@ -122,6 +133,16 @@ inline float ModulationDepthTargetFromKnob(float normalizedKnob) {
     return std::copysign(magnitude, bipolar);
 }
 
+// The one-way amount law's own depth curve: the same positive-branch curve
+// shape as ModulationDepthTargetFromKnob, with the negative half floored to
+// zero rather than retained. A raw knob at or left of center (old bipolar
+// depth <= 0) resolves to exactly 0 (off); a raw knob right of center
+// resolves to the SAME positive magnitude ModulationDepthTargetFromKnob
+// already returns for it.
+inline float OneWayModulationDepthTargetFromKnob(float normalizedKnob) {
+    return std::max(0.0f, ModulationDepthTargetFromKnob(normalizedKnob));
+}
+
 enum class Status {
     Ok,
     InvalidConfig,
@@ -189,6 +210,13 @@ struct ParameterProcessingObserver {
     std::size_t activeRouteVisits = 0;
     std::size_t activeGestureVisits = 0;
     std::size_t neutralCollectionPasses = 0;
+    // spm-96: phase-1 visits the group skipped because the parameter was quiescent.
+    std::size_t topLevelQuiescentSkips = 0;
+};
+
+enum class ModulationBlendMode {
+    kCrossfade,
+    kAttenuverter,
 };
 
 struct ParameterGroupConfig {
@@ -201,6 +229,11 @@ struct ParameterGroupConfig {
     std::size_t targetComputeIntervalSamples = kDefaultTargetComputeIntervalSamples;
     float uiDisplayCenterAlpha = kDefaultUiDisplayCenterAlpha;
     float uiDisplaySpreadAlpha = kDefaultUiDisplaySpreadAlpha;
+    ModulationBlendMode modulationBlendMode = ModulationBlendMode::kCrossfade;
+    // spm-96: skip a quiescent top-level parameter's per-sample lite steps in
+    // ParameterGroup::ProcessSamplePhase1/2. Results are bit-identical either
+    // way; false runs every lite step, for tests that compare the two.
+    bool skipQuiescentParameters = true;
 
     bool IsValid() const;
 };
@@ -234,10 +267,18 @@ struct ParameterStorageBatch {
     std::vector<float> currentKnobValueArena;
     std::vector<float> uiDisplayCenterArena;
     std::vector<float> uiDisplaySpreadEnergyArena;
+    std::vector<float> lastRawValueArena;
+    std::vector<float> settledPhase2KnobArena;
     std::vector<Parameter*> modulationDepthArena;
     std::vector<float> sceneCenterArena;
     std::vector<float> gestureValueArena;
     std::vector<GestureMask> gestureActiveMaskArena;
+
+    // The next batch in the group's append-only chain. A reader walks this
+    // with an acquire load; the appender publishes it with a release store
+    // only after the batch pointed to is fully built, so a reader that
+    // follows the pointer sees a complete batch.
+    std::atomic<ParameterStorageBatch*> next{nullptr};
 };
 
 std::unique_ptr<ParameterStorageBatch> MakeParameterStorageBatch(const ParameterGroupConfig& config,
@@ -250,6 +291,7 @@ struct ModulatorMetadata {
     Color sourceColor;
     synth::ui::Visualizer* visualizer = nullptr;
     bool connected = false;
+    bool restsAtZero = false;
 };
 
 struct GestureMetadata {
@@ -266,6 +308,7 @@ struct ParameterConfig {
     Color baseColor = Color::Grey;
     synth::ui::Visualizer* visualizer = nullptr;
     std::vector<Color> indicatorColors;
+    ModulationTargetKind modulationTargetKind = ModulationTargetKind::kBipolar;
 };
 
 class Modulators {
@@ -340,6 +383,12 @@ public:
     bool CanAllocate() const;
     std::size_t AvailableParameterSlots() const;
     void AddParameterStorageBatch(std::unique_ptr<ParameterStorageBatch> batch);
+    // The free-slot floor RequestParameterStorageBatchIfLow reads before
+    // requesting a batch. Defaults to numModulators * 2 at construction; an
+    // app sets a larger watermark to keep more than one press's worth of
+    // storage ahead of AvailableParameterSlots().
+    void SetStorageLowWatermark(std::size_t watermark) { storageLowWatermark_ = watermark; }
+    std::size_t StorageLowWatermark() const { return storageLowWatermark_; }
     std::size_t ParameterCount() const { return parameterCount_; }
     std::size_t TopLevelParameterCount() const { return topLevelParameters_.size(); }
     std::size_t LiveLocalParameterCount() const { return liveLocalParameterCount_; }
@@ -356,7 +405,6 @@ public:
     bool GestureSelected(std::size_t gestureIx) const;
     void SetGestureValue(std::size_t gestureIx, float value);
     float GestureValue(std::size_t gestureIx) const;
-    void ClearGestureActiveFlagsForActiveSceneSelection(const SceneState& scene, std::size_t gestureIx);
     void ConfigureProcessingTiming(const ParameterProcessingTiming& timing);
     void ProcessSamplePhase1(std::uint64_t sampleIndex);
     void ProcessSamplePhase2();
@@ -373,6 +421,13 @@ private:
     void RegisterTopLevelParameter(Parameter& parameter);
     void RequestParameterStorageBatch(std::size_t minimumAdditionalParameters);
     void RequestParameterStorageBatchIfLow();
+    // The one place every batch-chain walk states its acquire order: the
+    // head read here, the next-pointer read in NextStorageBatch. Every walk
+    // (AvailableParameterSlots, CreateLocalParameter's allocation search,
+    // ParameterByLocalIndex) starts from FirstStorageBatch() and advances
+    // with NextStorageBatch, so the ordering is written once.
+    ParameterStorageBatch* FirstStorageBatch() const;
+    static ParameterStorageBatch* NextStorageBatch(const ParameterStorageBatch& batch);
 
     // Groups own parameter objects and all same-shaped per-parameter arenas.
     // Parameter instances hold spans into these arenas; callers must not move a
@@ -386,7 +441,14 @@ private:
     std::vector<Parameter*> topLevelParameters_;
     ParameterProcessingObserver* processingObserver_ = nullptr;
     std::vector<std::unique_ptr<Parameter>> parameters_;
-    std::vector<std::unique_ptr<ParameterStorageBatch>> extraStorageBatches_;
+    // The audio thread walks the batch chain through firstStorageBatch_ and
+    // each batch's next pointer, both acquire-loaded; the message thread is
+    // the only appender and is the only reader or writer of
+    // ownedStorageBatches_ and lastStorageBatch_, which exist for lifetime
+    // and O(1) append and are never walked by a reader.
+    std::atomic<ParameterStorageBatch*> firstStorageBatch_{nullptr};
+    ParameterStorageBatch* lastStorageBatch_ = nullptr;
+    std::vector<std::unique_ptr<ParameterStorageBatch>> ownedStorageBatches_;
     struct RecycledLocalSlot {
         Parameter* parameter = nullptr;
         ParameterStorageBatch* batch = nullptr;
@@ -394,7 +456,8 @@ private:
         std::size_t storageLocalIx = 0;
     };
     std::vector<RecycledLocalSlot> recycledLocalSlots_;
-    bool storageRequestPending_ = false;
+    std::atomic<bool> storageRequestPending_{false};
+    std::size_t storageLowWatermark_ = 0;
     std::vector<float> currentCenterScaleArena_;
     std::vector<float> targetCenterScaleArena_;
     std::vector<float> currentNormalizationOffsetArena_;
@@ -410,6 +473,8 @@ private:
     std::vector<float> currentKnobValueArena_;
     std::vector<float> uiDisplayCenterArena_;
     std::vector<float> uiDisplaySpreadEnergyArena_;
+    std::vector<float> lastRawValueArena_;
+    std::vector<float> settledPhase2KnobArena_;
     std::vector<Parameter*> modulationDepthArena_;
     std::vector<float> sceneCenterArena_;
     std::vector<float> gestureValueArena_;
@@ -466,6 +531,7 @@ public:
     const std::string& Name() const { return config_.name; }
     const std::string& ShortName() const { return config_.shortName; }
     RangeKind Range() const { return config_.range; }
+    ModulationTargetKind TargetKind() const { return config_.modulationTargetKind; }
     Color BaseColor() const { return config_.baseColor; }
     Color IndicatorColor(std::size_t voiceIx) const;
     std::size_t SwitchValues() const;
@@ -509,6 +575,25 @@ public:
     bool GestureActive(std::size_t sceneIx, std::size_t gestureIx) const;
     GestureMask GesturesAffectingMask() const;
 
+    // spm-96: clears quiescence, so the group runs this parameter's next lite
+    // steps in full. Called by every function that writes a value the lite
+    // steps read.
+    void Wake() {
+        phase1Quiescent_ = false;
+        phase2Settled_ = false;
+    }
+    bool Phase1Quiescent() const { return phase1Quiescent_; }
+    // spm-96: the skipped phase 1 of a quiescent parameter: the cached knob
+    // values return to the raw values its last phase 1 computed, which an
+    // application may have overwritten after phase 1 (ReplaceCachedKnobValue).
+    void RestoreLastRawKnobValues() {
+        for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
+            currentKnobValues_[voiceIx] = lastRawValues_[voiceIx];
+        }
+    }
+    // spm-96: phase 2 would change nothing: it last changed nothing, and the
+    // knob values it would read are bitwise the ones it read then.
+    bool Phase2WouldChangeNothing() const;
     std::span<float> CurrentDepthSlots(std::size_t voiceIx);
     std::span<const float> CurrentDepthSlots(std::size_t voiceIx) const;
     std::span<float> TargetDepthSlots(std::size_t voiceIx);
@@ -543,6 +628,13 @@ private:
     float EffectiveGestureWeight(const SceneState& scene, std::size_t gestureIx, float blend) const;
     void ResetSceneToDefault(std::size_t sceneIx, float defaultValue);
     void ResetModulationDepthToNeutral(const SceneState& scene);
+    // The hard floor (coordinator ruling, 2026-09-28): for a depth Parameter
+    // (id_ == kLocalParameterId) whose parent target opted into
+    // ModulationTargetKind::kOneWayAmount, raises a scene centre back up to
+    // kNeutralModulationDepthCenter ("off") if a write left it below that --
+    // a no-op for every other parameter. Called once at the end of every
+    // write path that can set sceneCenters_ directly.
+    void EnforceOneWayAmountFloor(std::size_t sceneIx);
     float ComputeRawCenter(const SceneState& scene) const;
     void ComputeAtDepth(const SceneState& scene, std::size_t recursionDepth, bool smoothTargetCenter);
     void SnapCurrentToTarget();
@@ -591,6 +683,15 @@ private:
     std::span<float> currentKnobValues_;
     std::span<float> uiDisplayCenters_;
     std::span<float> uiDisplaySpreadEnergies_;
+    // spm-96. lastRawValues_: each voice's GetRaw() from the last lite phase 1
+    // that ran. settledPhase2Knobs_: the cached knob values the last lite
+    // phase 2 read when it changed nothing.
+    std::span<float> lastRawValues_;
+    std::span<float> settledPhase2Knobs_;
+    // True after a lite phase 1 that changed nothing with no route active;
+    // true after a lite phase 2 that changed nothing. Cleared by Wake().
+    bool phase1Quiescent_ = false;
+    bool phase2Settled_ = false;
     std::span<Parameter*> modulationDepths_;
     std::span<float> sceneCenters_;
     std::span<float> gestureValues_;
@@ -616,6 +717,10 @@ public:
     void HandlePress(PhysicalEncoderId encoderId, std::span<const PhysicalEncoderId> physicalLayout);
     void HandleTick(PhysicalEncoderId encoderId, const SceneState& scene, float delta);
     void HandleSetAbsolute(PhysicalEncoderId encoderId, const SceneState& scene, float normalizedTarget);
+    // Resolves the encoder against this bank's own top-level mapping rather
+    // than whatever page it currently has visible, so the write reaches the
+    // parameter even while this bank is drilled into a modulation view.
+    void HandleSetAbsoluteOnTopLevel(PhysicalEncoderId encoderId, const SceneState& scene, float normalizedTarget);
     void ApplyModifierToTopLevel(Modifier modifier, const SceneState& scene);
     void Deselect();
     bool ShowingModulation() const;
@@ -640,6 +745,7 @@ private:
     void AssociateSlot(BankSlot& slot);
     Cell* FindVisibleCell(PhysicalEncoderId encoderId);
     const Cell* FindVisibleCell(PhysicalEncoderId encoderId) const;
+    Cell* FindTopLevelCell(PhysicalEncoderId encoderId);
     Parameter* EnsureModulationDepthParameter(Parameter& parameter, std::size_t modIx);
     bool CanOpenModulationView(const Parameter& parameter) const;
     std::size_t MissingModulationDepthCount(const Parameter& parameter) const;
@@ -700,16 +806,22 @@ private:
 struct ParameterMessageOut {
     enum class Type {
         ParameterStorageBatchNeeded,
+        AppAction,
+        AppEncoderPress,
     };
 
     Type type = Type::ParameterStorageBatchNeeded;
     ParameterGroup* group = nullptr;
     std::size_t minimumAdditionalParameters = 0;
-    std::size_t requestedParameters = 0;
+    std::size_t appActionIx = 0;
+    float value = 0.0f;
+    std::size_t slotIx = 0;
+    std::size_t position = 0;
 
     static ParameterMessageOut ParameterStorageBatchNeeded(ParameterGroup& group,
-                                                           std::size_t minimumAdditionalParameters,
-                                                           std::size_t requestedParameters);
+                                                           std::size_t minimumAdditionalParameters);
+    static ParameterMessageOut AppAction(std::size_t appActionIx, float value);
+    static ParameterMessageOut AppEncoderPress(std::size_t slotIx, std::size_t position);
 };
 
 class ParameterMessageOutBus {
@@ -726,6 +838,13 @@ private:
     std::atomic<std::size_t> head_{0};
     std::atomic<std::size_t> tail_{0};
     std::atomic<std::size_t> size_{0};
+};
+
+// A group and how many new depths a patch's values would need to create in
+// it, for ParameterManager::MissingDepthsForValuesJSON.
+struct DepthNeed {
+    ParameterGroup* group = nullptr;
+    std::size_t count = 0;
 };
 
 class ParameterManager {
@@ -792,6 +911,23 @@ public:
     const Parameter* FindParameterByName(std::string_view name) const;
     JSON ParameterValuesToJSON(JsonArena& arena) const;
     bool LoadParameterValuesFromJSON(JSON json);
+    // How many depths parameterValues names, at every level, that do not
+    // exist yet -- one DepthNeed per group that is short any, reached the
+    // same way LoadParameterValuesFromJSON reaches parameters. Creates
+    // nothing; ProvisionStorageForPatchValues below provisions storage from
+    // this count before a caller applies the same values.
+    std::vector<DepthNeed> MissingDepthsForValuesJSON(JSON parameterValues);
+    // Provisions storage, on the message thread, for every group
+    // parameterValues would leave short: for each DepthNeed
+    // MissingDepthsForValuesJSON reports whose group's current
+    // AvailableParameterSlots() would not already cover need.count plus that
+    // group's own StorageLowWatermark(), adds one storage batch sized at
+    // count + watermark -- the same AddParameterStorageBatch call the
+    // message thread's own low-water top-up uses. A group with enough room
+    // already is left untouched. Every LoadFromJSON push site calls this
+    // immediately before pushing, so the message that reaches
+    // ApplyPatchMessage is never short of the storage its own depths need.
+    void ProvisionStorageForPatchValues(JSON parameterValues);
     std::size_t CollectNeutralLocalParameters();
     void ComputeAllParameters();
     // Control-rate target computation for the steady-state audio pump:
@@ -818,6 +954,7 @@ public:
     bool SetSceneEndpoints(std::size_t leftScene, std::size_t rightScene);
     bool SetLessSelectedScene(std::size_t sceneIx);
     void SetSceneBlend(float blend);
+    void IncDecSceneBlend(float delta);
 
     std::size_t NumGroups() const { return groups_.size(); }
 
@@ -842,6 +979,13 @@ public:
     void HandleTick(std::size_t slotIx, std::size_t position, float delta);
     void HandleSetAbsolute(std::size_t slotIx, std::size_t position, float normalizedTarget,
                            std::uint64_t absoluteEpoch = 0);
+    // Writes to the bank at bankIx directly, bypassing the addressed slot's
+    // bank selection entirely: never calls BankSlot::SelectBank, never
+    // touches selectedBank_, never goes through BankSlot::Owns. slotIx is
+    // consulted only to resolve position to a physical encoder through that
+    // slot's own layout, and to record absoluteEpoch on that slot.
+    void HandleSetAbsoluteOnBank(std::size_t bankIx, std::size_t slotIx, std::size_t position,
+                                 float normalizedTarget, std::uint64_t absoluteEpoch = 0);
     bool SelectBankForSlot(std::size_t slotIx, std::size_t bankIx);
     bool NavigateBankForSlot(std::size_t slotIx, BankDirection direction);
 
@@ -874,7 +1018,6 @@ public:
     float GestureValue(std::size_t gestureIx) const;
     GestureMetadata& GestureMetadataAt(std::size_t gestureIx);
     const GestureMetadata& GestureMetadataAt(std::size_t gestureIx) const;
-    void ClearGestureActiveFlagsForActiveSceneSelection(std::size_t gestureIx);
 
     std::unique_ptr<UIState> CreateUIState() const;
     void PopulateUIState(UIState& state) const;
@@ -950,6 +1093,30 @@ struct MessageIn {
         SelectGrid,
         NextParamBank,
         PrevParamBank,
+        // Appended rather than inserted alongside ParamSetAbsolute so every
+        // existing enumerator keeps its ordinal (see SystemMessageSortKey's
+        // declaration-order dependency in MidiConfigBlocks.hpp).
+        ParamSetAbsoluteOnBank,
+        AppAction,
+        HoldDrill,
+        Shift,
+        // Appended after Shift rather than beside SetSceneBlend so every
+        // existing enumerator keeps its ordinal.
+        SceneBlendIncDec,
+        // Appended after SceneBlendIncDec so every existing enumerator keeps
+        // its ordinal.
+        TempoBpmIncDec,
+        SetTempoBpmNormalized,
+        // Appended after SetTempoBpmNormalized, the last enumerator, so every
+        // existing enumerator keeps its ordinal. Carries an app-defined
+        // command number (a namespace of its own, separate from appActionIx)
+        // and a value; Sheaf never interprets either. Produced only by an
+        // app's own surface, after it has already decided what to do, and
+        // applied on the audio thread by that app's own ApplyAppCommand hook
+        // (AppConcepts.hpp's HasAppCommands) -- unlike AppAction, which Sheaf
+        // forwards to the message thread for the app's PortableSurface to
+        // dispatch.
+        AppCommand,
     };
 
     std::uint64_t timestamp = 0;
@@ -961,6 +1128,11 @@ struct MessageIn {
     std::size_t gestureIx = 0;
     std::size_t bankIx = 0;
     std::size_t sceneIx = 0;
+    std::size_t appActionIx = 0;
+    // The app-defined command number an AppCommand message carries; unused
+    // by every other type. A field of its own beside appActionIx since the
+    // two are different namespaces (see AppCommand's declaration above).
+    std::size_t command = 0;
     std::uint64_t absoluteEpoch = 0;
     float value = 0.0f;
     float delta = 0.0f;
@@ -975,6 +1147,13 @@ struct MessageIn {
     static MessageIn ParamIncDec(std::uint64_t timestamp, std::size_t slotIx, std::size_t position, float delta);
     static MessageIn ParamSetAbsolute(std::uint64_t timestamp, std::size_t slotIx, std::size_t position,
                                       float normalizedValue, std::uint64_t absoluteEpoch = 0);
+    // Addressed to bankIx directly rather than to whatever bank slotIx's
+    // BankSlot currently has selected; slotIx still supplies the encoder
+    // layout used to resolve position, exactly as it does for
+    // ParamSetAbsolute.
+    static MessageIn ParamSetAbsoluteOnBank(std::uint64_t timestamp, std::size_t bankIx, std::size_t slotIx,
+                                            std::size_t position, float normalizedValue,
+                                            std::uint64_t absoluteEpoch = 0);
     static MessageIn ParamPush(std::uint64_t timestamp, std::size_t slotIx, std::size_t position);
     static MessageIn ToggleReset(std::uint64_t timestamp);
     static MessageIn SetReset(std::uint64_t timestamp, bool held);
@@ -1006,6 +1185,13 @@ struct MessageIn {
                                         int gridX, int gridY, std::uint8_t pressure);
     static MessageIn SelectGrid(std::uint64_t timestamp, std::size_t gridSlotIx,
                                 std::size_t gridIx);
+    static MessageIn AppAction(std::uint64_t timestamp, std::size_t appActionIx, float value);
+    static MessageIn HoldDrill(std::uint64_t timestamp, bool held);
+    static MessageIn Shift(std::uint64_t timestamp, bool held);
+    static MessageIn SceneBlendIncDec(std::uint64_t timestamp, float delta);
+    static MessageIn TempoBpmIncDec(std::uint64_t timestamp, float deltaBpm);
+    static MessageIn SetTempoBpmNormalized(std::uint64_t timestamp, float normalized);
+    static MessageIn AppCommand(std::uint64_t timestamp, std::size_t command, float value);
 };
 
 class MessageInBus {
@@ -1015,6 +1201,15 @@ public:
     void SetParameterManager(ParameterManager* manager) { manager_ = manager; }
     void SetGridManager(GridManager* manager) { gridManager_ = manager; }
     void SetManager(ParameterManager* manager) { SetParameterManager(manager); }
+    void SetAppActionOut(ParameterMessageOutBus* out, bool forwardEncoderPress) {
+        appActionOut_ = out;
+        forwardEncoderPress_ = forwardEncoderPress;
+    }
+    void SetTempoClock(MasterClock* clock, float minimumBpm, float maximumBpm) {
+        tempoClock_ = clock;
+        tempoMinimumBpm_ = minimumBpm;
+        tempoMaximumBpm_ = maximumBpm;
+    }
     bool Push(const MessageIn& message);
     bool Pop(MessageIn& message, std::uint64_t timestamp);
     void Apply(const MessageIn& message);
@@ -1025,6 +1220,11 @@ public:
 private:
     ParameterManager* manager_ = nullptr;
     GridManager* gridManager_ = nullptr;
+    ParameterMessageOutBus* appActionOut_ = nullptr;
+    bool forwardEncoderPress_ = false;
+    MasterClock* tempoClock_ = nullptr;
+    float tempoMinimumBpm_ = 0.0f;
+    float tempoMaximumBpm_ = 0.0f;
     std::vector<MessageIn> queue_;
     std::atomic<std::size_t> head_{0};
     std::atomic<std::size_t> tail_{0};

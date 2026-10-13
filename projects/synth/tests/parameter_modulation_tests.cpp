@@ -1336,6 +1336,110 @@ TEST_CASE(validated_scene_endpoint_setter_preserves_state_on_reject) {
     REQUIRE_NEAR(manager.Scene().blend, 0.25f, 0.0001f);
 }
 
+TEST_CASE(SceneBlendIncrementAddsToTheBlendAndClamps) {
+    synth::ParameterManager manager;
+    manager.SetSceneBlend(0.95f);
+
+    manager.IncDecSceneBlend(0.1f);
+    REQUIRE_NEAR(manager.Scene().blend, 1.0f, 0.0001f);
+
+    manager.IncDecSceneBlend(-2.0f);
+    REQUIRE_NEAR(manager.Scene().blend, 0.0f, 0.0001f);
+}
+
+// The above drives ParameterManager::IncDecSceneBlend directly; this drives
+// the same increment through MessageInBus::Apply's own SceneBlendIncDec
+// case, with a real ParameterManager attached, so that switch case is
+// checked and not only the method it calls.
+TEST_CASE(SceneBlendIncrementReachesTheParameterManagerThroughTheMessageBus) {
+    synth::ParameterManager manager;
+    manager.SetSceneBlend(0.5f);
+    synth::MessageInBus bus(&manager);
+
+    REQUIRE_TRUE(bus.Push(synth::MessageIn::SceneBlendIncDec(0, 0.2f)));
+    bus.Process(0);
+    REQUIRE_NEAR(manager.Scene().blend, 0.7f, 0.0001f);
+
+    REQUIRE_TRUE(bus.Push(synth::MessageIn::SceneBlendIncDec(1, 10.0f)));
+    bus.Process(1);
+    REQUIRE_NEAR(manager.Scene().blend, 1.0f, 0.0001f);
+}
+
+TEST_CASE(TempoMessagesAreInertWithoutAClockRangeOrInternalTempo) {
+    // A clock, a range, and no external slaving: the same message moves the
+    // tempo. Without this block the three inert cases below cannot be told
+    // apart from a bus that never applies a tempo message at all.
+    {
+        synth::MasterClock clock;
+        const double before = clock.TempoBpm();
+        synth::MessageInBus bus;
+        bus.SetTempoClock(&clock, 30.0f, 300.0f);
+        REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(0, 5.0f)));
+        bus.Process(0);
+        REQUIRE_TRUE(std::abs(clock.TempoBpm() - before) > 0.0001);
+    }
+
+    // No clock at all.
+    {
+        synth::MessageInBus bus;
+        REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(0, 5.0f)));
+        bus.Process(0);
+    }
+
+    // A clock but no range (min == max, the never-set default).
+    {
+        synth::MasterClock clock;
+        const double before = clock.TempoBpm();
+        synth::MessageInBus bus;
+        bus.SetTempoClock(&clock, 0.0f, 0.0f);
+        REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(0, 5.0f)));
+        bus.Process(0);
+        REQUIRE_NEAR(clock.TempoBpm(), before, 0.0001);
+    }
+
+    // A clock slaved to external MIDI.
+    {
+        synth::MasterClock clock;
+        synth::SyncConfig config;
+        config.receiveClock = true;
+        REQUIRE_TRUE(clock.ApplySyncConfig(config));
+        const double before = clock.TempoBpm();
+        synth::MessageInBus bus;
+        bus.SetTempoClock(&clock, 30.0f, 300.0f);
+        REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(0, 5.0f)));
+        bus.Process(0);
+        REQUIRE_NEAR(clock.TempoBpm(), before, 0.0001);
+    }
+}
+
+TEST_CASE(TempoIncrementClampsAtBothEndsOfTheRange) {
+    synth::MasterClock clock;
+    clock.SetTempoBpm(31.0);
+    synth::MessageInBus bus;
+    bus.SetTempoClock(&clock, 30.0f, 300.0f);
+
+    REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(0, -5.0f)));
+    bus.Process(0);
+    REQUIRE_NEAR(clock.TempoBpm(), 30.0, 0.0001);
+
+    REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(1, -5.0f)));
+    bus.Process(1);
+    REQUIRE_NEAR(clock.TempoBpm(), 30.0, 0.0001);
+
+    REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(2, 5.0f)));
+    bus.Process(2);
+    REQUIRE_NEAR(clock.TempoBpm(), 35.0, 0.0001);
+
+    clock.SetTempoBpm(299.0);
+    REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(3, 5.0f)));
+    bus.Process(3);
+    REQUIRE_NEAR(clock.TempoBpm(), 300.0, 0.0001);
+
+    REQUIRE_TRUE(bus.Push(synth::MessageIn::TempoBpmIncDec(4, -5.0f)));
+    bus.Process(4);
+    REQUIRE_NEAR(clock.TempoBpm(), 295.0, 0.0001);
+}
+
 TEST_CASE(parameter_appearance_resolves_empty_single_and_exact_indicator_palettes) {
     synth::ParameterManager manager;
     auto& group = manager.CreateGroup({
@@ -2400,6 +2504,789 @@ TEST_CASE(ui_state_min_max_reports_full_range_when_modulation_is_overfull) {
     REQUIRE_NEAR(ui.maxValues[0].load(), 1.0f, 0.0001f);
 }
 
+// Inverts ModulationDepthTargetFromKnob (synth/ParameterModulation.hpp) so a
+// test can command an exact raw signed modulation depth by setting a depth
+// parameter's own knob (SceneCenter) to the value that curves to it -- the
+// same curve ComputeAtDepth's per-route target-depth line already applies
+// via depthParameter->GetRaw().
+float KnobForRawModulationDepth(float rawDepth) {
+    if (rawDepth == 0.0f) {
+        return 0.5f;
+    }
+    const float magnitude = std::fabs(rawDepth);
+    const float base = synth::kModulationDepthTargetBase;
+    const float bipolarAbs = std::log(magnitude * (base - 1.0f) + 1.0f) / std::log(base);
+    const float bipolar = std::copysign(bipolarAbs, rawDepth);
+    return 0.5f + 0.5f * bipolar;
+}
+
+TEST_CASE(attenuverter_center_scale_stays_one_regardless_of_depth) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(1.0f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+
+    REQUIRE_NEAR(carrier.TargetCenterScale(0), 1.0f, 0.0001f);
+}
+
+TEST_CASE(attenuverter_normalization_offset_is_half_the_signed_depth_sum) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 2,
+        .numScenes = 1,
+        .maxParameters = 3,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    float source1 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    std::array<float*, 1> src1{&source1};
+    group.SetModulationSource(0, src0, {.connected = true});
+    group.SetModulationSource(1, src1, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+    synth::Parameter* depth0 = carrier.EnsureModulationDepth(0);
+    synth::Parameter* depth1 = carrier.EnsureModulationDepth(1);
+    REQUIRE_TRUE(depth0 != nullptr);
+    REQUIRE_TRUE(depth1 != nullptr);
+    depth0->SceneCenter(0) = KnobForRawModulationDepth(0.8f);
+    depth1->SceneCenter(0) = KnobForRawModulationDepth(0.6f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+
+    REQUIRE_NEAR(carrier.TargetNormalizationOffset(0), -0.7f, 0.0005f);
+    REQUIRE_NEAR(carrier.TargetDepthForSource(0, 0), 0.8f, 0.0005f);
+    REQUIRE_NEAR(carrier.TargetDepthForSource(0, 1), 0.6f, 0.0005f);
+}
+
+TEST_CASE(attenuverter_full_depth_swings_half_the_range_not_the_bare_source) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(1.0f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+
+    // Full depth keeps the knob at full weight -- unlike kCrossfade, which
+    // hands the destination fully to the source (centerScale 0) at this
+    // exact weight sum and, at this test's own center/source values, would
+    // otherwise read the identical numbers below by coincidence.
+    REQUIRE_NEAR(carrier.TargetCenterScale(0), 1.0f, 0.0001f);
+
+    group.GetModulators().Value(0, 0) = 1.0f;
+    REQUIRE_NEAR(carrier.GetRaw(0), 1.0f, 0.0001f);
+
+    group.GetModulators().Value(0, 0) = 0.0f;
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.0f, 0.0001f);
+
+    group.GetModulators().Value(0, 0) = 0.5f;
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.5f, 0.0001f);
+}
+
+TEST_CASE(attenuverter_negative_depth_inverts_the_source) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(-1.0f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+
+    REQUIRE_NEAR(carrier.TargetCenterScale(0), 1.0f, 0.0001f);
+
+    // center (0.5) cancels exactly against this route's own normalization
+    // offset, so GetRaw() - center reads that route's own contribution
+    // directly, with no clamp ambiguity (both readings land exactly on a
+    // range endpoint, never past it).
+    group.GetModulators().Value(0, 0) = 1.0f;
+    REQUIRE_NEAR(carrier.GetRaw(0) - 0.5f, -0.5f, 0.0005f);
+
+    group.GetModulators().Value(0, 0) = 0.0f;
+    REQUIRE_NEAR(carrier.GetRaw(0) - 0.5f, 0.5f, 0.0005f);
+}
+
+TEST_CASE(attenuverter_dynamic_min_max_is_the_swings_reach) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(0.4f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+
+    // At this test's own center (0.5), kCrossfade's weighted-average min/max
+    // happens to land on the identical 0.3/0.7 numbers below by coincidence
+    // (center*(1-weightSum) reduces to center-0.5*weightSum only because
+    // center is exactly 0.5); the center scale does not coincide.
+    REQUIRE_NEAR(carrier.TargetCenterScale(0), 1.0f, 0.0001f);
+
+    synth::Parameter::UIState ui(1);
+    carrier.PopulateUIState(ui);
+    REQUIRE_NEAR(ui.minValues[0].load(), 0.3f, 0.0005f);
+    REQUIRE_NEAR(ui.maxValues[0].load(), 0.7f, 0.0005f);
+}
+
+TEST_CASE(attenuverter_reach_clamps_to_the_parameter_range) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.8f});
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(1.0f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+
+    synth::Parameter::UIState ui(1);
+    carrier.PopulateUIState(ui);
+    REQUIRE_NEAR(ui.maxValues[0].load(), 1.0f, 0.0005f);
+    REQUIRE_NEAR(ui.minValues[0].load(), 0.3f, 0.0005f);
+}
+
+TEST_CASE(attenuverter_rest_at_zero_source_contributes_nothing_at_its_own_rest) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 2,
+        .numScenes = 1,
+        .maxParameters = 8,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float restingEfSource = 0.0f;
+    float oppositeExtremeSource = 0.0f;
+    std::array<float*, 1> efSrc{&restingEfSource};
+    std::array<float*, 1> otherSrc{&oppositeExtremeSource};
+    group.SetModulationSource(0, efSrc, {.connected = true, .restsAtZero = true});
+    group.SetModulationSource(1, otherSrc, {.connected = true, .restsAtZero = false});
+
+    const std::array<float, 3> centers{0.0f, 0.5f, 1.0f};
+    for (std::size_t centerIx = 0; centerIx < centers.size(); ++centerIx) {
+        const float center = centers[centerIx];
+        auto& efCarrier = manager.CreateParameter(
+            group, {.name = "EfCarrier" + std::to_string(centerIx), .defaultValue = center});
+        synth::Parameter* efDepth = efCarrier.EnsureModulationDepth(0);
+        REQUIRE_TRUE(efDepth != nullptr);
+        efDepth->SceneCenter(0) = KnobForRawModulationDepth(1.0f);
+        efCarrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+        efCarrier.ProcessLite();
+        group.GetModulators().Value(0, 0) = 0.0f;
+        REQUIRE_NEAR(efCarrier.GetRaw(0), center, 0.0005f);
+    }
+
+    // Contrast, at one center away from the lower clamp: the identical
+    // stored source value (0) means a different thing to a restsAtZero =
+    // false route, whose own rest is 0.5, not 0.0 -- it reads center - 0.5,
+    // not center, at that same stored value.
+    auto& defaultCarrier = manager.CreateParameter(group, {.name = "DefaultCarrier", .defaultValue = 0.5f});
+    synth::Parameter* defaultDepth = defaultCarrier.EnsureModulationDepth(1);
+    REQUIRE_TRUE(defaultDepth != nullptr);
+    defaultDepth->SceneCenter(0) = KnobForRawModulationDepth(1.0f);
+    defaultCarrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    defaultCarrier.ProcessLite();
+    group.GetModulators().Value(0, 1) = 0.0f;
+    REQUIRE_NEAR(defaultCarrier.GetRaw(0), 0.0f, 0.0005f);  // center (0.5) - 0.5
+}
+
+TEST_CASE(attenuverter_rest_at_half_source_contributes_nothing_at_its_own_rest) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    // A center away from 0.5 -- at center 0.5 with the source held at 0.5
+    // too, kCrossfade's weighted average of two equal endpoints (center and
+    // source) reads 0.5 regardless of weight, coinciding with the
+    // attenuverter result by construction rather than distinguishing it.
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.7f});
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(1.0f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+
+    REQUIRE_NEAR(carrier.TargetCenterScale(0), 1.0f, 0.0001f);
+
+    group.GetModulators().Value(0, 0) = 0.5f;
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.7f, 0.0005f);
+}
+
+TEST_CASE(attenuverter_rest_at_zero_source_reaches_only_half_the_range_at_full_signal) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true, .restsAtZero = true});
+
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.0f});
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(1.0f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+
+    group.GetModulators().Value(0, 0) = 1.0f;
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.5f, 0.0005f);
+
+    synth::Parameter::UIState ui(1);
+    carrier.PopulateUIState(ui);
+    REQUIRE_NEAR(ui.minValues[0].load(), 0.0f, 0.0005f);
+    REQUIRE_NEAR(ui.maxValues[0].load(), 0.5f, 0.0005f);
+}
+
+// This test exists to prove the "no new branching for recursion" claim in
+// design.md §2 rather than to drive new production code: a modulation-depth
+// Parameter is always materialized into its parent's own ParameterGroup
+// (Parameter::EnsureModulationDepth/AssignModulationDepth), so a
+// depth-of-a-depth lands in the identical group, and therefore under the
+// identical modulationBlendMode, as its top-level ancestor, with no
+// additional per-parameter configuration.
+TEST_CASE(nested_depth_inherits_its_parents_attenuverter_mode) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 3,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& topLevel = manager.CreateParameter(group, {.name = "TopLevel", .defaultValue = 0.5f});
+    synth::Parameter* depth = topLevel.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    synth::Parameter* nestedDepth = depth->EnsureModulationDepth(0);
+    REQUIRE_TRUE(nestedDepth != nullptr);
+
+    REQUIRE_TRUE(&depth->Group() == &topLevel.Group());
+    REQUIRE_TRUE(&nestedDepth->Group() == &topLevel.Group());
+
+    topLevel.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+
+    REQUIRE_NEAR(nestedDepth->TargetCenterScale(0), 1.0f, 0.0001f);
+}
+
+TEST_CASE(one_way_amount_knob_curve_matches_positive_branch_and_zeroes_the_rest) {
+    REQUIRE_NEAR(synth::OneWayModulationDepthTargetFromKnob(0.75f),
+                 synth::ModulationDepthTargetFromKnob(0.75f), 1e-6f);
+    REQUIRE_NEAR(synth::OneWayModulationDepthTargetFromKnob(0.25f), 0.0f, 1e-6f);
+    REQUIRE_NEAR(synth::OneWayModulationDepthTargetFromKnob(0.5f), 0.0f, 1e-6f);
+
+    // Swept at every hundredth, mirroring
+    // compute_ramp_step_never_progresses_below_the_floor_at_any_curve's own
+    // sweep style: the one-way curve never returns a negative value.
+    for (int hundredth = 0; hundredth <= 100; ++hundredth) {
+        const float knob = static_cast<float>(hundredth) / 100.0f;
+        REQUIRE_TRUE(synth::OneWayModulationDepthTargetFromKnob(knob) >= 0.0f);
+    }
+}
+
+TEST_CASE(one_way_amount_nested_depth_of_depth_inherits_the_one_way_law) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 3,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& topLevel = manager.CreateParameter(group, {
+        .name = "TopLevel",
+        .defaultValue = 0.5f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* depth = topLevel.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    synth::Parameter* nestedDepth = depth->EnsureModulationDepth(0);
+    REQUIRE_TRUE(nestedDepth != nullptr);
+
+    REQUIRE_TRUE(depth->TargetKind() == synth::ModulationTargetKind::kOneWayAmount);
+    REQUIRE_TRUE(nestedDepth->TargetKind() == synth::ModulationTargetKind::kOneWayAmount);
+}
+
+TEST_CASE(one_way_amount_target_adds_reach_and_ignores_disconnected_sources) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {
+        .name = "Carrier",
+        .defaultValue = 0.3f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(0.6f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+    group.GetModulators().Value(0, 0) = 0.8f;
+    // Crossfade, not add-only: (1 - 0.6)*0.3 + 0.6*0.8 = 0.12 + 0.48 = 0.60.
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.60f, 0.0005f);
+
+    // Disconnect the source: the route reads 0 regardless of its own stored
+    // value (still 0.8) or the depth that was set -- the knob alone comes
+    // back, unchanged.
+    group.GetModulators().Metadata(0).connected = false;
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.3f, 0.0005f);
+}
+
+TEST_CASE(one_way_amount_two_routes_crossfade_and_renormalize_past_the_top) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 2,
+        .numScenes = 1,
+        .maxParameters = 9,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    float source1 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    std::array<float*, 1> src1{&source1};
+    group.SetModulationSource(0, src0, {.connected = true});
+    group.SetModulationSource(1, src1, {.connected = true, .restsAtZero = true});
+
+    // Two routes crossfade against the knob: knob 0.3, depth 0.5 at source
+    // 1.0, depth 0.3 at a resting envelope follower reading source 0.0.
+    // W = 0.8, (1 - 0.8)*0.3 + (0.5*1.0 + 0.3*0.0) = 0.06 + 0.5 = 0.56.
+    auto& sumCarrier = manager.CreateParameter(group, {
+        .name = "SumCarrier",
+        .defaultValue = 0.3f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* sumDepth0 = sumCarrier.EnsureModulationDepth(0);
+    synth::Parameter* sumDepth1 = sumCarrier.EnsureModulationDepth(1);
+    REQUIRE_TRUE(sumDepth0 != nullptr);
+    REQUIRE_TRUE(sumDepth1 != nullptr);
+    sumDepth0->SceneCenter(0) = KnobForRawModulationDepth(0.5f);
+    sumDepth1->SceneCenter(0) = KnobForRawModulationDepth(0.3f);
+    sumCarrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    sumCarrier.ProcessLite();
+    group.GetModulators().Value(0, 0) = 1.0f;
+    group.GetModulators().Value(0, 1) = 0.0f;
+    REQUIRE_NEAR(sumCarrier.GetRaw(0), 0.56f, 0.0005f);
+
+    // Two routes with W <= 1: knob 0.2, depth 0.5 at source 1.0 and depth 0.4
+    // at source 1.0 -- W = 0.9, (1 - 0.9)*0.2 + 0.9 = 0.92, with neither
+    // route's own stored depth renormalized (W has not crossed 1).
+    auto& subCeilingCarrier = manager.CreateParameter(group, {
+        .name = "SubCeilingCarrier",
+        .defaultValue = 0.2f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* subCeilingDepth0 = subCeilingCarrier.EnsureModulationDepth(0);
+    synth::Parameter* subCeilingDepth1 = subCeilingCarrier.EnsureModulationDepth(1);
+    REQUIRE_TRUE(subCeilingDepth0 != nullptr);
+    REQUIRE_TRUE(subCeilingDepth1 != nullptr);
+    subCeilingDepth0->SceneCenter(0) = KnobForRawModulationDepth(0.5f);
+    subCeilingDepth1->SceneCenter(0) = KnobForRawModulationDepth(0.4f);
+    subCeilingCarrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    subCeilingCarrier.ProcessLite();
+    group.GetModulators().Value(0, 0) = 1.0f;
+    group.GetModulators().Value(0, 1) = 1.0f;
+    REQUIRE_NEAR(subCeilingCarrier.GetRaw(0), 0.92f, 0.0005f);
+    REQUIRE_NEAR(subCeilingCarrier.TargetDepthForSource(0, 0), 0.5f, 0.0005f);
+    REQUIRE_NEAR(subCeilingCarrier.TargetDepthForSource(0, 1), 0.4f, 0.0005f);
+
+    // Two routes with W > 1: knob 0.2, depth 0.8 at source 1.0 and depth 0.6
+    // at source 0.0 -- W = 1.4 > 1, so the knob drops out entirely and both
+    // depths renormalize by W: 0.8/1.4 = 0.5714286, 0.6/1.4 = 0.4285714, and
+    // the result is Sigma (d/W)*u = 0.5714286*1.0 + 0.4285714*0.0 =
+    // 0.5714286.
+    auto& renormalizeCarrier = manager.CreateParameter(group, {
+        .name = "RenormalizeCarrier",
+        .defaultValue = 0.2f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* renormalizeDepth0 = renormalizeCarrier.EnsureModulationDepth(0);
+    synth::Parameter* renormalizeDepth1 = renormalizeCarrier.EnsureModulationDepth(1);
+    REQUIRE_TRUE(renormalizeDepth0 != nullptr);
+    REQUIRE_TRUE(renormalizeDepth1 != nullptr);
+    renormalizeDepth0->SceneCenter(0) = KnobForRawModulationDepth(0.8f);
+    renormalizeDepth1->SceneCenter(0) = KnobForRawModulationDepth(0.6f);
+    renormalizeCarrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    renormalizeCarrier.ProcessLite();
+    group.GetModulators().Value(0, 0) = 1.0f;
+    group.GetModulators().Value(0, 1) = 0.0f;
+    REQUIRE_NEAR(renormalizeCarrier.GetRaw(0), 0.5714286f, 0.0005f);
+    REQUIRE_NEAR(renormalizeCarrier.TargetDepthForSource(0, 0), 0.5714286f, 0.0005f);
+    REQUIRE_NEAR(renormalizeCarrier.TargetDepthForSource(0, 1), 0.4285714f, 0.0005f);
+}
+
+TEST_CASE(one_way_amount_ignores_restsatzero_and_reads_the_route_directly) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true, .restsAtZero = true});
+
+    auto& carrier = manager.CreateParameter(group, {
+        .name = "Carrier",
+        .defaultValue = 0.0f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(1.0f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+    group.GetModulators().Value(0, 0) = 0.3f;
+    // NOT halved (unlike the bipolar law's own restsAtZero branch, which
+    // would read 0.15 at this same depth and source): the one-way law
+    // ignores restsAtZero and reads the route directly.
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.3f, 0.0005f);
+}
+
+TEST_CASE(one_way_amount_band_is_visible_at_full_knob) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    // Knob at 1.0, full depth 0.25: the crossfade law still leaves room for
+    // modulation, unlike the add-only law (which would clamp both ends to
+    // 1.0 and hide the band entirely).
+    auto& carrier = manager.CreateParameter(group, {
+        .name = "Carrier",
+        .defaultValue = 1.0f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    depth->SceneCenter(0) = KnobForRawModulationDepth(0.25f);
+
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+
+    synth::Parameter::UIState ui(1);
+    carrier.PopulateUIState(ui);
+    REQUIRE_NEAR(ui.minValues[0].load(), 0.75f, 0.0005f);
+    REQUIRE_NEAR(ui.maxValues[0].load(), 1.0f, 0.0005f);
+
+    group.GetModulators().Value(0, 0) = 0.0f;
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.75f, 0.0005f);
+
+    group.GetModulators().Value(0, 0) = 1.0f;
+    carrier.Compute({.leftScene = 0, .rightScene = 0, .blend = 0.0f});
+    carrier.ProcessLite();
+    REQUIRE_NEAR(carrier.GetRaw(0), 1.0f, 0.0005f);
+}
+
+TEST_CASE(one_way_amount_floor_blocks_encoder_and_absolute_set_below_off) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 3,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {
+        .name = "Carrier",
+        .defaultValue = 0.5f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.5f, 0.0001f);
+
+    const synth::SceneState scene{.leftScene = 0, .rightScene = 0, .blend = 0.0f};
+    // A delta large enough that the unfloored target would be 0.3.
+    depth->HandleIncDec(scene, -0.2f);
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.5f, 0.0001f);
+
+    depth->HandleSetAbsolute(scene, 0.1f);
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.5f, 0.0001f);
+
+    // The SAME two write paths, driven on the TARGET's own top-level value
+    // (a real registered id_, not the depth sentinel): its own "off" is 0.0,
+    // not a depth's 0.5, so the floor must not touch it.
+    carrier.HandleIncDec(scene, -0.4f);
+    REQUIRE_NEAR(carrier.SceneCenter(0), 0.1f, 0.0001f);
+    carrier.HandleSetAbsolute(scene, 0.1f);
+    REQUIRE_NEAR(carrier.SceneCenter(0), 0.1f, 0.0001f);
+}
+
+TEST_CASE(one_way_amount_floor_applies_on_patch_load_with_no_migration) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {
+        .name = "Carrier",
+        .defaultValue = 0.5f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+
+    synth::JsonArena legacyArena(4096);
+    synth::JSON legacyJson = legacyArena.Object();
+    synth::JSON legacySceneCenters = legacyArena.Array();
+    legacySceneCenters.AppendNew(legacyArena.Real(0.25));
+    legacyJson.SetNew("sceneCenters", legacySceneCenters);
+    REQUIRE_TRUE(depth->LoadValuesFromJSON(legacyJson));
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.5f, 0.0001f);
+
+    synth::JsonArena positiveArena(4096);
+    synth::JSON positiveJson = positiveArena.Object();
+    synth::JSON positiveSceneCenters = positiveArena.Array();
+    positiveSceneCenters.AppendNew(positiveArena.Real(0.75));
+    positiveJson.SetNew("sceneCenters", positiveSceneCenters);
+    REQUIRE_TRUE(depth->LoadValuesFromJSON(positiveJson));
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.75f, 0.0001f);
+}
+
+TEST_CASE(one_way_amount_floor_is_a_noop_for_kbipolar_parameters) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    // No modulationTargetKind set -- defaults to kBipolar.
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+    REQUIRE_TRUE(depth->TargetKind() == synth::ModulationTargetKind::kBipolar);
+
+    const synth::SceneState scene{.leftScene = 0, .rightScene = 0, .blend = 0.0f};
+    depth->HandleIncDec(scene, -0.3f);
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.2f, 0.0001f);
+
+    depth->HandleSetAbsolute(scene, 0.1f);
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.1f, 0.0001f);
+
+    synth::JsonArena arena(4096);
+    synth::JSON json = arena.Object();
+    synth::JSON sceneCenters = arena.Array();
+    sceneCenters.AppendNew(arena.Real(0.05));
+    json.SetNew("sceneCenters", sceneCenters);
+    REQUIRE_TRUE(depth->LoadValuesFromJSON(json));
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.05f, 0.0001f);
+}
+
+TEST_CASE(one_way_amount_randomize_draw_lands_in_the_upper_half_of_raw_storage) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 3,
+        .processLiteAlpha = 1.0f,
+        .targetCenterAlpha = 1.0f,
+        .modulationBlendMode = synth::ModulationBlendMode::kAttenuverter,
+    });
+    float source0 = 0.0f;
+    std::array<float*, 1> src0{&source0};
+    group.SetModulationSource(0, src0, {.connected = true});
+
+    auto& carrier = manager.CreateParameter(group, {
+        .name = "Carrier",
+        .defaultValue = 0.3f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    synth::Parameter* depth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(depth != nullptr);
+
+    const synth::SceneState scene{.leftScene = 0, .rightScene = 0, .blend = 0.0f};
+
+    // The worst-case draw (0.0) remaps into the floor of the remapped range,
+    // not the un-remapped 0.0: raw storage lands at exactly 0.5 (off), and
+    // resolves to depth 0 at that floor.
+    depth->RandomizeVisibleValue(scene, 0.0f);
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.5f, 0.0005f);
+    carrier.Compute(scene);
+    carrier.ProcessLite();
+    group.GetModulators().Value(0, 0) = 1.0f;
+    REQUIRE_NEAR(carrier.GetRaw(0), 0.3f, 0.0005f);
+
+    // A midpoint draw (0.5) lands raw 0.75 and resolves to a strictly
+    // positive depth.
+    depth->RandomizeVisibleValue(scene, 0.5f);
+    REQUIRE_NEAR(depth->SceneCenter(0), 0.75f, 0.0005f);
+    carrier.Compute(scene);
+    carrier.ProcessLite();
+    REQUIRE_TRUE(carrier.GetRaw(0) > 0.3f + 0.0005f);
+
+    // The top-level target's OWN Randomize draw (a real id_, not the depth
+    // sentinel) is untouched by the remap: the worst-case draw still lands
+    // at the un-remapped 0.0, and S1.5's floor (the identical id_ ==
+    // kLocalParameterId guard) never fires for it either. A solo parameter
+    // with no active modulation route isolates this from the depth route's
+    // own contribution above.
+    auto& soloTarget = manager.CreateParameter(group, {
+        .name = "SoloTarget",
+        .defaultValue = 0.4f,
+        .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount,
+    });
+    soloTarget.RandomizeVisibleValue(scene, 0.0f);
+    REQUIRE_NEAR(soloTarget.SceneCenter(0), 0.0f, 0.0005f);
+}
+
 TEST_CASE(nested_depth_route_reads_get_and_bypasses_slew) {
     synth::ParameterManager manager;
     manager.SetGestureCount(2);
@@ -2688,6 +3575,215 @@ TEST_CASE(group_process_sample_phases_visit_only_registered_roots) {
 
     group.ProcessSamplePhase2();
     REQUIRE_TRUE(work.topLevelProcessLiteCalls == 2);
+}
+
+namespace quiescence {
+
+// One group of seven parameters, optionally with spm-96's quiescent skip, so a
+// test can run the same sequence through both and compare them bit for bit.
+struct Rig {
+    synth::ParameterManager manager;
+    synth::ParameterGroup* group = nullptr;
+    std::vector<synth::Parameter*> parameters;
+    float sourceA = 0.3f;
+    float sourceB = 0.7f;
+
+    explicit Rig(bool skip) {
+        REQUIRE_TRUE(manager.SetGestureCount(1));
+        group = &manager.CreateGroup({
+            .numVoices = 1,
+            .numModulators = 2,
+            .numScenes = 2,
+            .maxParameters = 32,
+            .targetComputeIntervalSamples = 16,
+            .skipQuiescentParameters = skip,
+        });
+        std::array<float*, 1> a{&sourceA};
+        std::array<float*, 1> b{&sourceB};
+        group->SetModulationSource(0, a, {.connected = true});
+        group->SetModulationSource(1, b, {.connected = true});
+        const float defaults[] = {0.2f, 0.35f, 0.5f, 0.65f, 0.8f, 0.1f, 0.9f};
+        for (std::size_t ix = 0; ix < 7; ++ix) {
+            parameters.push_back(&manager.CreateParameter(
+                *group, {.name = "P" + std::to_string(ix), .defaultValue = defaults[ix]}));
+        }
+        REQUIRE_TRUE(manager.SetSceneEndpoints(0, 0));
+    }
+
+    // One sample the way an application drives it: phase 1, an application
+    // overwrite of parameter 0's cached knob (frogg3rs's fuego stage), phase 2.
+    // The overwrite moves for a while, then holds.
+    void Sample(std::uint64_t sampleIndex) {
+        sourceA = 0.3f + 0.2f * std::sin(static_cast<float>(sampleIndex) * 0.01f);
+        group->ProcessSamplePhase1(sampleIndex);
+        synth::Parameter& fuegoed = *parameters[0];
+        const float raw = fuegoed.CachedKnobValue(0);
+        const float shaped = sampleIndex < 3000 ? raw * 0.5f + 0.001f * static_cast<float>(sampleIndex % 7) : raw * 0.5f;
+        fuegoed.ReplaceCachedKnobValue(0, shaped);
+        group->ProcessSamplePhase2();
+    }
+
+    void Event(std::uint64_t sampleIndex) {
+        switch (sampleIndex) {
+            case 2000:  // scene blend move
+                REQUIRE_TRUE(manager.SetSceneEndpoints(0, 1));
+                parameters[1]->SceneCenter(1) = 0.95f;
+                manager.SetSceneBlend(0.4f);
+                break;
+            case 4000:  // knob edit
+                parameters[2]->SceneCenter(0) = 0.15f;
+                parameters[2]->SceneCenter(1) = 0.15f;
+                break;
+            case 6000:  // a route added
+                parameters[3]->EnsureModulationDepth(0)->SceneCenter(0) = 0.9f;
+                parameters[3]->EnsureModulationDepth(0)->SceneCenter(1) = 0.9f;
+                break;
+            case 9000:  // the route returned to neutral; Compute prunes it
+                parameters[3]->EnsureModulationDepth(0)->SceneCenter(0) = 0.5f;  // the neutral depth centre (src kNeutralModulationDepthCenter)
+                parameters[3]->EnsureModulationDepth(0)->SceneCenter(1) = 0.5f;  // the neutral depth centre (src kNeutralModulationDepthCenter)
+                break;
+            case 11000:  // a top-level parameter assigned as another's depth
+                REQUIRE_TRUE(parameters[5]->AssignModulationDepth(1, parameters[6]));
+                parameters[6]->SceneCenter(0) = 0.85f;
+                parameters[6]->SceneCenter(1) = 0.85f;
+                break;
+            case 13000:  // a revert to default
+                parameters[1]->RevertToDefault(manager.Scene());
+                break;
+            case 15000:  // a revert of every value
+                parameters[2]->RevertAllToDefault();
+                break;
+            case 17000: {  // a JSON save and load
+                synth::JsonArena arena(1 << 16);
+                const synth::JSON saved = manager.ParameterValuesToJSON(arena);
+                parameters[4]->SceneCenter(0) = 0.05f;
+                REQUIRE_TRUE(manager.LoadParameterValuesFromJSON(saved));
+                break;
+            }
+            case 19000:  // a compute-and-snap of every parameter
+                parameters[4]->SceneCenter(0) = 0.6f;
+                manager.ComputeAllParameters();
+                break;
+            case 21000:  // new processing timing
+                group->ConfigureProcessingTiming({
+                    .processLiteAlpha = 0.05f,
+                    .targetComputeIntervalSamples = 16,
+                    .uiDisplayCenterAlpha = 0.002f,
+                    .uiDisplaySpreadAlpha = 0.003f,
+                });
+                break;
+            default:
+                break;
+        }
+    }
+};
+
+std::uint32_t Bits(float value) { return std::bit_cast<std::uint32_t>(value); }
+
+bool SameState(const synth::Parameter& a, const synth::Parameter& b) {
+    return Bits(a.CachedKnobValue(0)) == Bits(b.CachedKnobValue(0)) && Bits(a.GetRaw(0)) == Bits(b.GetRaw(0)) &&
+           Bits(a.CurrentCenter()) == Bits(b.CurrentCenter()) &&
+           Bits(a.CurrentCenterScale(0)) == Bits(b.CurrentCenterScale(0)) &&
+           Bits(a.CurrentNormalizationOffset(0)) == Bits(b.CurrentNormalizationOffset(0)) &&
+           Bits(a.UIDisplayCenter(0)) == Bits(b.UIDisplayCenter(0)) &&
+           Bits(a.UIDisplaySpread(0)) == Bits(b.UIDisplaySpread(0));
+}
+
+}  // namespace quiescence
+
+// spm-96: the skipped and unskipped groups agree bit for bit at every sample
+// through every writer of a value the lite steps read.
+TEST_CASE(quiescent_skip_matches_unskipped_processing) {
+    quiescence::Rig skipped(true);
+    quiescence::Rig unskipped(false);
+    synth::ParameterProcessingObserver work{};
+    skipped.group->SetProcessingObserverForTests(&work);
+    for (std::uint64_t sampleIndex = 0; sampleIndex < 26000; ++sampleIndex) {
+        skipped.Event(sampleIndex);
+        unskipped.Event(sampleIndex);
+        skipped.Sample(sampleIndex);
+        unskipped.Sample(sampleIndex);
+        for (std::size_t ix = 0; ix < skipped.parameters.size(); ++ix) {
+            if (!quiescence::SameState(*skipped.parameters[ix], *unskipped.parameters[ix])) {
+                std::cerr << "diverged at sample " << sampleIndex << ", parameter " << ix << "\n";
+                REQUIRE_TRUE(false);
+            }
+        }
+    }
+    // Positive control: the skip actually happened, so agreement means something.
+    REQUIRE_TRUE(work.topLevelQuiescentSkips > 26000);
+}
+
+// spm-96: once settled with no route, a parameter's phase-1 visits are skipped
+// except one per compute interval, and a wake brings back the full step.
+TEST_CASE(quiescent_parameters_skip_their_lite_step_until_woken) {
+    quiescence::Rig rig(true);
+    for (std::uint64_t sampleIndex = 0; sampleIndex < 48000; ++sampleIndex) {
+        rig.group->ProcessSample(sampleIndex);
+    }
+    synth::ParameterProcessingObserver work{};
+    rig.group->SetProcessingObserverForTests(&work);
+    for (std::uint64_t sampleIndex = 48000; sampleIndex < 48160; ++sampleIndex) {
+        rig.group->ProcessSample(sampleIndex);
+    }
+    const std::size_t visits = 7 * 160;
+    REQUIRE_TRUE(work.topLevelProcessLiteCalls == visits);
+    REQUIRE_TRUE(work.topLevelQuiescentSkips == visits - 7 * 10);  // one compute sample in 16
+
+    rig.parameters[2]->RevertAllToDefault();  // a writer wakes it
+    synth::ParameterProcessingObserver afterWake{};
+    rig.group->SetProcessingObserverForTests(&afterWake);
+    rig.group->ProcessSample(48161);
+    REQUIRE_TRUE(afterWake.topLevelQuiescentSkips == 6);
+}
+
+// spm-96: every writer of a value the lite steps read wakes the parameter it
+// writes, so its next visit runs in full. Checked on a non-compute sample,
+// where only a wake can stop the skip.
+TEST_CASE(every_lite_input_writer_wakes_the_parameter) {
+    struct Writer {
+        const char* name;
+        std::size_t expectedSkips;  // of 7 visits on the next sample
+        std::function<void(quiescence::Rig&)> write;
+    };
+    const Writer writers[] = {
+        {"RevertToDefault", 6, [](quiescence::Rig& rig) { rig.parameters[2]->RevertToDefault(rig.manager.Scene()); }},
+        {"RevertAllToDefault", 6, [](quiescence::Rig& rig) { rig.parameters[2]->RevertAllToDefault(); }},
+        {"Compute", 6, [](quiescence::Rig& rig) { rig.parameters[2]->Compute(rig.manager.Scene()); }},
+        {"ComputeAllParameters", 0, [](quiescence::Rig& rig) { rig.manager.ComputeAllParameters(); }},
+        {"ConfigureProcessingTiming", 0, [](quiescence::Rig& rig) {
+             rig.group->ConfigureProcessingTiming({
+                 .processLiteAlpha = 0.05f,
+                 .targetComputeIntervalSamples = 16,
+                 .uiDisplayCenterAlpha = 0.002f,
+                 .uiDisplaySpreadAlpha = 0.003f,
+             });
+         }},
+        {"CurrentDepthSlots", 6, [](quiescence::Rig& rig) { (void)rig.parameters[2]->CurrentDepthSlots(0); }},
+        {"TargetDepthSlots", 6, [](quiescence::Rig& rig) { (void)rig.parameters[2]->TargetDepthSlots(0); }},
+        // Assigning a depth writes nothing the lite steps read: the route
+        // becomes active, and the depth is snapped, in the next Compute(),
+        // which wakes both. Until then the unskipped path does nothing either.
+        {"AssignModulationDepth", 7, [](quiescence::Rig& rig) {
+             REQUIRE_TRUE(rig.parameters[2]->AssignModulationDepth(1, rig.parameters[3]));
+         }},
+    };
+    for (const Writer& writer : writers) {
+        quiescence::Rig rig(true);
+        std::uint64_t sampleIndex = 0;
+        for (; sampleIndex < 48000; ++sampleIndex) {
+            rig.group->ProcessSample(sampleIndex);
+        }
+        writer.write(rig);
+        synth::ParameterProcessingObserver work{};
+        rig.group->SetProcessingObserverForTests(&work);
+        rig.group->ProcessSample(sampleIndex + 1);  // 48001: not a compute sample
+        if (work.topLevelQuiescentSkips != writer.expectedSkips) {
+            std::cerr << writer.name << ": " << work.topLevelQuiescentSkips << " skips, expected "
+                      << writer.expectedSkips << "\n";
+            REQUIRE_TRUE(false);
+        }
+    }
 }
 
 TEST_CASE(recursive_local_compute_seeds_display_without_audio_rate_processing) {
@@ -4410,10 +5506,9 @@ TEST_CASE(modulation_view_requests_storage_batch_and_succeeds_after_reinforcemen
     REQUIRE_TRUE(request.type == synth::ParameterMessageOut::Type::ParameterStorageBatchNeeded);
     REQUIRE_TRUE(request.group == &group);
     REQUIRE_TRUE(request.minimumAdditionalParameters >= 2);
-    REQUIRE_TRUE(request.requestedParameters >= group.Config().numModulators * 2);
 
     group.AddParameterStorageBatch(synth::MakeParameterStorageBatch(group.Config(), group.GestureCount(),
-                                                                    request.requestedParameters));
+                                                                    request.minimumAdditionalParameters));
     slot.HandlePress(1);
 
     REQUIRE_TRUE(bank.ShowingModulation());
@@ -4422,6 +5517,72 @@ TEST_CASE(modulation_view_requests_storage_batch_and_succeeds_after_reinforcemen
     REQUIRE_TRUE(bank.VisibleParameter(1) == carrier.ModulationDepthParameter(0));
     REQUIRE_TRUE(bank.VisibleParameter(2) == carrier.ModulationDepthParameter(1));
     REQUIRE_TRUE(bank.VisibleParameter(3) == &carrier);
+}
+
+TEST_CASE(storage_low_watermark_triggers_a_request_below_it_and_defaults_to_twice_the_modulator_count) {
+    synth::ParameterMessageOutBus outputBus(4);
+    synth::ParameterManager manager;
+    manager.SetParameterMessageOutBus(&outputBus);
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 2,
+        .numScenes = 1,
+        .maxParameters = 90,
+    });
+    REQUIRE_TRUE(group.StorageLowWatermark() == 4);  // numModulators * 2, unset
+
+    group.SetStorageLowWatermark(100);
+    manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+    REQUIRE_TRUE(group.AvailableParameterSlots() == 89);
+
+    synth::ParameterMessageOut request;
+    REQUIRE_TRUE(outputBus.Pop(request));
+    REQUIRE_TRUE(request.type == synth::ParameterMessageOut::Type::ParameterStorageBatchNeeded);
+    REQUIRE_TRUE(request.group == &group);
+    REQUIRE_TRUE(request.minimumAdditionalParameters == 11);  // 100 - 89
+
+    // Fulfil the pending request with exactly the shortfall so the next
+    // creation's own low-water check is not gated by the still-outstanding
+    // one above, and available lands at 100.
+    group.AddParameterStorageBatch(synth::MakeParameterStorageBatch(group.Config(), group.GestureCount(), 11));
+    group.SetStorageLowWatermark(group.Config().numModulators * 2);  // back to the default
+
+    // Available (99, after this creation) sits between the default
+    // watermark (4) and the raised one (100): if the setter had failed to
+    // lower the watermark back down, this creation would still be short of
+    // 100 and would wrongly push a request.
+    manager.CreateParameter(group, {.name = "Filler", .defaultValue = 0.5f});
+    REQUIRE_TRUE(group.AvailableParameterSlots() == 99);
+    REQUIRE_TRUE(!outputBus.Pop(request));  // available is above the default watermark: no request
+}
+
+TEST_CASE(a_later_storage_batch_does_not_move_parameters_allocated_from_an_earlier_one) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 2,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    MarkAllModulatorsConnectedForUi(group);
+    auto& carrier = manager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+
+    group.AddParameterStorageBatch(synth::MakeParameterStorageBatch(group.Config(), group.GestureCount(), 1));
+    synth::Parameter* firstDepth = carrier.EnsureModulationDepth(0);
+    REQUIRE_TRUE(firstDepth != nullptr);
+    REQUIRE_TRUE(&group.ParameterByLocalIndex(1) == firstDepth);
+
+    const std::size_t availableBeforeSecondBatch = group.AvailableParameterSlots();
+    group.AddParameterStorageBatch(synth::MakeParameterStorageBatch(group.Config(), group.GestureCount(), 3));
+
+    REQUIRE_TRUE(&group.ParameterByLocalIndex(1) == firstDepth);
+    REQUIRE_TRUE(group.AvailableParameterSlots() == availableBeforeSecondBatch + 3);
+
+    synth::Parameter* secondDepth = carrier.EnsureModulationDepth(1);
+    REQUIRE_TRUE(secondDepth != nullptr);
+    REQUIRE_TRUE(secondDepth != firstDepth);
+    REQUIRE_TRUE(&group.ParameterByLocalIndex(1) == firstDepth);
+    REQUIRE_TRUE(&group.ParameterByLocalIndex(2) == secondDepth);
 }
 
 TEST_CASE(modulation_view_materializes_all_missing_depth_parameters_when_capacity_allows) {
@@ -5647,6 +6808,134 @@ TEST_CASE(param_set_absolute_unmapped_boundaries_are_no_ops) {
     bus.Apply(synth::MessageIn::ParamSetAbsolute(0, 2, 0, 0.9f));
 
     REQUIRE_NEAR(parameter.SceneCenter(0), 0.25f, 0.00001f);
+}
+
+TEST_CASE(bank_addressed_absolute_write_reaches_a_bank_the_slot_has_not_selected) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices = 1, .numScenes = 1, .maxParameters = 2});
+    auto& selectedParam = manager.CreateParameter(group, {.name = "Selected", .defaultValue = 0.2f});
+    auto& targetParam = manager.CreateParameter(group, {.name = "Target", .defaultValue = 0.3f});
+    auto& selectedBank = manager.CreateBank();
+    selectedBank.AddMapping(10, selectedParam);
+    auto& targetBank = manager.CreateBank();
+    targetBank.AddMapping(10, targetParam);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.SelectBank(&selectedBank);
+
+    const float targetBefore = targetParam.SceneCenter(0);
+    manager.HandleSetAbsoluteOnBank(1, 0, 0, 0.9f);
+
+    REQUIRE_TRUE(targetParam.SceneCenter(0) != targetBefore);
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.9f, 0.0001f);
+    REQUIRE_NEAR(selectedParam.SceneCenter(0), 0.2f, 0.0001f);
+}
+
+TEST_CASE(bank_addressed_absolute_write_leaves_the_slots_selected_bank_unchanged) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices = 1, .numScenes = 1, .maxParameters = 2});
+    auto& selectedParam = manager.CreateParameter(group, {.name = "Selected", .defaultValue = 0.15f});
+    auto& targetParam = manager.CreateParameter(group, {.name = "Target", .defaultValue = 0.25f});
+    auto& selectedBank = manager.CreateBank();
+    selectedBank.AddMapping(10, selectedParam);
+    auto& targetBank = manager.CreateBank();
+    targetBank.AddMapping(10, targetParam);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.SelectBank(&selectedBank);
+
+    manager.HandleSetAbsoluteOnBank(1, 0, 0, 0.6f);
+
+    REQUIRE_TRUE(slot.SelectedBank() == &selectedBank);
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.6f, 0.0001f);
+}
+
+TEST_CASE(bank_addressed_absolute_write_to_a_different_bank_leaves_open_modulation_view_untouched) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 3,
+    });
+    MarkAllModulatorsConnectedForUi(group);
+    auto& viewedParam = manager.CreateParameter(group, {.name = "Viewed", .defaultValue = 0.2f});
+    auto& viewedDepth = manager.CreateParameter(group, {.name = "ViewedDepth", .defaultValue = 0.3f});
+    REQUIRE_TRUE(viewedParam.AssignModulationDepth(0, &viewedDepth));
+    auto& targetParam = manager.CreateParameter(group, {.name = "Target", .defaultValue = 0.4f});
+    auto& viewedBank = manager.CreateBank();
+    viewedBank.AddMapping(10, viewedParam);
+    auto& targetBank = manager.CreateBank();
+    targetBank.AddMapping(10, targetParam);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.AddPhysicalEncoder(11);
+    slot.SelectBank(&viewedBank);
+    manager.HandlePress(0, 0);
+    REQUIRE_TRUE(viewedBank.ShowingModulation());
+    REQUIRE_TRUE(viewedBank.SelectedParameter() == &viewedParam);
+
+    manager.HandleSetAbsoluteOnBank(1, 0, 0, 0.85f);
+
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.85f, 0.0001f);
+    REQUIRE_TRUE(viewedBank.ShowingModulation());
+    REQUIRE_TRUE(viewedBank.SelectedParameter() == &viewedParam);
+    REQUIRE_TRUE(viewedBank.VisibleParameter(10) == &viewedDepth);
+}
+
+TEST_CASE(bank_addressed_absolute_write_edits_top_level_parameter_not_visible_modulation_depth) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 1,
+        .numScenes = 1,
+        .maxParameters = 2,
+    });
+    MarkAllModulatorsConnectedForUi(group);
+    auto& parent = manager.CreateParameter(group, {.name = "Parent", .defaultValue = 0.2f});
+    auto& depth = manager.CreateParameter(group, {.name = "Depth", .defaultValue = 0.3f});
+    REQUIRE_TRUE(parent.AssignModulationDepth(0, &depth));
+    auto& bank = manager.CreateBank();
+    bank.AddMapping(10, parent);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.AddPhysicalEncoder(11);
+    slot.SelectBank(&bank);
+    manager.HandlePress(0, 0);
+    REQUIRE_TRUE(bank.ShowingModulation());
+    REQUIRE_TRUE(bank.VisibleParameter(10) == &depth);
+
+    const float parentBefore = parent.SceneCenter(0);
+    const float depthBefore = depth.SceneCenter(0);
+
+    manager.HandleSetAbsoluteOnBank(0, 0, 0, 0.8f);
+
+    REQUIRE_TRUE(parent.SceneCenter(0) != parentBefore);
+    REQUIRE_NEAR(parent.SceneCenter(0), 0.8f, 0.00001f);
+    REQUIRE_NEAR(depth.SceneCenter(0), depthBefore, 0.00001f);
+    REQUIRE_TRUE(bank.ShowingModulation());
+    REQUIRE_TRUE(bank.VisibleParameter(10) == &depth);
+}
+
+TEST_CASE(bank_addressed_absolute_write_via_message_bus_matches_direct_call) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices = 1, .numScenes = 1, .maxParameters = 2});
+    auto& selectedParam = manager.CreateParameter(group, {.name = "Selected", .defaultValue = 0.1f});
+    auto& targetParam = manager.CreateParameter(group, {.name = "Target", .defaultValue = 0.2f});
+    auto& selectedBank = manager.CreateBank();
+    selectedBank.AddMapping(10, selectedParam);
+    auto& targetBank = manager.CreateBank();
+    targetBank.AddMapping(10, targetParam);
+    auto& slot = manager.CreateBankSlot();
+    slot.AddPhysicalEncoder(10);
+    slot.SelectBank(&selectedBank);
+    synth::MessageInBus bus(&manager, 4);
+
+    manager.HandleSetAbsoluteOnBank(1, 0, 0, 0.55f);
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.55f, 0.0001f);
+
+    bus.Apply(synth::MessageIn::ParamSetAbsoluteOnBank(0, 1, 0, 0, 0.83f));
+    REQUIRE_NEAR(targetParam.SceneCenter(0), 0.83f, 0.0001f);
 }
 
 TEST_CASE(unmapped_encoder_ignored) {
@@ -8685,6 +9974,472 @@ TEST_CASE(wrld_bldr_output_blanks_positions_beyond_cell_capacity) {
     REQUIRE_TRUE(blanked1);
 }
 
+// A capacity-1 sender declines every enqueue past the first in a pass.
+// Colour, colour brightness, ring brightness and
+// ring position are four independent sends for one mapping; each must stay
+// pending until its own enqueue is accepted, and a decline must not let a
+// later value in the same pass jump the queue.
+TEST_CASE(twister_output_resends_a_declined_value_on_the_next_pass_and_nothing_jumps_it) {
+    synth::ParameterManager::UIState ui;
+    ui.Configure(1, 1, 1, 0, 0);
+    ui.slots[0].connected.store(true);
+    auto& cell = ui.slots[0].cells[0];
+    cell.revision.store(2);
+    cell.connected.store(true);
+    cell.voiceCount.store(1);
+    cell.values[0].store(0.25f);
+    cell.baseColor.Store(synth::Color::Red);
+    cell.indicatorColors[0].Store(synth::Color::Cyan);
+
+    FakeMidiSink sink;
+    // The sender is left unstarted around each Process() call: with a worker
+    // thread running, a drain could free the one slot mid-pass and let a
+    // second value through, defeating the capacity-1 decline this test
+    // relies on. Starting only to flush, then stopping (which empties the
+    // queue), keeps each pass's capacity constraint deterministic.
+    synth::MidiSender sender(1);
+    sender.SetSink(0, &sink);
+    auto config = synth::EncoderMidiOutConfig::TwisterDefault(0);
+    config.KeepFirstPositions(1);
+    synth::TwisterMidiOutProcessor processor(config, &sender, &ui);
+
+    processor.Process();
+    sender.Start();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    sender.Stop();
+    REQUIRE_TRUE(sink.sent.size() == 1);
+    REQUIRE_TRUE(sink.sent[0].Channel() == 1);
+
+    processor.Process();
+    sender.Start();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    sender.Stop();
+    REQUIRE_TRUE(sink.sent.size() == 2);
+    REQUIRE_TRUE(sink.sent[1].Channel() == 2);
+
+    processor.Process();
+    sender.Start();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    sender.Stop();
+    REQUIRE_TRUE(sink.sent.size() == 3);
+    REQUIRE_TRUE(sink.sent[2].Channel() == 5);
+
+    processor.Process();
+    sender.Start();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    sender.Stop();
+    REQUIRE_TRUE(sink.sent.size() == 4);
+    REQUIRE_TRUE(sink.sent[3].Channel() == 0);
+}
+
+TEST_CASE(twister_output_pins_bytes_through_a_value_change_and_a_disconnect) {
+    synth::ParameterManager::UIState ui;
+    ui.Configure(1, 1, 1, 0, 0);
+    ui.slots[0].connected.store(true);
+    auto& cell = ui.slots[0].cells[0];
+    cell.revision.store(2);
+    cell.connected.store(true);
+    cell.voiceCount.store(1);
+    cell.values[0].store(0.25f);
+    cell.baseColor.Store(synth::Color::Red);
+    cell.indicatorColors[0].Store(synth::Color::Cyan);
+
+    FakeMidiSink sink;
+    synth::MidiSender sender;
+    sender.SetSink(0, &sink);
+    sender.Start();
+    auto config = synth::EncoderMidiOutConfig::TwisterDefault(0);
+    config.KeepFirstPositions(1);
+    synth::TwisterMidiOutProcessor processor(config, &sender, &ui);
+
+    processor.Process();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sink.sent.size() == 4);
+    REQUIRE_TRUE(sink.sent[0].Channel() == 1);
+    REQUIRE_TRUE(sink.sent[0].GetValue() == synth::ColorToTwister(synth::Color::Red));
+    REQUIRE_TRUE(sink.sent[1].Channel() == 2);
+    REQUIRE_TRUE(sink.sent[1].GetValue() == synth::FullBrightnessAnimationValue());
+    REQUIRE_TRUE(sink.sent[2].Channel() == 5);
+    REQUIRE_TRUE(sink.sent[2].GetValue() == 95);
+    REQUIRE_TRUE(sink.sent[3].Channel() == 0);
+    REQUIRE_TRUE(sink.sent[3].GetValue() == 32);
+
+    // Unchanged snapshot: nothing resends.
+    processor.Process();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sink.sent.size() == 4);
+
+    // A value change moves only the ring position.
+    cell.revision.store(4);
+    cell.values[0].store(0.75f);
+    processor.Process();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sink.sent.size() == 5);
+    REQUIRE_TRUE(sink.sent[4].Channel() == 0);
+    REQUIRE_TRUE(sink.sent[4].GetValue() == 95);
+
+    // A disconnect blanks all four values at once.
+    cell.revision.store(6);
+    cell.connected.store(false);
+    processor.Process();
+    sender.FlushForTests(std::chrono::milliseconds(500));
+    REQUIRE_TRUE(sink.sent.size() == 9);
+    REQUIRE_TRUE(sink.sent[5].Channel() == 1);
+    REQUIRE_TRUE(sink.sent[5].GetValue() == 0);
+    REQUIRE_TRUE(sink.sent[6].Channel() == 2);
+    REQUIRE_TRUE(sink.sent[6].GetValue() == 17);
+    REQUIRE_TRUE(sink.sent[7].Channel() == 5);
+    REQUIRE_TRUE(sink.sent[7].GetValue() == 65);
+    REQUIRE_TRUE(sink.sent[8].Channel() == 0);
+    REQUIRE_TRUE(sink.sent[8].GetValue() == 0);
+    sender.Stop();
+}
+
+// The same rule, in the five other processors that branch on Enqueue's
+// result: WrldBldr, System CC, WrldBldr system, Launchpad grid and Open
+// SysEx. Each leaves its cache unwritten when Enqueue declines, so the next
+// pass finds the cache stale and resends.
+// Each is given two messages to send against a
+// capacity-1 sender; both must arrive, each exactly once, one per pass.
+// Each capacity-1 sender below is left unstarted around a Process() call and
+// only started to flush, then stopped (which empties the queue): with a
+// worker thread running during Process() itself, a drain could free the one
+// slot mid-pass and let a second message through, defeating the decline
+// these scenarios rely on.
+TEST_CASE(the_other_five_output_processors_resend_a_declined_message_on_the_next_pass) {
+    // WrldBldrMidiOutProcessor: prime the ring-position cache on a generous
+    // sender so a later capacity-1 pass only has the button and indicator
+    // colours left to send.
+    {
+        synth::ParameterManager::UIState ui;
+        ui.Configure(1, 1, 1, 0, 0);
+        ui.slots[0].connected.store(true);
+        auto& cell = ui.slots[0].cells[0];
+        cell.revision.store(2);
+        cell.connected.store(true);
+        cell.voiceCount.store(1);
+        cell.values[0].store(0.5f);
+        cell.baseColor.Store(synth::Color::Red);
+        cell.indicatorColors[0].Store(synth::Color::Cyan);
+
+        FakeMidiSink primerSink;
+        synth::MidiSender primerSender;
+        primerSender.SetSink(0, &primerSink);
+        primerSender.Start();
+        auto config = synth::EncoderMidiOutConfig::WrldBldrDefault(0);
+        config.KeepFirstPositions(1);
+        synth::WrldBldrMidiOutProcessor processor(config, &primerSender, &ui);
+        processor.Process();
+        primerSender.FlushForTests(std::chrono::milliseconds(500));
+        primerSender.Stop();
+        REQUIRE_TRUE(primerSink.sent.size() == 3);
+
+        FakeMidiSink sink;
+        synth::MidiSender sender(1);
+        sender.SetSink(0, &sink);
+        processor.SetSender(&sender);
+
+        cell.revision.store(4);
+        cell.baseColor.Store(synth::Color::Green);
+        cell.indicatorColors[0].Store(synth::Color::Yellow);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 1);
+        REQUIRE_TRUE(sink.sent[0].raw[8] == 1);
+        REQUIRE_TRUE(sink.sent[0].raw[10] == synth::Color::Green.r / 2);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 2);
+        REQUIRE_TRUE(sink.sent[1].raw[8] == 0);
+        REQUIRE_TRUE(sink.sent[1].raw[10] == synth::Color::Yellow.r / 2);
+    }
+
+    // SystemCcMidiOutProcessor: two associations on the same message, so
+    // both need sending as soon as resetHeld goes true.
+    {
+        synth::ParameterManager::UIState ui;
+        ui.Configure(0, 0, 0, 0, 0, 0);
+        ui.resetHeld.store(true);
+
+        FakeMidiSink sink;
+        synth::MidiSender sender(1);
+        sender.SetSink(0, &sink);
+        synth::SystemCcMidiOutConfig config;
+        config.associations.push_back({.control = {.channel = 5, .cc = 32}, .message = synth::MessageIn::ToggleReset(0)});
+        config.associations.push_back({.control = {.channel = 6, .cc = 33}, .message = synth::MessageIn::ToggleReset(0)});
+        synth::SystemCcMidiOutProcessor processor(config, &sender, &ui);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 1);
+        REQUIRE_TRUE(sink.sent[0].Channel() == 5);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 2);
+        REQUIRE_TRUE(sink.sent[1].Channel() == 6);
+    }
+
+    // WrldBldrSystemMidiOutProcessor: same shape, two positions.
+    {
+        synth::ParameterManager::UIState ui;
+        ui.Configure(0, 0, 0, 0, 0, 0);
+        ui.resetHeld.store(true);
+
+        FakeMidiSink sink;
+        synth::MidiSender sender(1);
+        sender.SetSink(0, &sink);
+        synth::WrldBldrSystemMidiOutConfig config;
+        config.associations.push_back({.position = {.channel = 5, .x = 0, .y = 4}, .message = synth::MessageIn::ToggleReset(0)});
+        config.associations.push_back({.position = {.channel = 5, .x = 1, .y = 4}, .message = synth::MessageIn::ToggleReset(0)});
+        synth::WrldBldrSystemMidiOutProcessor processor(config, &sender, &ui);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 1);
+        REQUIRE_TRUE(sink.sent[0].raw[9] == synth::WrldBldrPositionToCC(0, 4));
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 2);
+        REQUIRE_TRUE(sink.sent[1].raw[9] == synth::WrldBldrPositionToCC(1, 4));
+    }
+
+    // LaunchpadGridMidiOutProcessor: same shape, two grid positions.
+    {
+        synth::ParameterManager::UIState ui;
+        ui.Configure(0, 0, 0, 0, 0, 0);
+        ui.resetHeld.store(true);
+
+        FakeMidiSink sink;
+        synth::MidiSender sender(1);
+        sender.SetSink(0, &sink);
+        synth::LaunchpadGridMidiOutConfig config;
+        config.associations.push_back(
+            {.position = {.controller = synth::LaunchpadController::LaunchpadX, .x = 0, .y = 7},
+             .message = synth::MessageIn::ToggleReset(0)});
+        config.associations.push_back(
+            {.position = {.controller = synth::LaunchpadController::LaunchpadX, .x = 1, .y = 7},
+             .message = synth::MessageIn::ToggleReset(0)});
+        synth::LaunchpadGridMidiOutProcessor processor(config, &sender, &ui);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 1);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 2);
+    }
+
+    // OpenSysExMidiOutProcessor: two configured messages, no UI state at all.
+    {
+        FakeMidiSink sink;
+        synth::MidiSender sender(1);
+        sender.SetSink(0, &sink);
+        std::vector<std::vector<std::uint8_t>> messages{
+            {0xF0, 0x01, 0xF7},
+            {0xF0, 0x02, 0xF7},
+        };
+        synth::OpenSysExMidiOutProcessor processor(messages, &sender);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 1);
+        REQUIRE_TRUE(sink.sent[0].raw[1] == 0x01);
+
+        processor.Process();
+        sender.Start();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        sender.Stop();
+        REQUIRE_TRUE(sink.sent.size() == 2);
+        REQUIRE_TRUE(sink.sent[1].raw[1] == 0x02);
+    }
+}
+
+// Regression cover for the same five processors, against a default-capacity
+// sender: an unchanged snapshot resends nothing, and a real change resends
+// exactly the changed value. A future break that clears the sent/pending
+// state after an accepted enqueue instead of on decline would resend on
+// every pass, the same failure case two above proves for the Twister.
+TEST_CASE(the_other_five_output_processors_do_not_resend_an_unchanged_value) {
+    // WrldBldrMidiOutProcessor.
+    {
+        synth::ParameterManager::UIState ui;
+        ui.Configure(1, 1, 1, 0, 0);
+        ui.slots[0].connected.store(true);
+        auto& cell = ui.slots[0].cells[0];
+        cell.revision.store(2);
+        cell.connected.store(true);
+        cell.voiceCount.store(1);
+        cell.values[0].store(0.5f);
+        cell.baseColor.Store(synth::Color::Red);
+        cell.indicatorColors[0].Store(synth::Color::Cyan);
+
+        FakeMidiSink sink;
+        synth::MidiSender sender;
+        sender.SetSink(0, &sink);
+        sender.Start();
+        auto config = synth::EncoderMidiOutConfig::WrldBldrDefault(0);
+        config.KeepFirstPositions(1);
+        synth::WrldBldrMidiOutProcessor processor(config, &sender, &ui);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 3);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 3);
+
+        cell.revision.store(4);
+        cell.baseColor.Store(synth::Color::Green);
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 4);
+        REQUIRE_TRUE(sink.sent[3].raw[8] == 1);
+        REQUIRE_TRUE(sink.sent[3].raw[10] == synth::Color::Green.r / 2);
+        sender.Stop();
+    }
+
+    // SystemCcMidiOutProcessor.
+    {
+        synth::ParameterManager::UIState ui;
+        ui.Configure(0, 0, 0, 0, 0, 0);
+        ui.resetHeld.store(true);
+
+        FakeMidiSink sink;
+        synth::MidiSender sender;
+        sender.SetSink(0, &sink);
+        sender.Start();
+        synth::SystemCcMidiOutConfig config;
+        config.associations.push_back({.control = {.channel = 5, .cc = 32}, .message = synth::MessageIn::ToggleReset(0)});
+        synth::SystemCcMidiOutProcessor processor(config, &sender, &ui);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 1);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 1);
+
+        ui.resetHeld.store(false);
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 2);
+        REQUIRE_TRUE(sink.sent[1].GetValue() == 0);
+        sender.Stop();
+    }
+
+    // WrldBldrSystemMidiOutProcessor.
+    {
+        synth::ParameterManager::UIState ui;
+        ui.Configure(0, 0, 0, 0, 0, 0);
+        ui.resetHeld.store(true);
+
+        FakeMidiSink sink;
+        synth::MidiSender sender;
+        sender.SetSink(0, &sink);
+        sender.Start();
+        synth::WrldBldrSystemMidiOutConfig config;
+        config.associations.push_back({.position = {.channel = 5, .x = 0, .y = 4}, .message = synth::MessageIn::ToggleReset(0)});
+        synth::WrldBldrSystemMidiOutProcessor processor(config, &sender, &ui);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 1);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 1);
+
+        ui.resetHeld.store(false);
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 2);
+        sender.Stop();
+    }
+
+    // LaunchpadGridMidiOutProcessor.
+    {
+        synth::ParameterManager::UIState ui;
+        ui.Configure(0, 0, 0, 0, 0, 0);
+        ui.resetHeld.store(true);
+
+        FakeMidiSink sink;
+        synth::MidiSender sender;
+        sender.SetSink(0, &sink);
+        sender.Start();
+        synth::LaunchpadGridMidiOutConfig config;
+        config.associations.push_back(
+            {.position = {.controller = synth::LaunchpadController::LaunchpadX, .x = 0, .y = 7},
+             .message = synth::MessageIn::ToggleReset(0)});
+        synth::LaunchpadGridMidiOutProcessor processor(config, &sender, &ui);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 1);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 1);
+
+        ui.resetHeld.store(false);
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 2);
+        sender.Stop();
+    }
+
+    // OpenSysExMidiOutProcessor: further passes with no Reset() send nothing.
+    {
+        FakeMidiSink sink;
+        synth::MidiSender sender;
+        sender.SetSink(0, &sink);
+        sender.Start();
+        std::vector<std::vector<std::uint8_t>> messages{
+            {0xF0, 0x01, 0xF7},
+            {0xF0, 0x02, 0xF7},
+        };
+        synth::OpenSysExMidiOutProcessor processor(messages, &sender);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 2);
+
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 2);
+
+        processor.Reset();
+        processor.Process();
+        sender.FlushForTests(std::chrono::milliseconds(500));
+        REQUIRE_TRUE(sink.sent.size() == 4);
+        sender.Stop();
+    }
+}
+
 TEST_CASE(absolute_encoder_output_gates_until_acknowledged_and_suppresses_exact_echo_for_both_protocols) {
     for (const synth::EncoderMidiOutProtocol protocol : {
              synth::EncoderMidiOutProtocol::Twister,
@@ -8897,9 +10652,14 @@ TEST_CASE(absolute_encoder_output_retries_failed_correction_without_resolving_or
     PublishEncoderCell(ui, 0.9f, 0.25f, alert.Epoch());
 
     FakeMidiSink sink;
-    synth::MidiSender sender(1);
+    // Capacity 3, not 1: TwisterMidiOutProcessor::Process() sends colour,
+    // colour brightness and ring brightness before the position CC this test
+    // targets, and a decline anywhere in the pass stops the rest of it (see
+    // MidiOutProcessor::ProcessPosition). Three slots let the first pass's
+    // real colour/brightness/ring-brightness sends succeed and leave the
+    // position CC as the one that finds the queue full.
+    synth::MidiSender sender(3);
     sender.SetSink(0, &sink);
-    REQUIRE_TRUE(sender.Enqueue(0, synth::BasicMidi::CC(0, 9, 9, 9)));
     auto processor = MakeEncoderOutput(synth::EncoderMidiOutProtocol::Twister, synth::EncoderMode::Absolute,
                                        &sender, &ui, &coordinator, 7);
     processor->Process();
@@ -8924,9 +10684,9 @@ TEST_CASE(absolute_encoder_output_retries_failed_ordinary_raw_center_enqueue_wit
     synth::AbsoluteFeedbackCoordinator coordinator;
     coordinator.ReserveRoute({.controllerSlot = 0, .parameterSlot = 0, .position = 0});
     FakeMidiSink sink;
-    synth::MidiSender sender(1);
+    // Capacity 3, not 1: see the sibling retry test above for why.
+    synth::MidiSender sender(3);
     sender.SetSink(0, &sink);
-    REQUIRE_TRUE(sender.Enqueue(0, synth::BasicMidi::CC(0, 9, 9, 9)));
     auto processor = MakeEncoderOutput(synth::EncoderMidiOutProtocol::Twister, synth::EncoderMode::Absolute,
                                        &sender, &ui, &coordinator, 0);
     processor->Process();
@@ -9103,33 +10863,6 @@ TEST_CASE(message_bus_single_producer_single_consumer_threaded_order) {
     consumer.join();
     REQUIRE_TRUE(!failed.load());
     REQUIRE_TRUE(bus.Size() == 0);
-}
-
-TEST_CASE(clear_gesture_active_flags_for_active_scene_selection) {
-    synth::ParameterManager manager;
-    manager.SetGestureCount(2);
-    manager.Scene() = {.leftScene = 0, .rightScene = 1, .blend = 0.5f};
-    auto& group = manager.CreateGroup({
-        .numVoices = 1,
-        .numScenes = 3,
-        .maxParameters = 1,
-    });
-    auto& first = manager.CreateParameter(group, {.name = "First", .defaultValue = 0.2f});
-    group.AddParameterStorageBatch(synth::MakeParameterStorageBatch(group.Config(), group.GestureCount(), 1));
-    auto& second = manager.CreateParameter(group, {.name = "Second", .defaultValue = 0.3f});
-    first.SetGestureActive(0, 0, true);
-    first.SetGestureActive(1, 0, true);
-    first.SetGestureActive(2, 0, true);
-    second.SetGestureActive(0, 0, true);
-    second.SetGestureActive(1, 0, true);
-
-    manager.ClearGestureActiveFlagsForActiveSceneSelection(0);
-
-    REQUIRE_TRUE(!first.GestureActive(0, 0));
-    REQUIRE_TRUE(!first.GestureActive(1, 0));
-    REQUIRE_TRUE(first.GestureActive(2, 0));
-    REQUIRE_TRUE(!second.GestureActive(0, 0));
-    REQUIRE_TRUE(!second.GestureActive(1, 0));
 }
 
 namespace {
@@ -10731,7 +12464,7 @@ TEST_CASE(randomized_parameter_modulation_simulation) {
                     break;
                 }
             };
-            switch (rng() % 19) {
+            switch (rng() % 18) {
             case 0: {
                 const auto encoder = encoders[rng() % encoders.size()];
                 const float delta = deltaDist(rng);
@@ -10865,25 +12598,6 @@ TEST_CASE(randomized_parameter_modulation_simulation) {
                 }
                 SimProcessLiteAll(oracle);
                 break;
-            default: {
-                const std::size_t gestureIx = rng() % kSimGestures;
-                action = "clear active gesture " + std::to_string(gestureIx);
-                manager.ClearGestureActiveFlagsForActiveSceneSelection(gestureIx);
-                const float blend = std::clamp(oracle.scene.blend, 0.0f, 1.0f);
-                for (auto& parameter : oracle.params) {
-                    if (blend <= 0.0f) {
-                        SimSetGestureActive(parameter, oracle.scene.leftScene, gestureIx, false);
-                    } else if (blend >= 1.0f) {
-                        SimSetGestureActive(parameter, oracle.scene.rightScene, gestureIx, false);
-                    } else {
-                        SimSetGestureActive(parameter, oracle.scene.leftScene, gestureIx, false);
-                        if (oracle.scene.rightScene != oracle.scene.leftScene) {
-                            SimSetGestureActive(parameter, oracle.scene.rightScene, gestureIx, false);
-                        }
-                    }
-                }
-                break;
-            }
             }
 
             SimCheck(oracle, params, banks, group, slot, manager, seed, step, action);
@@ -11613,7 +13327,7 @@ TEST_CASE(randomized_patch_lifecycle_simulation) {
         synth::AudioDeviceState audioDevice;
         synth::PatchMessageInBus inputBus(32);
         synth::MessageOutBus outputBus(32);
-        synth::PatchManager patchManager(&inputBus, &outputBus);
+        synth::PatchManager patchManager(&inputBus, &outputBus, &manager);
 
         SimOracle oracle;
         SimInitializeOracle(oracle);
@@ -11687,7 +13401,7 @@ TEST_CASE(randomized_patch_lifecycle_simulation) {
 
         for (int step = 0; step < steps; ++step) {
             std::string action;
-            switch (rng() % 22) {
+            switch (rng() % 21) {
             case 0:
             case 1:
             case 2: {
@@ -11785,35 +13499,16 @@ TEST_CASE(randomized_patch_lifecycle_simulation) {
                 }
                 SimProcessLiteAll(oracle);
                 break;
-            case 14: {
-                const std::size_t gestureIx = rng() % kSimGestures;
-                action = "patch clear active gesture " + std::to_string(gestureIx);
-                manager.ClearGestureActiveFlagsForActiveSceneSelection(gestureIx);
-                const float blend = std::clamp(oracle.scene.blend, 0.0f, 1.0f);
-                for (auto& parameter : oracle.params) {
-                    if (blend <= 0.0f) {
-                        SimSetGestureActive(parameter, oracle.scene.leftScene, gestureIx, false);
-                    } else if (blend >= 1.0f) {
-                        SimSetGestureActive(parameter, oracle.scene.rightScene, gestureIx, false);
-                    } else {
-                        SimSetGestureActive(parameter, oracle.scene.leftScene, gestureIx, false);
-                        if (oracle.scene.rightScene != oracle.scene.leftScene) {
-                            SimSetGestureActive(parameter, oracle.scene.rightScene, gestureIx, false);
-                        }
-                    }
-                }
-                break;
-            }
+            case 14:
             case 15:
-            case 16:
                 action = "patch save";
                 saveCurrentOracle();
                 break;
-            case 17:
+            case 16:
                 action = "patch save as";
                 saveAsCurrentOracle();
                 break;
-            case 18: {
+            case 17: {
                 action = "patch load directory";
                 const std::size_t versionIx = rng() % savedVersions.size();
                 const std::filesystem::path dir = savedVersions[versionIx].first.parent_path();
@@ -11821,24 +13516,23 @@ TEST_CASE(randomized_patch_lifecycle_simulation) {
                 loadPatchPath(dir, savedVersions[latestIx].second, dir);
                 break;
             }
-            case 19: {
+            case 18: {
                 action = "patch load version";
                 const std::size_t versionIx = rng() % savedVersions.size();
                 const auto& [path, snapshot] = savedVersions[versionIx];
                 loadPatchPath(path, snapshot, path.parent_path());
                 break;
             }
-            case 20:
-                action = "patch revert";
+            case 19:
                 if (!expectedCurrentPatchDir.has_value()) {
-                    REQUIRE_TRUE(patchManager.RevertPatch().status == synth::PatchCommandStatus::Ok);
+                    action = "patch new";
+                    REQUIRE_TRUE(patchManager.NewPatch().status == synth::PatchCommandStatus::Ok);
                     processPatchMessages();
                     SimApplyNewPatch(oracle);
                 } else {
+                    action = "patch load current directory";
                     const std::size_t latestIx = SimFindLatestPatchInDirectory(savedVersions, *expectedCurrentPatchDir);
-                    REQUIRE_TRUE(patchManager.RevertPatch().status == synth::PatchCommandStatus::Ok);
-                    processPatchMessages();
-                    SimApplyPatchSnapshot(oracle, savedVersions[latestIx].second);
+                    loadPatchPath(*expectedCurrentPatchDir, savedVersions[latestIx].second, *expectedCurrentPatchDir);
                 }
                 break;
             default:
@@ -11984,7 +13678,7 @@ TEST_CASE(randomized_patch_lifecycle_preserves_recursive_local_modulation_depths
         synth::AudioDeviceState audioDevice;
         synth::PatchMessageInBus inputBus(32);
         synth::MessageOutBus outputBus(32);
-        synth::PatchManager patchManager(&inputBus, &outputBus);
+        synth::PatchManager patchManager(&inputBus, &outputBus, &manager);
         std::vector<std::pair<std::filesystem::path, RecursivePatchSnapshot>> savedVersions;
         std::optional<std::filesystem::path> expectedCurrentPatchDir;
         std::mt19937 rng(seed ^ 0xD33F5u);
@@ -12106,14 +13800,15 @@ TEST_CASE(randomized_patch_lifecycle_preserves_recursive_local_modulation_depths
                 continue;
             }
             case 10:
-                action = "recursive revert";
                 if (!expectedCurrentPatchDir.has_value()) {
-                    REQUIRE_TRUE(patchManager.RevertPatch().status == synth::PatchCommandStatus::Ok);
+                    action = "recursive new";
+                    REQUIRE_TRUE(patchManager.NewPatch().status == synth::PatchCommandStatus::Ok);
                     processPatchMessages();
                     expected = defaultExpected;
                 } else {
+                    action = "recursive load current directory";
                     const std::size_t latestIx = findLatestRecursive(savedVersions, *expectedCurrentPatchDir);
-                    REQUIRE_TRUE(patchManager.RevertPatch().status == synth::PatchCommandStatus::Ok);
+                    REQUIRE_TRUE(patchManager.LoadPatch(*expectedCurrentPatchDir).status == synth::PatchCommandStatus::Ok);
                     processPatchMessages();
                     expected = savedVersions[latestIx].second;
                 }
@@ -12385,7 +14080,7 @@ TEST_CASE(randomized_recursive_modulation_ui_tree_round_trips_into_fresh_initial
             REQUIRE_TRUE(message.group != nullptr);
             message.group->AddParameterStorageBatch(
                 synth::MakeParameterStorageBatch(message.group->Config(), message.group->GestureCount(),
-                                                 message.requestedParameters));
+                                                 message.minimumAdditionalParameters));
         }
     };
 
@@ -13720,6 +15415,180 @@ TEST_CASE(patch_json_rejects_invalid_roots_without_mutating_runtime_configuratio
     REQUIRE_TRUE(synth::ValidatePatchJSON(invalidInstrumentRoot));
 }
 
+TEST_CASE(patch_json_with_carry_instrument_writes_schema_two_and_round_trips_the_instrument) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.63f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "carry-input", "carry-output");
+
+    synth::JsonArena arena(262144);
+    synth::JSON root =
+        synth::BuildPatchJSON(arena, "Carrying Patch", source, instrument, /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(!arena.Failed());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+    REQUIRE_TRUE(!root.Get("midiInstrument").IsNull());
+
+    synth::ParameterManager target;
+    target.SetGestureCount(0);
+    auto& targetGroup = target.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetCutoff = target.CreateParameter(targetGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+
+    synth::MidiInstrumentConfig liveInstrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "keep-in", "keep-out");
+    std::optional<synth::MidiInstrumentConfig> loadedInstrument;
+    REQUIRE_TRUE(synth::LoadPatchJSON(root, target, liveInstrument, nullptr, &loadedInstrument));
+    REQUIRE_NEAR(targetCutoff.SceneCenter(0), 0.63f, 0.000001f);
+
+    // The live instrument argument is never read or modified by LoadPatchJSON.
+    REQUIRE_TRUE(liveInstrument.controllers[0].input.identifier == "keep-in");
+    REQUIRE_TRUE(liveInstrument.controllers[0].output.identifier == "keep-out");
+
+    REQUIRE_TRUE(loadedInstrument.has_value());
+    synth::JsonArena expectedArena(262144);
+    synth::JsonArena actualArena(262144);
+    char* expectedDump = synth::ToJSON(expectedArena, instrument).Dumps(JSON_ENCODE_ANY);
+    char* actualDump = synth::ToJSON(actualArena, *loadedInstrument).Dumps(JSON_ENCODE_ANY);
+    REQUIRE_TRUE(expectedDump != nullptr && actualDump != nullptr);
+    REQUIRE_TRUE(std::string(expectedDump) == std::string(actualDump));
+    std::free(expectedDump);
+    std::free(actualDump);
+}
+
+TEST_CASE(patch_json_without_carry_instrument_matches_pre_change_version_one_output) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.5f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    synth::JsonArena arena(262144);
+    // carryInstrument defaults to false.
+    synth::JSON root = synth::BuildPatchJSON(arena, "No Carry", source, instrument);
+    REQUIRE_TRUE(!arena.Failed());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 1);
+    REQUIRE_TRUE(root.Get("midiInstrument").IsNull());
+    REQUIRE_TRUE(root.Size() == 4);  // schema, schemaVersion, patchName, parameterValues -- no other key
+}
+
+TEST_CASE(patch_json_load_leaves_loaded_instrument_unset_without_a_midi_instrument_section) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.4f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    // A version-1 file.
+    synth::JsonArena versionOneArena(262144);
+    synth::JSON versionOneRoot = synth::BuildPatchJSON(versionOneArena, "V1", source, instrument);
+    synth::ParameterManager targetOne;
+    targetOne.SetGestureCount(0);
+    auto& targetOneGroup = targetOne.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetOneCutoff = targetOne.CreateParameter(targetOneGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig liveOne = instrument;
+    std::optional<synth::MidiInstrumentConfig> loadedOne;
+    loadedOne.emplace();  // pre-seed so REQUIRE below actually proves it was reset, not merely default
+    REQUIRE_TRUE(synth::LoadPatchJSON(versionOneRoot, targetOne, liveOne, nullptr, &loadedOne));
+    REQUIRE_NEAR(targetOneCutoff.SceneCenter(0), 0.4f, 0.000001f);
+    REQUIRE_TRUE(!loadedOne.has_value());
+
+    // A version-2 file without a midiInstrument section.
+    synth::JsonArena versionTwoArena(262144);
+    synth::JSON versionTwoRoot = versionTwoArena.Object();
+    versionTwoRoot.SetNew("schema", versionTwoArena.String("sheaf.synth.patch"));
+    versionTwoRoot.SetNew("schemaVersion", versionTwoArena.Integer(2));
+    versionTwoRoot.SetNew("patchName", versionTwoArena.String("V2 No Section"));
+    versionTwoRoot.SetNew("parameterValues", source.ParameterValuesToJSON(versionTwoArena));
+    REQUIRE_TRUE(synth::ValidatePatchJSON(versionTwoRoot));  // ValidatePatchJSON now accepts version 2
+
+    synth::ParameterManager targetTwo;
+    targetTwo.SetGestureCount(0);
+    auto& targetTwoGroup = targetTwo.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetTwoCutoff = targetTwo.CreateParameter(targetTwoGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig liveTwo = instrument;
+    std::optional<synth::MidiInstrumentConfig> loadedTwo;
+    loadedTwo.emplace();
+    REQUIRE_TRUE(synth::LoadPatchJSON(versionTwoRoot, targetTwo, liveTwo, nullptr, &loadedTwo));
+    REQUIRE_NEAR(targetTwoCutoff.SceneCenter(0), 0.4f, 0.000001f);
+    REQUIRE_TRUE(!loadedTwo.has_value());
+}
+
+TEST_CASE(patch_json_version_two_with_null_loaded_instrument_pointer_loads_parameters_only) {
+    synth::ParameterManager source;
+    source.SetGestureCount(0);
+    auto& sourceGroup = source.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& sourceCutoff = source.CreateParameter(sourceGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    sourceCutoff.SceneCenter(0) = 0.81f;
+
+    const synth::MidiInstrumentConfig instrument =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "in", "out");
+
+    synth::JsonArena arena(262144);
+    synth::JSON root =
+        synth::BuildPatchJSON(arena, "V2 Null Out", source, instrument, /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+
+    synth::ParameterManager target;
+    target.SetGestureCount(0);
+    auto& targetGroup = target.CreateGroup({
+        .numVoices = 1,
+        .numModulators = 0,
+        .numScenes = 1,
+        .maxParameters = 1,
+    });
+    auto& targetCutoff = target.CreateParameter(targetGroup, {.name = "Cutoff", .defaultValue = 0.2f});
+    synth::MidiInstrumentConfig live =
+        MakeInstrumentFromProfile(synth::WrldBldrDefaultProfileConfig({}), "keep-in", "keep-out");
+    REQUIRE_TRUE(synth::LoadPatchJSON(root, target, live));  // loadedInstrument defaults to nullptr
+    REQUIRE_NEAR(targetCutoff.SceneCenter(0), 0.81f, 0.000001f);
+    REQUIRE_TRUE(live.controllers[0].input.identifier == "keep-in");
+    REQUIRE_TRUE(live.controllers[0].output.identifier == "keep-out");
+}
+
 TEST_CASE(patch_file_versioning_writes_collision_safe_sortable_versions) {
     const auto now = std::chrono::system_clock::from_time_t(1700000000);
     const auto tempRoot = std::filesystem::temp_directory_path() /
@@ -13893,7 +15762,8 @@ TEST_CASE(runtime_config_v1_migrates_to_default_sync_and_v2_save_contains_exact_
         .ppqn = 960,
     };
     REQUIRE_TRUE(synth::LoadRuntimeConfigJSON(v1, loadedInstrument, loadedAudio, loadedSync));
-    REQUIRE_TRUE(loadedAudio == sourceAudio);
+    REQUIRE_TRUE(loadedAudio.outputDeviceName == sourceAudio.outputDeviceName);
+    REQUIRE_TRUE(loadedAudio.inputDeviceName.empty());
     REQUIRE_TRUE(loadedSync == synth::SyncConfig{});
 
     const synth::SyncConfig savedSync{
@@ -13906,7 +15776,7 @@ TEST_CASE(runtime_config_v1_migrates_to_default_sync_and_v2_save_contains_exact_
     synth::JsonArena v2Arena(8192);
     const synth::JSON v2 = synth::BuildRuntimeConfigJSON(
         v2Arena, sourceInstrument, sourceAudio, savedSync);
-    REQUIRE_TRUE(v2.Get("schemaVersion").IntegerValue() == 2);
+    REQUIRE_TRUE(v2.Get("schemaVersion").IntegerValue() == synth::kRuntimeConfigSchemaVersion);
     const synth::JSON sync = v2.Get("sync");
     REQUIRE_TRUE(sync.Size() == 5);
     REQUIRE_TRUE(sync.Get("sendClock").BooleanValue());
@@ -13972,6 +15842,72 @@ TEST_CASE(runtime_config_v2_rejects_every_missing_or_wrong_sync_field_atomically
         const std::string text = prefix + syncObject + "}";
         requireAtomicRejection(text);
     }
+}
+
+TEST_CASE(runtime_config_v2_audio_device_input_name_dropped_on_migration) {
+    const synth::MidiInstrumentConfig instrument;
+    const synth::AudioDeviceState sourceAudio{.outputDeviceName = "Interface Out",
+                                               .inputDeviceName = "BlackHole 2ch"};
+    const synth::SyncConfig sync{.ppqn = 24};
+
+    synth::JsonArena arena(8192);
+    synth::JSON v2 = arena.Object();
+    v2.SetNew("schema", arena.String(synth::kRuntimeConfigSchema));
+    v2.SetNew("schemaVersion", arena.Integer(2));
+    v2.SetNew("midiInstrument", synth::ToJSON(arena, instrument));
+    v2.SetNew("audioDevice", synth::ToJSON(arena, sourceAudio));
+    v2.SetNew("sync", synth::ToJSON(arena, sync));
+
+    synth::MidiInstrumentConfig loadedInstrument;
+    synth::AudioDeviceState loadedAudio;
+    synth::SyncConfig loadedSync;
+    REQUIRE_TRUE(synth::LoadRuntimeConfigJSON(v2, loadedInstrument, loadedAudio, loadedSync));
+    REQUIRE_TRUE(loadedAudio.inputDeviceName.empty());
+    REQUIRE_TRUE(loadedAudio.outputDeviceName == sourceAudio.outputDeviceName);
+}
+
+TEST_CASE(runtime_config_v3_audio_device_input_name_preserved) {
+    const synth::MidiInstrumentConfig instrument;
+    const synth::AudioDeviceState sourceAudio{.outputDeviceName = "Interface Out",
+                                               .inputDeviceName = "BlackHole 2ch"};
+    const synth::SyncConfig sync{.ppqn = 24};
+
+    synth::JsonArena arena(8192);
+    const synth::JSON v3 = synth::BuildRuntimeConfigJSON(arena, instrument, sourceAudio, sync);
+    REQUIRE_TRUE(v3.Get("schemaVersion").IntegerValue() == synth::kRuntimeConfigSchemaVersion);
+
+    synth::MidiInstrumentConfig loadedInstrument;
+    synth::AudioDeviceState loadedAudio;
+    synth::SyncConfig loadedSync;
+    REQUIRE_TRUE(synth::LoadRuntimeConfigJSON(v3, loadedInstrument, loadedAudio, loadedSync));
+    REQUIRE_TRUE(loadedAudio.inputDeviceName == sourceAudio.inputDeviceName);
+    REQUIRE_TRUE(loadedAudio.outputDeviceName == sourceAudio.outputDeviceName);
+}
+
+TEST_CASE(runtime_config_v2_sync_section_still_loads) {
+    const synth::MidiInstrumentConfig instrument;
+    const synth::AudioDeviceState sourceAudio{.outputDeviceName = "Out", .inputDeviceName = ""};
+    const synth::SyncConfig sync{
+        .sendClock = true,
+        .receiveClock = true,
+        .sendTransport = false,
+        .receiveTransport = true,
+        .ppqn = 480,
+    };
+
+    synth::JsonArena arena(8192);
+    synth::JSON v2 = arena.Object();
+    v2.SetNew("schema", arena.String(synth::kRuntimeConfigSchema));
+    v2.SetNew("schemaVersion", arena.Integer(2));
+    v2.SetNew("midiInstrument", synth::ToJSON(arena, instrument));
+    v2.SetNew("audioDevice", synth::ToJSON(arena, sourceAudio));
+    v2.SetNew("sync", synth::ToJSON(arena, sync));
+
+    synth::MidiInstrumentConfig loadedInstrument;
+    synth::AudioDeviceState loadedAudio;
+    synth::SyncConfig loadedSync;
+    REQUIRE_TRUE(synth::LoadRuntimeConfigJSON(v2, loadedInstrument, loadedAudio, loadedSync));
+    REQUIRE_TRUE(loadedSync == sync);
 }
 
 TEST_CASE(runtime_config_load_invalid_schema_preserves_targets) {
@@ -14238,11 +16174,6 @@ TEST_CASE(patch_messages_serialize_load_and_revert_initialized_state) {
     REQUIRE_TRUE(synth::ValidatePatchJSON(out.document.root));
     REQUIRE_TRUE(out.document.root.Get("midiInstrument").IsNull());
     REQUIRE_TRUE(out.document.root.Get("audioDevice").IsNull());
-    REQUIRE_TRUE(synth::ApplyPatchMessage(
-                     synth::PatchMessageIn::SerializeToJSON(43, "Too Small"), manager, instrument, defaultInstrument,
-                     audioDevice, defaultAudioDevice, outputBus,
-                     synth::PatchSerializationContext{.initialArenaCapacity = 1, .maxArenaCapacity = 1}) ==
-                 synth::PatchApplyStatus::ArenaExhausted);
 
     cutoff.SceneCenter(0) = 0.1f;
     instrument.controllers[0].input.identifier = "changed";
@@ -14438,10 +16369,9 @@ TEST_CASE(apply_patch_message_reports_exhaustion_without_growing_caller_arena) {
     REQUIRE_TRUE(tiny.Capacity() == 64);  // caller's arena was not grown/reallocated
 }
 
-TEST_CASE(patch_manager_save_load_revert_lifecycle_uses_messages_and_current_directory) {
+TEST_CASE(patch_manager_save_load_new_lifecycle_uses_messages_and_current_directory) {
     synth::PatchMessageInBus inputBus(8);
     synth::MessageOutBus outputBus(8);
-    synth::PatchManager patchManager(&inputBus, &outputBus);
 
     synth::ParameterManager manager;
     manager.SetGestureCount(0);
@@ -14453,6 +16383,8 @@ TEST_CASE(patch_manager_save_load_revert_lifecycle_uses_messages_and_current_dir
     });
     auto& cutoff = manager.CreateParameter(group, {.name = "Cutoff", .defaultValue = 0.2f});
     manager.CaptureDefaultControlState();
+
+    synth::PatchManager patchManager(&inputBus, &outputBus, &manager);
 
     const synth::MidiControllerProfileConfig defaultProfile = synth::WrldBldrDefaultProfileConfig({});
     const synth::MidiInstrumentConfig defaultInstrument = MakeInstrumentFromProfile(defaultProfile);
@@ -14546,7 +16478,7 @@ TEST_CASE(patch_manager_save_load_revert_lifecycle_uses_messages_and_current_dir
     REQUIRE_TRUE(*patchManager.CurrentPatchDirectory() == patchDir);
 
     cutoff.SceneCenter(0) = 0.0f;
-    REQUIRE_TRUE(patchManager.RevertPatch().status == synth::PatchCommandStatus::Ok);
+    REQUIRE_TRUE(patchManager.LoadPatch(patchDir).status == synth::PatchCommandStatus::Ok);
     REQUIRE_TRUE(inputBus.Pop(message));
     REQUIRE_TRUE(message.type == synth::PatchMessageIn::Type::LoadFromJSON);
     REQUIRE_TRUE(synth::ApplyPatchMessage(message, manager, instrument, defaultInstrument,

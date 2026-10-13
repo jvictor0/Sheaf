@@ -1,6 +1,7 @@
 #include "synth/ParameterModulation.hpp"
 
 #include "synth/ButtonGrid.hpp"
+#include "synth/MasterClock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -318,6 +319,17 @@ bool OutsideRange(float value, RangeKind range) {
     return ClampToRange(value, range) != value;
 }
 
+// Dispatches to the one-way amount curve for a kOneWayAmount target, the
+// unchanged bipolar curve otherwise -- the single choke point both call
+// sites in Parameter::ComputeAtDepth route through, so a kBipolar target
+// (every app besides this one, and every non-opted-in Froggers parameter)
+// reads exactly what it read before this law existed.
+float ModulationDepthTargetForKind(ModulationTargetKind kind, float normalizedKnob) {
+    return kind == ModulationTargetKind::kOneWayAmount
+               ? OneWayModulationDepthTargetFromKnob(normalizedKnob)
+               : ModulationDepthTargetFromKnob(normalizedKnob);
+}
+
 float RangeMin(RangeKind) {
     return 0.0f;
 }
@@ -425,6 +437,42 @@ bool ParseDecimalIndex(std::string_view text, std::size_t& result) {
     return parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
+// Mirrors the reach of Parameter::LoadValuesFromJSON's own "modDepths" walk,
+// without creating anything: how many of the depths json names for
+// `parameter`, at every level, do not exist on it yet. A null parameter
+// counts every depth json names as missing, since none of them can exist
+// without their own parent -- the state a name under a missing depth's own
+// "modDepths" is in.
+std::size_t CountMissingDepthsForValues(const Parameter* parameter, JSON json, std::size_t numModulators) {
+    if (!IsJsonObject(json)) {
+        return 0;
+    }
+    const JSON modDepths = json.Get("modDepths");
+    if (!IsJsonObject(modDepths)) {
+        return 0;
+    }
+    std::size_t missing = 0;
+    const JsonMember* members = JsonObjectMembers(modDepths);
+    for (std::size_t ix = 0; ix < modDepths.Size(); ++ix) {
+        if (members[ix].m_key == nullptr) {
+            continue;
+        }
+        std::size_t modIx = 0;
+        if (!ParseDecimalIndex(members[ix].m_key, modIx) || modIx >= numModulators) {
+            continue;
+        }
+        const Parameter* depthParameter = parameter != nullptr ? parameter->ModulationDepthParameter(modIx) : nullptr;
+        if (depthParameter == nullptr) {
+            ++missing;
+            missing += CountMissingDepthsForValues(nullptr, JSON(members[ix].m_value), numModulators);
+        } else {
+            missing += CountMissingDepthsForValues(depthParameter, JSON(members[ix].m_value),
+                                                    depthParameter->Group().Config().numModulators);
+        }
+    }
+    return missing;
+}
+
 } // namespace
 
 float ConvertOnePoleAlpha(float referenceAlpha, double referenceRate, double processingRate) {
@@ -480,6 +528,8 @@ ParameterStorageBatch::ParameterStorageBatch(const ParameterGroupConfig& config,
       currentKnobValueArena(capacity * config.numVoices),
       uiDisplayCenterArena(capacity * config.numVoices),
       uiDisplaySpreadEnergyArena(capacity * config.numVoices),
+      lastRawValueArena(capacity * config.numVoices),
+      settledPhase2KnobArena(capacity * config.numVoices),
       modulationDepthArena(capacity * config.numModulators, nullptr),
       sceneCenterArena(capacity * config.numScenes),
       gestureValueArena(capacity * config.numScenes * gestureCount),
@@ -661,7 +711,8 @@ ParameterGroup::ParameterGroup(ParameterGroupConfig config, ParameterManager& ma
       manager_(&manager),
       gestureCount_(gestureCount),
       modulators_(config.numVoices, config.numModulators),
-      parameterCount_(0) {
+      parameterCount_(0),
+      storageLowWatermark_(config.numModulators * 2) {
     parameters_.reserve(config_.maxParameters);
     topLevelParameters_.reserve(config_.maxParameters);
     recycledLocalSlots_.reserve(config_.maxParameters);
@@ -680,6 +731,8 @@ ParameterGroup::ParameterGroup(ParameterGroupConfig config, ParameterManager& ma
     currentKnobValueArena_.resize(config_.maxParameters * config_.numVoices);
     uiDisplayCenterArena_.resize(config_.maxParameters * config_.numVoices);
     uiDisplaySpreadEnergyArena_.resize(config_.maxParameters * config_.numVoices);
+    lastRawValueArena_.resize(config_.maxParameters * config_.numVoices);
+    settledPhase2KnobArena_.resize(config_.maxParameters * config_.numVoices);
     modulationDepthArena_.resize(config_.maxParameters * config_.numModulators, nullptr);
     sceneCenterArena_.resize(config_.maxParameters * config_.numScenes);
     gestureValueArena_.resize(config_.maxParameters * config_.numScenes * gestureCount_);
@@ -692,10 +745,18 @@ bool ParameterGroup::CanAllocate() const {
     return AvailableParameterSlots() > 0;
 }
 
+ParameterStorageBatch* ParameterGroup::FirstStorageBatch() const {
+    return firstStorageBatch_.load(std::memory_order_acquire);
+}
+
+ParameterStorageBatch* ParameterGroup::NextStorageBatch(const ParameterStorageBatch& batch) {
+    return batch.next.load(std::memory_order_acquire);
+}
+
 std::size_t ParameterGroup::AvailableParameterSlots() const {
     const std::size_t initialAllocated = std::min(parameterCount_, config_.maxParameters);
     std::size_t available = config_.maxParameters - initialAllocated;
-    for (const auto& batch : extraStorageBatches_) {
+    for (ParameterStorageBatch* batch = FirstStorageBatch(); batch != nullptr; batch = NextStorageBatch(*batch)) {
         available += batch->Available();
     }
     return available + recycledLocalSlots_.size();
@@ -705,8 +766,15 @@ void ParameterGroup::AddParameterStorageBatch(std::unique_ptr<ParameterStorageBa
     if (batch == nullptr || !batch->Compatible(config_, gestureCount_)) {
         throw std::invalid_argument("parameter storage batch does not match group shape");
     }
-    storageRequestPending_ = false;
-    extraStorageBatches_.push_back(std::move(batch));
+    storageRequestPending_.store(false, std::memory_order_relaxed);
+    ParameterStorageBatch* raw = batch.get();
+    ownedStorageBatches_.push_back(std::move(batch));
+    if (lastStorageBatch_ == nullptr) {
+        firstStorageBatch_.store(raw, std::memory_order_release);
+    } else {
+        lastStorageBatch_->next.store(raw, std::memory_order_release);
+    }
+    lastStorageBatch_ = raw;
 }
 
 Parameter& ParameterGroup::CreateLocalParameter(ParameterConfig config, ParameterId id) {
@@ -745,7 +813,7 @@ Parameter& ParameterGroup::CreateLocalParameter(ParameterConfig config, Paramete
         return result;
     }
 
-    for (const auto& batch : extraStorageBatches_) {
+    for (ParameterStorageBatch* batch = FirstStorageBatch(); batch != nullptr; batch = NextStorageBatch(*batch)) {
         if (batch->Available() == 0) {
             continue;
         }
@@ -799,26 +867,12 @@ void ParameterGroup::RegisterTopLevelParameter(Parameter& parameter) {
     topLevelParameters_.push_back(&parameter);
 }
 
-Parameter& ParameterGroup::ParameterByLocalIndex(std::size_t localIx) {
-    if (localIx < parameters_.size()) {
-        return *parameters_.at(localIx);
-    }
-    std::size_t remaining = localIx - parameters_.size();
-    for (const auto& batch : extraStorageBatches_) {
-        if (remaining < batch->parameters.size()) {
-            return *batch->parameters.at(remaining);
-        }
-        remaining -= batch->parameters.size();
-    }
-    throw std::out_of_range("parameter local index out of range");
-}
-
 const Parameter& ParameterGroup::ParameterByLocalIndex(std::size_t localIx) const {
     if (localIx < parameters_.size()) {
         return *parameters_.at(localIx);
     }
     std::size_t remaining = localIx - parameters_.size();
-    for (const auto& batch : extraStorageBatches_) {
+    for (ParameterStorageBatch* batch = FirstStorageBatch(); batch != nullptr; batch = NextStorageBatch(*batch)) {
         if (remaining < batch->parameters.size()) {
             return *batch->parameters.at(remaining);
         }
@@ -827,17 +881,28 @@ const Parameter& ParameterGroup::ParameterByLocalIndex(std::size_t localIx) cons
     throw std::out_of_range("parameter local index out of range");
 }
 
+Parameter& ParameterGroup::ParameterByLocalIndex(std::size_t localIx) {
+    return const_cast<Parameter&>(std::as_const(*this).ParameterByLocalIndex(localIx));
+}
+
 void ParameterGroup::RequestParameterStorageBatch(std::size_t minimumAdditionalParameters) {
-    if (storageRequestPending_ || manager_ == nullptr || minimumAdditionalParameters == 0) {
+    if (storageRequestPending_.load(std::memory_order_relaxed) || manager_ == nullptr ||
+        minimumAdditionalParameters == 0) {
         return;
     }
-    if (manager_->RequestParameterStorageBatch(*this, minimumAdditionalParameters)) {
-        storageRequestPending_ = true;
+    // Stored true before the call, not after it returns: a request that
+    // succeeds can be fulfilled, and its batch appended through
+    // AddParameterStorageBatch, before this function returns. Storing true
+    // afterward would overwrite that completion's false and leave the flag
+    // stuck, so the group would never ask for storage again.
+    storageRequestPending_.store(true, std::memory_order_relaxed);
+    if (!manager_->RequestParameterStorageBatch(*this, minimumAdditionalParameters)) {
+        storageRequestPending_.store(false, std::memory_order_relaxed);
     }
 }
 
 void ParameterGroup::RequestParameterStorageBatchIfLow() {
-    const std::size_t lowWatermark = config_.numModulators * 2;
+    const std::size_t lowWatermark = storageLowWatermark_;
     if (lowWatermark == 0) {
         return;
     }
@@ -862,11 +927,24 @@ void ParameterGroup::ConfigureProcessingTiming(const ParameterProcessingTiming& 
     config_.targetComputeIntervalSamples = timing.targetComputeIntervalSamples;
     config_.uiDisplayCenterAlpha = timing.uiDisplayCenterAlpha;
     config_.uiDisplaySpreadAlpha = timing.uiDisplaySpreadAlpha;
+    for (Parameter* parameter : topLevelParameters_) {
+        parameter->Wake();  // spm-96: new alphas change what a lite step does.
+    }
 }
 
 void ParameterGroup::ProcessSamplePhase1(std::uint64_t sampleIndex) {
+    // spm-96: a quiescent parameter skips its lite phase 1, except on a
+    // compute sample (Compute() wakes it and the full step runs).
+    const bool computeSample = sampleIndex % config_.targetComputeIntervalSamples == 0;
     for (Parameter* parameter : topLevelParameters_) {
-        parameter->ProcessSamplePhase1(sampleIndex);
+        if (config_.skipQuiescentParameters && !computeSample && parameter->Phase1Quiescent()) {
+            parameter->RestoreLastRawKnobValues();
+            if (processingObserver_ != nullptr) {
+                ++processingObserver_->topLevelQuiescentSkips;
+            }
+        } else {
+            parameter->ProcessSamplePhase1(sampleIndex);
+        }
         if (processingObserver_ != nullptr) {
             ++processingObserver_->topLevelProcessLiteCalls;
         }
@@ -874,7 +952,12 @@ void ParameterGroup::ProcessSamplePhase1(std::uint64_t sampleIndex) {
 }
 
 void ParameterGroup::ProcessSamplePhase2() {
+    // spm-96: decided here, after phase 1 and any application overwrite, so a
+    // parameter woken during this sample's phase 1 still runs its phase 2.
     for (Parameter* parameter : topLevelParameters_) {
+        if (config_.skipQuiescentParameters && parameter->Phase2WouldChangeNothing()) {
+            continue;
+        }
         parameter->ProcessSamplePhase2();
     }
 }
@@ -933,6 +1016,10 @@ Parameter::Parameter(ParameterId id, ParameterGroup& group, ParameterConfig conf
       uiDisplaySpreadEnergies_(ArenaSlice(group_.uiDisplaySpreadEnergyArena_,
                                           slotIx_ * group_.Config().numVoices,
                                           group_.Config().numVoices)),
+      lastRawValues_(ArenaSlice(group_.lastRawValueArena_, slotIx_ * group_.Config().numVoices,
+                                group_.Config().numVoices)),
+      settledPhase2Knobs_(ArenaSlice(group_.settledPhase2KnobArena_, slotIx_ * group_.Config().numVoices,
+                                     group_.Config().numVoices)),
       modulationDepths_(ArenaSlice(group_.modulationDepthArena_, slotIx_ * group_.Config().numModulators,
                                    group_.Config().numModulators)),
       sceneCenters_(ArenaSlice(group_.sceneCenterArena_, slotIx_ * group_.Config().numScenes,
@@ -1015,6 +1102,10 @@ Parameter::Parameter(ParameterId id, ParameterGroup& group, ParameterConfig conf
       uiDisplaySpreadEnergies_(ArenaSlice(storageBatch.uiDisplaySpreadEnergyArena,
                                           slotIx_ * group_.Config().numVoices,
                                           group_.Config().numVoices)),
+      lastRawValues_(ArenaSlice(storageBatch.lastRawValueArena, slotIx_ * group_.Config().numVoices,
+                                group_.Config().numVoices)),
+      settledPhase2Knobs_(ArenaSlice(storageBatch.settledPhase2KnobArena, slotIx_ * group_.Config().numVoices,
+                                     group_.Config().numVoices)),
       modulationDepths_(ArenaSlice(storageBatch.modulationDepthArena, slotIx_ * group_.Config().numModulators,
                                    group_.Config().numModulators)),
       sceneCenters_(ArenaSlice(storageBatch.sceneCenterArena, slotIx_ * group_.Config().numScenes,
@@ -1106,6 +1197,7 @@ std::size_t Parameter::CollectNeutralChildren() {
 }
 
 void Parameter::ResetLocalForReuse(ParameterId id, ParameterConfig config) {
+    Wake();  // spm-96
     if (id != kLocalParameterId) {
         throw std::logic_error("recycled parameter slots are local-only");
     }
@@ -1366,6 +1458,7 @@ bool Parameter::LoadValuesFromJSON(JSON json) {
     if (!sceneCenters.IsNull() && IsJsonArray(sceneCenters) && sceneCenters.Size() == group_.Config().numScenes) {
         for (std::size_t sceneIx = 0; sceneIx < group_.Config().numScenes; ++sceneIx) {
             SceneCenter(sceneIx) = static_cast<float>(sceneCenters.GetAt(sceneIx).NumberValue());
+            EnforceOneWayAmountFloor(sceneIx);
         }
     }
 
@@ -1436,16 +1529,31 @@ bool Parameter::LoadValuesFromJSON(JSON json) {
     return true;
 }
 
+namespace {
+
+// spm-96: one smoothing step, `value += alpha * (target - value)`, reporting
+// whether it changed the value's bits.
+bool SmoothAndReportChange(float& value, float target, float alpha) {
+    const float before = value;
+    value += alpha * (target - value);
+    return std::bit_cast<std::uint32_t>(value) != std::bit_cast<std::uint32_t>(before);
+}
+
+bool SameBits(float a, float b) {
+    return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+}
+
+}  // namespace
+
 void Parameter::ProcessLitePhase1() {
     const float alpha = group_.Config().processLiteAlpha;
-    currentCenter_ += alpha * (targetCenter_ - currentCenter_);
+    bool changed = SmoothAndReportChange(currentCenter_, targetCenter_, alpha);
     for (std::size_t voiceIx = 0; voiceIx < currentCenterScales_.size(); ++voiceIx) {
-        currentCenterScales_[voiceIx] +=
-            alpha * (targetCenterScales_[voiceIx] - currentCenterScales_[voiceIx]);
-        currentNormalizationOffsets_[voiceIx] +=
-            alpha * (targetNormalizationOffsets_[voiceIx] - currentNormalizationOffsets_[voiceIx]);
-        currentMinValues_[voiceIx] += alpha * (targetMinValues_[voiceIx] - currentMinValues_[voiceIx]);
-        currentMaxValues_[voiceIx] += alpha * (targetMaxValues_[voiceIx] - currentMaxValues_[voiceIx]);
+        changed |= SmoothAndReportChange(currentCenterScales_[voiceIx], targetCenterScales_[voiceIx], alpha);
+        changed |= SmoothAndReportChange(currentNormalizationOffsets_[voiceIx], targetNormalizationOffsets_[voiceIx],
+                                         alpha);
+        changed |= SmoothAndReportChange(currentMinValues_[voiceIx], targetMinValues_[voiceIx], alpha);
+        changed |= SmoothAndReportChange(currentMaxValues_[voiceIx], targetMaxValues_[voiceIx], alpha);
     }
     for (std::size_t voiceIx = 0; voiceIx < group_.Config().numVoices; ++voiceIx) {
         for (std::size_t routeSlot = 0; routeSlot < activeRouteCount_; ++routeSlot) {
@@ -1458,7 +1566,10 @@ void Parameter::ProcessLitePhase1() {
     }
     for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
         currentKnobValues_[voiceIx] = GetRaw(voiceIx);
+        lastRawValues_[voiceIx] = currentKnobValues_[voiceIx];
     }
+    // spm-96: with no route, the next step reads exactly what this one did.
+    phase1Quiescent_ = !changed && activeRouteCount_ == 0;
 }
 
 void Parameter::ReplaceCachedKnobValue(std::size_t voiceIx, float normalizedValue) {
@@ -1469,13 +1580,37 @@ void Parameter::ReplaceCachedKnobValue(std::size_t voiceIx, float normalizedValu
 }
 
 void Parameter::ProcessLitePhase2() {
+    bool changed = false;
     for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
         const float knob = currentKnobValues_[voiceIx];
+        const float centerBefore = uiDisplayCenters_[voiceIx];
+        const float energyBefore = uiDisplaySpreadEnergies_[voiceIx];
         uiDisplayCenters_[voiceIx] += group_.Config().uiDisplayCenterAlpha * (knob - uiDisplayCenters_[voiceIx]);
         const float residual = knob - uiDisplayCenters_[voiceIx];
         uiDisplaySpreadEnergies_[voiceIx] +=
             group_.Config().uiDisplaySpreadAlpha * ((residual * residual) - uiDisplaySpreadEnergies_[voiceIx]);
+        changed = changed || !SameBits(uiDisplayCenters_[voiceIx], centerBefore) ||
+                  !SameBits(uiDisplaySpreadEnergies_[voiceIx], energyBefore);
     }
+    // spm-96: settled when nothing changed; remember the knobs it read.
+    phase2Settled_ = !changed;
+    if (phase2Settled_) {
+        for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
+            settledPhase2Knobs_[voiceIx] = currentKnobValues_[voiceIx];
+        }
+    }
+}
+
+bool Parameter::Phase2WouldChangeNothing() const {
+    if (!phase2Settled_) {
+        return false;
+    }
+    for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
+        if (!SameBits(currentKnobValues_[voiceIx], settledPhase2Knobs_[voiceIx])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void Parameter::ProcessLite() {
@@ -1547,11 +1682,15 @@ void Parameter::HandleIncDec(const SceneState& scene, float delta) {
 
     if (activeEffectiveWeightSum == 0.0f) {
         ApplySceneDistribution(SceneCenter(scene.leftScene), SceneCenter(scene.rightScene), blend, delta, config_.range);
+        EnforceOneWayAmountFloor(scene.leftScene);
+        EnforceOneWayAmountFloor(scene.rightScene);
         return;
     }
 
     ApplySceneDistribution(SceneCenter(scene.leftScene), SceneCenter(scene.rightScene), blend,
                            delta * (baseShareNumerator / activeEffectiveWeightSum), config_.range);
+    EnforceOneWayAmountFloor(scene.leftScene);
+    EnforceOneWayAmountFloor(scene.rightScene);
 
     ForEachGestureBit(activeGestures, [&](std::size_t gestureIx) {
         const float effectiveWeight = EffectiveGestureWeight(scene, gestureIx, blend);
@@ -1715,6 +1854,8 @@ void Parameter::HandleSetAbsolute(const SceneState& scene, float normalizedTarge
             return;
         }
         committed = true;
+        EnforceOneWayAmountFloor(scene.leftScene);
+        EnforceOneWayAmountFloor(scene.rightScene);
     } catch (...) {
         restoreSnapshot();
     }
@@ -1722,6 +1863,17 @@ void Parameter::HandleSetAbsolute(const SceneState& scene, float normalizedTarge
 
 void Parameter::RandomizeVisibleValue(const SceneState& scene, float normalized) {
     ValidateSceneEndpoints(scene);
+    if (id_ == kLocalParameterId && config_.modulationTargetKind == ModulationTargetKind::kOneWayAmount) {
+        // A depth child of a one-way amount target draws only from the upper
+        // half of raw storage ([0.5, 1]) -- the half that resolves to a
+        // strictly positive depth -- so a Randomize press keeps attaching a
+        // live route at the same rate MANUAL.md already advertises for every
+        // other parameter, rather than silently doubling the "off" rate.
+        // Does not apply to the target's own top-level value (real id_,
+        // never kLocalParameterId), whose Randomize draw is an ordinary
+        // full-range amount.
+        normalized = 0.5f + 0.5f * std::clamp(normalized, 0.0f, 1.0f);
+    }
     const float target = LinearMap(RangeMin(config_.range), RangeMax(config_.range),
                                    std::clamp(normalized, 0.0f, 1.0f));
     Compute(scene);
@@ -1733,6 +1885,7 @@ void Parameter::RandomizeVisibleValue(const SceneState& scene, float normalized)
 }
 
 void Parameter::RevertToDefault(const SceneState& scene) {
+    Wake();  // spm-96
     ValidateSceneEndpoints(scene);
     for (Parameter* depthParameter : modulationDepths_) {
         if (depthParameter != nullptr) {
@@ -1770,6 +1923,7 @@ void Parameter::RevertToDefault(const SceneState& scene) {
 }
 
 void Parameter::RevertAllToDefault() {
+    Wake();  // spm-96
     for (Parameter* depthParameter : modulationDepths_) {
         if (depthParameter != nullptr) {
             depthParameter->RevertAllToDefault();
@@ -1871,6 +2025,10 @@ ParameterConfig Parameter::ModulationDepthConfig(std::size_t modIx) const {
         .baseColor = modulator.sourceColor,
         .visualizer = modulator.visualizer,
         .indicatorColors = config_.indicatorColors,
+        // A depth Parameter inherits its ancestor's own target kind, so a
+        // depth-of-a-depth (recursively, through this same function) reads
+        // the identical kind its top-level target carries.
+        .modulationTargetKind = config_.modulationTargetKind,
     };
 }
 
@@ -1912,6 +2070,7 @@ bool Parameter::GestureActive(std::size_t sceneIx, std::size_t gestureIx) const 
 }
 
 std::span<float> Parameter::CurrentDepthSlots(std::size_t voiceIx) {
+    Wake();  // spm-96
     if (voiceIx >= group_.Config().numVoices) {
         throw std::out_of_range("parameter voice index out of range");
     }
@@ -1934,6 +2093,7 @@ std::span<const float> Parameter::CurrentDepthSlots(std::size_t voiceIx) const {
 }
 
 std::span<float> Parameter::TargetDepthSlots(std::size_t voiceIx) {
+    Wake();  // spm-96
     if (voiceIx >= group_.Config().numVoices) {
         throw std::out_of_range("parameter voice index out of range");
     }
@@ -2026,6 +2186,7 @@ void Parameter::AssertRouteBijection() const {
 }
 
 void Parameter::EnsureRouteActive(std::size_t sourceIx) {
+    Wake();  // spm-96
     if (sourceIx >= sourceRoutePositions_.size()) {
         throw std::out_of_range("parameter modulator index out of range");
     }
@@ -2052,6 +2213,7 @@ void Parameter::EnsureRouteActive(std::size_t sourceIx) {
 }
 
 void Parameter::RemoveActiveRoute(std::size_t routeSlot) {
+    Wake();  // spm-96
     if (routeSlot >= activeRouteCount_) {
         throw std::out_of_range("active parameter route slot out of range");
     }
@@ -2084,6 +2246,7 @@ bool Parameter::RouteNeutralAcrossVoices(std::size_t routeSlot) const {
 }
 
 void Parameter::PruneNeutralActiveRoutes() {
+    Wake();  // spm-96
     for (std::size_t routeSlot = activeRouteCount_; routeSlot-- > 0;) {
         if (!RouteNeutralAcrossVoices(routeSlot)) {
             continue;
@@ -2126,10 +2289,18 @@ float Parameter::EffectiveGestureWeight(const SceneState& scene, std::size_t ges
 
 void Parameter::ResetSceneToDefault(std::size_t sceneIx, float defaultValue) {
     SceneCenter(sceneIx) = defaultValue;
+    EnforceOneWayAmountFloor(sceneIx);
     gestureActiveMasks_[sceneIx] = 0;
 }
 
+void Parameter::EnforceOneWayAmountFloor(std::size_t sceneIx) {
+    if (id_ == kLocalParameterId && config_.modulationTargetKind == ModulationTargetKind::kOneWayAmount) {
+        sceneCenters_[sceneIx] = std::max(sceneCenters_[sceneIx], kNeutralModulationDepthCenter);
+    }
+}
+
 void Parameter::ResetModulationDepthToNeutral(const SceneState& scene) {
+    Wake();  // spm-96
     ValidateSceneEndpoints(scene);
     for (Parameter* depthParameter : modulationDepths_) {
         if (depthParameter != nullptr) {
@@ -2199,6 +2370,7 @@ float Parameter::ComputeRawCenter(const SceneState& scene) const {
 }
 
 void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDepth, bool smoothTargetCenter) {
+    Wake();  // spm-96
     recursionDepth_ = recursionDepth;
     if (recursionDepth > 0 && group_.processingObserver_ != nullptr) {
         ++group_.processingObserver_->localRecursiveComputeCalls;
@@ -2223,7 +2395,8 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
         bool targetNonNeutral = false;
         if (depthParameter != nullptr) {
             for (std::size_t voiceIx = 0; voiceIx < group_.Config().numVoices; ++voiceIx) {
-                if (std::fabs(ModulationDepthTargetFromKnob(depthParameter->GetRaw(voiceIx))) >
+                if (std::fabs(ModulationDepthTargetForKind(config_.modulationTargetKind,
+                                                            depthParameter->GetRaw(voiceIx))) >
                     kModulationNeutralTolerance) {
                     targetNonNeutral = true;
                     break;
@@ -2249,12 +2422,57 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
         const std::size_t routeSlot = sourceRoutePositions_[sourceIx];
         for (std::size_t voiceIx = 0; voiceIx < group_.Config().numVoices; ++voiceIx) {
             targetDepths_[VoiceRouteIndex(voiceIx, routeSlot)] =
-                depthParameter == nullptr ? 0.0f
-                                          : ModulationDepthTargetFromKnob(depthParameter->GetRaw(voiceIx));
+                depthParameter == nullptr
+                    ? 0.0f
+                    : ModulationDepthTargetForKind(config_.modulationTargetKind, depthParameter->GetRaw(voiceIx));
         }
     }
 
     for (std::size_t voiceIx = 0; voiceIx < group_.Config().numVoices; ++voiceIx) {
+        const bool isOneWayAmount = config_.modulationTargetKind == ModulationTargetKind::kOneWayAmount;
+        if (isOneWayAmount) {
+            // A kOneWayAmount target always crosses over to the crossfade
+            // computation below (proposal.md's "The law"), even when the
+            // group's own blend mode is kAttenuverter: a disconnected
+            // source's route still contributes nothing, regardless of the
+            // depth or the source's own stored value, so it is zeroed here
+            // before the crossfade weighting below ever sees it.
+            for (std::size_t routeSlot = 0; routeSlot < activeRouteCount_; ++routeSlot) {
+                const std::size_t sourceIx = RouteSourceIndex(routeSlot);
+                const ModulatorMetadata& sourceMetadata = group_.GetModulators().Metadata(sourceIx);
+                if (!sourceMetadata.connected) {
+                    targetDepths_[VoiceRouteIndex(voiceIx, routeSlot)] = 0.0f;
+                }
+            }
+        }
+
+        if (group_.Config().modulationBlendMode == ModulationBlendMode::kAttenuverter && !isOneWayAmount) {
+            targetCenterScales_[voiceIx] = 1.0f;
+
+            float normalizationOffset = 0.0f;
+            float minContribution = 0.0f;
+            float maxContribution = 0.0f;
+            for (std::size_t routeSlot = 0; routeSlot < activeRouteCount_; ++routeSlot) {
+                const std::size_t sourceIx = RouteSourceIndex(routeSlot);
+                const ModulatorMetadata& sourceMetadata = group_.GetModulators().Metadata(sourceIx);
+                float restPoint = 0.5f;
+                if (sourceMetadata.restsAtZero) {
+                    restPoint = 0.0f;
+                    targetDepths_[VoiceRouteIndex(voiceIx, routeSlot)] *= 0.5f;
+                }
+                const float depth = targetDepths_[VoiceRouteIndex(voiceIx, routeSlot)];
+                normalizationOffset -= depth * restPoint;
+                const float candidateA = depth * (0.0f - restPoint);
+                const float candidateB = depth * (1.0f - restPoint);
+                minContribution += std::min(candidateA, candidateB);
+                maxContribution += std::max(candidateA, candidateB);
+            }
+            targetNormalizationOffsets_[voiceIx] = normalizationOffset;
+            targetMinValues_[voiceIx] = ClampToRange(targetCenter_ + minContribution, config_.range);
+            targetMaxValues_[voiceIx] = ClampToRange(targetCenter_ + maxContribution, config_.range);
+            continue;
+        }
+
         float weightSum = 0.0f;
         for (std::size_t routeSlot = 0; routeSlot < activeRouteCount_; ++routeSlot) {
             weightSum += std::fabs(targetDepths_[VoiceRouteIndex(voiceIx, routeSlot)]);
@@ -2306,6 +2524,7 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
 }
 
 void Parameter::SnapCurrentToTarget() {
+    Wake();  // spm-96
     currentCenter_ = targetCenter_;
     std::copy(targetCenterScales_.begin(), targetCenterScales_.end(), currentCenterScales_.begin());
     std::copy(targetNormalizationOffsets_.begin(), targetNormalizationOffsets_.end(), currentNormalizationOffsets_.begin());
@@ -2322,6 +2541,7 @@ void Parameter::SnapCurrentToTarget() {
 }
 
 void Parameter::SeedCachedKnobAndUiDisplayState() {
+    Wake();  // spm-96
     for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
         currentKnobValues_[voiceIx] = GetRaw(voiceIx);
         uiDisplayCenters_[voiceIx] = currentKnobValues_[voiceIx];
@@ -2503,38 +2723,6 @@ float ParameterGroup::GestureValue(std::size_t gestureIx) const {
     return manager_->GestureValue(gestureIx);
 }
 
-void ParameterGroup::ClearGestureActiveFlagsForActiveSceneSelection(const SceneState& scene, std::size_t gestureIx) {
-    if (gestureIx >= gestureCount_) {
-        throw std::out_of_range("gesture index out of range");
-    }
-    if (scene.leftScene >= config_.numScenes || scene.rightScene >= config_.numScenes) {
-        throw std::out_of_range("scene index out of range");
-    }
-
-    const float blend = std::clamp(scene.blend, 0.0f, 1.0f);
-    auto clearParameter = [&](Parameter& parameter) {
-        if (blend <= 0.0f) {
-            parameter.SetGestureActive(scene.leftScene, gestureIx, false);
-        } else if (blend >= 1.0f) {
-            parameter.SetGestureActive(scene.rightScene, gestureIx, false);
-        } else {
-            parameter.SetGestureActive(scene.leftScene, gestureIx, false);
-            if (scene.rightScene != scene.leftScene) {
-                parameter.SetGestureActive(scene.rightScene, gestureIx, false);
-            }
-        }
-    };
-
-    for (const auto& parameter : parameters_) {
-        clearParameter(*parameter);
-    }
-    for (const auto& batch : extraStorageBatches_) {
-        for (const auto& parameter : batch->parameters) {
-            clearParameter(*parameter);
-        }
-    }
-}
-
 Bank::Bank(ParameterManager* manager)
     : manager_(manager) {}
 
@@ -2665,6 +2853,17 @@ void Bank::HandleSetAbsolute(PhysicalEncoderId encoderId, const SceneState& scen
     cell->parameter->HandleSetAbsolute(scene, normalizedTarget);
 }
 
+// Same shape as HandleSetAbsolute above, but resolves against topLevel_
+// instead of visible_, so the write reaches the real parameter even when
+// this bank's visible_ has been swapped out for a modulation-depth view.
+void Bank::HandleSetAbsoluteOnTopLevel(PhysicalEncoderId encoderId, const SceneState& scene, float normalizedTarget) {
+    Cell* cell = FindTopLevelCell(encoderId);
+    if (cell == nullptr || cell->parameter == nullptr) {
+        return;
+    }
+    cell->parameter->HandleSetAbsolute(scene, normalizedTarget);
+}
+
 void Bank::ApplyModifierToTopLevel(Modifier modifier, const SceneState& scene) {
     std::vector<Parameter*> visited;
     visited.reserve(topLevel_.size());
@@ -2766,6 +2965,15 @@ Bank::Cell* Bank::FindVisibleCell(PhysicalEncoderId encoderId) {
 
 const Bank::Cell* Bank::FindVisibleCell(PhysicalEncoderId encoderId) const {
     for (const Cell& cell : visible_) {
+        if (cell.encoderId == encoderId) {
+            return &cell;
+        }
+    }
+    return nullptr;
+}
+
+Bank::Cell* Bank::FindTopLevelCell(PhysicalEncoderId encoderId) {
+    for (Cell& cell : topLevel_) {
         if (cell.encoderId == encoderId) {
             return &cell;
         }
@@ -3006,13 +3214,27 @@ bool BankSlot::OwnsPhysicalEncoder(PhysicalEncoderId encoderId) const {
 }
 
 ParameterMessageOut ParameterMessageOut::ParameterStorageBatchNeeded(ParameterGroup& group,
-                                                                     std::size_t minimumAdditionalParameters,
-                                                                     std::size_t requestedParameters) {
+                                                                     std::size_t minimumAdditionalParameters) {
     ParameterMessageOut message;
     message.type = Type::ParameterStorageBatchNeeded;
     message.group = &group;
     message.minimumAdditionalParameters = minimumAdditionalParameters;
-    message.requestedParameters = requestedParameters;
+    return message;
+}
+
+ParameterMessageOut ParameterMessageOut::AppAction(std::size_t appActionIx, float value) {
+    ParameterMessageOut message;
+    message.type = Type::AppAction;
+    message.appActionIx = appActionIx;
+    message.value = value;
+    return message;
+}
+
+ParameterMessageOut ParameterMessageOut::AppEncoderPress(std::size_t slotIx, std::size_t position) {
+    ParameterMessageOut message;
+    message.type = Type::AppEncoderPress;
+    message.slotIx = slotIx;
+    message.position = position;
     return message;
 }
 
@@ -3152,6 +3374,49 @@ bool ParameterManager::LoadParameterValuesFromJSON(JSON json) {
 
     ComputeAllParameters();
     return true;
+}
+
+std::vector<DepthNeed> ParameterManager::MissingDepthsForValuesJSON(JSON parameterValues) {
+    std::vector<DepthNeed> needs;
+    if (!IsJsonObject(parameterValues)) {
+        return needs;
+    }
+
+    const JsonMember* members = JsonObjectMembers(parameterValues);
+    for (std::size_t ix = 0; ix < parameterValues.Size(); ++ix) {
+        if (members[ix].m_key == nullptr) {
+            continue;
+        }
+        Parameter* parameter = FindParameterByName(members[ix].m_key);
+        if (parameter == nullptr) {
+            continue;
+        }
+        const std::size_t missing = CountMissingDepthsForValues(parameter, JSON(members[ix].m_value),
+                                                                 parameter->Group().Config().numModulators);
+        if (missing == 0) {
+            continue;
+        }
+        ParameterGroup* group = &parameter->Group();
+        const auto existing =
+            std::find_if(needs.begin(), needs.end(), [group](const DepthNeed& need) { return need.group == group; });
+        if (existing != needs.end()) {
+            existing->count += missing;
+        } else {
+            needs.push_back({.group = group, .count = missing});
+        }
+    }
+    return needs;
+}
+
+void ParameterManager::ProvisionStorageForPatchValues(JSON parameterValues) {
+    for (const DepthNeed& need : MissingDepthsForValuesJSON(parameterValues)) {
+        const std::size_t amount = need.count + need.group->StorageLowWatermark();
+        if (need.group->AvailableParameterSlots() >= amount) {
+            continue;
+        }
+        need.group->AddParameterStorageBatch(
+            MakeParameterStorageBatch(need.group->Config(), need.group->GestureCount(), amount));
+    }
 }
 
 std::size_t ParameterManager::CollectNeutralLocalParameters() {
@@ -3345,6 +3610,10 @@ void ParameterManager::SetSceneBlend(float blend) {
     scene_.blend = std::clamp(blend, 0.0f, 1.0f);
 }
 
+void ParameterManager::IncDecSceneBlend(float delta) {
+    scene_.blend = std::clamp(scene_.blend + delta, 0.0f, 1.0f);
+}
+
 Page& ParameterManager::CreatePage(std::string name) {
     auto page = std::make_unique<Page>();
     page->ordinal = static_cast<PageOrdinal>(pages_.size());
@@ -3487,6 +3756,27 @@ void ParameterManager::HandleSetAbsolute(std::size_t slotIx, std::size_t positio
     }
 }
 
+// Writes to bankIx directly instead of through slotIx's own bank selection:
+// no modifier gate (this write did not come from an operator's encoder, so
+// a held modifier must not silently swallow it, unlike HandleSetAbsolute
+// above), and no call into BankSlot::SelectBank/Owns/selectedBank_, so the
+// slot's current selection is left exactly as it was. slotIx is consulted
+// only for its encoder layout (to resolve position) and its epoch
+// bookkeeping, recorded the same way the slot-addressed path records it.
+void ParameterManager::HandleSetAbsoluteOnBank(std::size_t bankIx, std::size_t slotIx, std::size_t position,
+                                               float normalizedTarget, std::uint64_t absoluteEpoch) {
+    BankSlot* slot = BankSlotAt(slotIx);
+    Bank* bank = BankAt(bankIx);
+    if (slot == nullptr || bank == nullptr) {
+        return;
+    }
+    PhysicalEncoderId encoderId = 0;
+    if (slot->ResolvePosition(position, encoderId)) {
+        bank->HandleSetAbsoluteOnTopLevel(encoderId, scene_, normalizedTarget);
+        slot->RecordProcessedAbsoluteEpoch(position, absoluteEpoch);
+    }
+}
+
 bool ParameterManager::SelectBankForSlot(std::size_t slotIx, std::size_t bankIx) {
     BankSlot* slot = BankSlotAt(slotIx);
     Bank* bank = BankAt(bankIx);
@@ -3606,12 +3896,6 @@ GestureMetadata& ParameterManager::GestureMetadataAt(std::size_t gestureIx) {
 
 const GestureMetadata& ParameterManager::GestureMetadataAt(std::size_t gestureIx) const {
     return gestures_.Metadata(gestureIx);
-}
-
-void ParameterManager::ClearGestureActiveFlagsForActiveSceneSelection(std::size_t gestureIx) {
-    for (const auto& group : groups_) {
-        group->ClearGestureActiveFlagsForActiveSceneSelection(scene_, gestureIx);
-    }
 }
 
 std::size_t ParameterManager::MaxVoiceCount() const {
@@ -3767,10 +4051,8 @@ bool ParameterManager::RequestParameterStorageBatch(ParameterGroup& group, std::
     if (!OwnsGroup(group) || parameterMessageOutBus_ == nullptr || minimumAdditionalParameters == 0) {
         return false;
     }
-    const std::size_t lowWatermark = group.Config().numModulators * 2;
-    const std::size_t requested = std::max(minimumAdditionalParameters, lowWatermark);
     return parameterMessageOutBus_->Push(
-        ParameterMessageOut::ParameterStorageBatchNeeded(group, minimumAdditionalParameters, requested));
+        ParameterMessageOut::ParameterStorageBatchNeeded(group, minimumAdditionalParameters));
 }
 
 MessageIn MessageIn::ParamIncDec(std::uint64_t timestamp, std::size_t slotIx, std::size_t position, float delta) {
@@ -3788,6 +4070,20 @@ MessageIn MessageIn::ParamSetAbsolute(std::uint64_t timestamp, std::size_t slotI
     MessageIn message;
     message.timestamp = timestamp;
     message.type = Type::ParamSetAbsolute;
+    message.slotIx = slotIx;
+    message.position = position;
+    message.value = normalizedValue;
+    message.absoluteEpoch = absoluteEpoch;
+    return message;
+}
+
+MessageIn MessageIn::ParamSetAbsoluteOnBank(std::uint64_t timestamp, std::size_t bankIx, std::size_t slotIx,
+                                            std::size_t position, float normalizedValue,
+                                            std::uint64_t absoluteEpoch) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::ParamSetAbsoluteOnBank;
+    message.bankIx = bankIx;
     message.slotIx = slotIx;
     message.position = position;
     message.value = normalizedValue;
@@ -3988,6 +4284,66 @@ MessageIn MessageIn::SelectGrid(std::uint64_t timestamp, std::size_t gridSlotIx,
     return message;
 }
 
+MessageIn MessageIn::AppAction(std::uint64_t timestamp, std::size_t appActionIx, float value) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::AppAction;
+    message.appActionIx = appActionIx;
+    message.value = value;
+    return message;
+}
+
+MessageIn MessageIn::HoldDrill(std::uint64_t timestamp, bool held) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::HoldDrill;
+    message.boolValue = held;
+    message.hasBoolValue = true;
+    return message;
+}
+
+MessageIn MessageIn::Shift(std::uint64_t timestamp, bool held) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::Shift;
+    message.boolValue = held;
+    message.hasBoolValue = true;
+    return message;
+}
+
+MessageIn MessageIn::SceneBlendIncDec(std::uint64_t timestamp, float delta) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::SceneBlendIncDec;
+    message.delta = delta;
+    return message;
+}
+
+MessageIn MessageIn::TempoBpmIncDec(std::uint64_t timestamp, float deltaBpm) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::TempoBpmIncDec;
+    message.delta = deltaBpm;
+    return message;
+}
+
+MessageIn MessageIn::SetTempoBpmNormalized(std::uint64_t timestamp, float normalized) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::SetTempoBpmNormalized;
+    message.value = normalized;
+    return message;
+}
+
+MessageIn MessageIn::AppCommand(std::uint64_t timestamp, std::size_t command, float value) {
+    MessageIn message;
+    message.timestamp = timestamp;
+    message.type = Type::AppCommand;
+    message.command = command;
+    message.value = value;
+    return message;
+}
+
 MessageInBus::MessageInBus(ParameterManager* manager, std::size_t capacity)
     : manager_(manager),
       queue_(capacity == 0 ? 1 : capacity) {}
@@ -4032,8 +4388,16 @@ void MessageInBus::Apply(const MessageIn& message) {
         // apply-or-reject decision for this absolute event.
         manager_->HandleSetAbsolute(message.slotIx, message.position, message.value, message.absoluteEpoch);
         break;
-    case MessageIn::Type::ParamPush:
+    case MessageIn::Type::ParamSetAbsoluteOnBank:
         if (manager_ != nullptr) {
+            manager_->HandleSetAbsoluteOnBank(message.bankIx, message.slotIx, message.position, message.value,
+                                              message.absoluteEpoch);
+        }
+        break;
+    case MessageIn::Type::ParamPush:
+        if (appActionOut_ != nullptr && forwardEncoderPress_) {
+            appActionOut_->Push(ParameterMessageOut::AppEncoderPress(message.slotIx, message.position));
+        } else if (manager_ != nullptr) {
             manager_->HandlePress(message.slotIx, message.position);
         }
         break;
@@ -4108,6 +4472,27 @@ void MessageInBus::Apply(const MessageIn& message) {
             manager_->SetSceneBlend(message.value);
         }
         break;
+    case MessageIn::Type::SceneBlendIncDec:
+        if (manager_ != nullptr) {
+            manager_->IncDecSceneBlend(message.delta);
+        }
+        break;
+    case MessageIn::Type::TempoBpmIncDec:
+        if (tempoClock_ != nullptr && tempoMinimumBpm_ < tempoMaximumBpm_) {
+            const double clamped = std::clamp(tempoClock_->TempoBpm() + static_cast<double>(message.delta),
+                                              static_cast<double>(tempoMinimumBpm_),
+                                              static_cast<double>(tempoMaximumBpm_));
+            tempoClock_->SetTempoBpm(clamped);
+        }
+        break;
+    case MessageIn::Type::SetTempoBpmNormalized:
+        if (tempoClock_ != nullptr && tempoMinimumBpm_ < tempoMaximumBpm_) {
+            const double placed = static_cast<double>(tempoMinimumBpm_) +
+                                  static_cast<double>(message.value) *
+                                      static_cast<double>(tempoMaximumBpm_ - tempoMinimumBpm_);
+            tempoClock_->SetTempoBpm(placed);
+        }
+        break;
     case MessageIn::Type::Start:
     case MessageIn::Type::Continue:
     case MessageIn::Type::Stop:
@@ -4133,6 +4518,23 @@ void MessageInBus::Apply(const MessageIn& message) {
         if (gridManager_ != nullptr) {
             gridManager_->SelectGridForSlot(message.gridSlotIx, message.gridIx);
         }
+        break;
+    case MessageIn::Type::AppAction:
+        if (appActionOut_ != nullptr) {
+            appActionOut_->Push(ParameterMessageOut::AppAction(message.appActionIx, message.value));
+        }
+        break;
+    case MessageIn::Type::HoldDrill:
+        // Consumed by the MIDI processors before it reaches this bus.
+        break;
+    case MessageIn::Type::Shift:
+        // Consumed by the MIDI processors before it reaches this bus.
+        break;
+    case MessageIn::Type::AppCommand:
+        // Dropped here: only an app's own surface produces one, and
+        // Engine::DrainMessageBus hands it to the app's ApplyAppCommand hook
+        // before it ever reaches this bus's own Apply. An app without the
+        // hook has no consumer, so it is dropped rather than misapplied.
         break;
     }
 }

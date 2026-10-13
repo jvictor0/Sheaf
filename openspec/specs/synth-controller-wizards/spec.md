@@ -30,7 +30,12 @@ WHEN a controller-specific configuration wizard is implemented, THE synth contro
 - **AND** no controller profile or instrument configuration is changed
 
 ### Requirement: scw-2 — Discovery: baked pair registry and candidate classification
-WHEN present MIDI devices are classified for controller setup, THE synth controller-wizard system SHALL use a baked ordered registry of input/output pair matchers and wizard factories, SHALL produce deterministic candidates containing the concrete input and output endpoint identities, SHALL assign each present endpoint to at most one candidate, SHALL classify a candidate as available only when neither endpoint is claimed by an active or blacklisted instrument record, and SHALL retain unmatched present endpoint names as diagnostic data. The MF Twister descriptor SHALL recognize input and output names only by case-insensitive exact comparison with its descriptor-local alias lists; prefix, substring, fuzzy, and implicit-number-suffix matching SHALL NOT qualify a device.
+WHEN present MIDI devices are classified for controller setup, THE synth controller-wizard system SHALL use a baked ordered registry of input/output pair matchers and wizard factories, SHALL produce deterministic candidates containing the concrete input and output endpoint identities, SHALL assign each present endpoint to at most one candidate, SHALL classify a candidate as available only when neither endpoint is claimed by an active or blacklisted instrument record, and SHALL retain unmatched present endpoint names as diagnostic data. The MF Twister descriptor SHALL recognize an input or output name by case-insensitive exact comparison with its descriptor-local alias lists, or, when the name ends with a trailing Android MIDI port suffix (" Output Port N" or " Input Port N", N one or more ASCII digits, case-insensitive), by that same comparison against the name with the suffix removed; no other prefix, substring, fuzzy, or implicit-number-suffix matching SHALL qualify a device.
+
+<!-- RESTATES-EXCEPT
+it adds an unlisted prefix, suffix, or other characters
+  keeps: it adds an unlisted prefix
+-->
 
 #### Scenario: Recognized unclaimed pair is available
 - **WHEN** a registry-recognized input and output are both present and neither is referenced by any instrument record
@@ -54,9 +59,15 @@ WHEN present MIDI devices are classified for controller setup, THE synth control
 #### Scenario: Exact alias matching is required
 - **WHEN** a present endpoint name differs from every MF Twister alias only by case
 - **THEN** it is eligible for MF Twister pairing
-- **BUT WHEN** it adds an unlisted prefix, suffix, or other characters
+- **BUT WHEN** it adds an unlisted prefix, or other characters, and carries no trailing Android port suffix
 - **THEN** it is not eligible until that exact name is added as an alias
 - **AND** its present name remains available in unmatched-device diagnostics
+
+#### Scenario: An Android-reported port name is eligible once its port suffix is stripped
+- **WHEN** a present endpoint name is one of the descriptor's aliases followed by a single space and then a trailing " Output Port N" or " Input Port N"
+- **THEN** it is eligible for that descriptor's pairing the same as an exact match would be
+- **AND** a name that is not exactly an alias plus that suffix pattern remains ineligible, whatever prefix, substring, or implicit-number variant it adds
+- Check: `projects/synth/tests/controller_wizard_tests.cpp`, `DiscoveryMatchesAndroidUnnamedPortDeviceAfterStrippingItsPortSuffix` and `DiscoveryRejectsAndroidUnnamedPortDeviceWithAnUnrelatedName`; `DiscoveryRejectsPrefixSuffixAndImplicitNumberVariants` still passes.
 
 #### Scenario: Half-configured record prevents contention
 - **WHEN** an existing record claims only the input or only the output of a recognized pair
@@ -161,3 +172,4 @@ WHEN a wizard candidate or wizard-associated controller record is acted upon, TH
 - **WHEN** an existing wizard-associated record's stored devices are absent
 - **THEN** its form SHALL open from the stored kind and available profile data
 - **AND** valid generation and commit SHALL NOT require the endpoints to be present
+
