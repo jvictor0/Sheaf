@@ -293,7 +293,7 @@ test("passes explicit immutable mappings to the Emscripten factory and refuses d
           IDBFS: {},
           HEAPU8: new Uint8Array(16),
           HEAPF32: new Float32Array(4),
-          _synth_browser_abi_version: () => 4,
+          _synth_browser_abi_version: () => 6,
           _synth_browser_ui_protocol_version: () => 2,
           _synth_browser_runtime_config_version: () => 1,
           emscriptenRegisterAudioObject: () => 1,
@@ -301,7 +301,7 @@ test("passes explicit immutable mappings to the Emscripten factory and refuses d
           _synth_browser_audio_input_channels: () => 0,
           _synth_browser_set_audio_input_source: () => 0,
           _synth_browser_clear_audio_input_source: () => 0,
-          _synth_browser_consume_audio_input_retry: () => 0,
+          _synth_browser_consume_pending_audio_request: () => -1,
         };
       } };
     });

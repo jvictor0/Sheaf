@@ -231,6 +231,120 @@ struct EngineTestApp {
     }
 };
 
+// Declares HasAppCommands: records every ApplyAppCommand call, in the order
+// the audio thread's drain applies them, plus the probe's SceneCenter at the
+// moment each one ran (so a test can tell whether it ran before or after a
+// ParamIncDec message popped from the same bus).
+struct AppCommandTestApp {
+    static inline float processLiteAlpha = 1.0f;
+    synth::AppContext* context = nullptr;
+    synth::ParameterId probeId = 0;
+    std::vector<std::pair<std::size_t, float>> appliedCommands;
+    std::vector<float> probeCenterWhenApplied;
+
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "AppCommandTest";
+        config.numAudioOutputs = 2;
+        return config;
+    }
+    void Init(synth::AppContext* ctx) {
+        context = ctx;
+        auto& group = ctx->parameterManager->CreateGroup({.numVoices = 1,
+                                                           .numModulators = 0,
+                                                           .numScenes = 1,
+                                                           .maxParameters = 4,
+                                                           .processLiteAlpha = processLiteAlpha,
+                                                           .targetCenterAlpha = 1.0f});
+        auto& probe = ctx->parameterManager->CreateParameter(group, {.name = "Probe", .defaultValue = 0.25f});
+        probeId = probe.Id();
+        auto& bank = ctx->parameterManager->CreateBank();
+        bank.AddMapping(/*encoderId=*/0, probe);
+        auto& slot = ctx->parameterManager->CreateBankSlot();
+        slot.AddPhysicalEncoder(/*encoderId=*/0);
+        slot.SelectBank(&bank);
+    }
+    void ApplyAppCommand(std::size_t command, float value) {
+        appliedCommands.emplace_back(command, value);
+        probeCenterWhenApplied.push_back(context->parameterManager->ParameterById(probeId).SceneCenter(0));
+    }
+    void ProcessBlock(synth::AudioBlock&) {}
+};
+
+// A tiny group (four modulators, room for one live parameter beyond the
+// carrier) so a patch naming every depth for the carrier leaves the group's
+// available storage below its watermark (numModulators * 2 = 8) at both the
+// startup and the running site.
+struct StorageShortfallTestApp {
+    static inline float processLiteAlpha = 1.0f;
+    synth::AppContext* context = nullptr;
+    synth::ParameterId carrierId = 0;
+    synth::ParameterId carrier2Id = 0;
+
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "StorageShortfallTest";
+        config.numAudioOutputs = 2;
+        return config;
+    }
+    void Init(synth::AppContext* ctx) {
+        context = ctx;
+        auto& group = ctx->parameterManager->CreateGroup({.numVoices = 1,
+                                                           .numModulators = 4,
+                                                           .numScenes = 1,
+                                                           .maxParameters = 8,
+                                                           .processLiteAlpha = processLiteAlpha,
+                                                           .targetCenterAlpha = 1.0f});
+        for (synth::ModulatorMetadata& metadata : group.GetModulators().Metadata()) {
+            metadata.connected = true;
+        }
+        auto& carrier = ctx->parameterManager->CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+        carrierId = carrier.Id();
+        // A second carrier so a patch can name more missing depths (up to 8)
+        // than the group's free slots (6) alone hold, making the shortfall's
+        // provisioning load-bearing rather than a formality the free slots
+        // would have covered anyway.
+        auto& carrier2 = ctx->parameterManager->CreateParameter(group, {.name = "Carrier2", .defaultValue = 0.5f});
+        carrier2Id = carrier2.Id();
+    }
+    void ProcessBlock(synth::AudioBlock&) {}
+};
+
+// A group with generous headroom (unlike StorageShortfallTestApp's tiny
+// one): a small Load fits without ever reaching the shortfall gate, so the
+// watermark-after-a-fitting-Load invariant (spp-12's "one press" scenario)
+// is observable on its own, not entangled with the shortfall-and-retry path.
+struct LoadFitsWithHeadroomTestApp {
+    static inline float processLiteAlpha = 1.0f;
+    synth::AppContext* context = nullptr;
+    synth::ParameterId carrierId = 0;
+    synth::ParameterId otherId = 0;
+
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "LoadFitsWithHeadroomTest";
+        config.numAudioOutputs = 2;
+        return config;
+    }
+    void Init(synth::AppContext* ctx) {
+        context = ctx;
+        auto& group = ctx->parameterManager->CreateGroup({.numVoices = 1,
+                                                           .numModulators = 4,
+                                                           .numScenes = 1,
+                                                           .maxParameters = 12,
+                                                           .processLiteAlpha = processLiteAlpha,
+                                                           .targetCenterAlpha = 1.0f});
+        for (synth::ModulatorMetadata& metadata : group.GetModulators().Metadata()) {
+            metadata.connected = true;
+        }
+        auto& carrier = ctx->parameterManager->CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+        carrierId = carrier.Id();
+        auto& other = ctx->parameterManager->CreateParameter(group, {.name = "Other", .defaultValue = 0.5f});
+        otherId = other.Id();
+    }
+    void ProcessBlock(synth::AudioBlock&) {}
+};
+
 class InitTopologyCell final : public synth::Cell {
 public:
     void OnPress(std::uint8_t) override {}
@@ -315,6 +429,53 @@ void WriteProbePatchVersion(const std::filesystem::path& patchDir, float probeVa
     synth::SavePatchVersionInDirectory(patchDir, jsonText, when);
 }
 
+// Builds a patch JSON document naming every depth for two carriers on a
+// four-modulator group (matching StorageShortfallTestApp's topology), with
+// the carriers at carrierValue and carrier2Value, and writes it as a version
+// file in patchDir. Eight missing depths total, split across the two
+// carriers by name so a tiny target group (StorageShortfallTestApp's own,
+// with 6 free slots after both carriers register) cannot fit them from its
+// free slots alone: opening this patch whole genuinely needs the
+// shortfall's provisioning, not just headroom the group already had. The
+// scratch group here only needs room to build the JSON, so it is sized
+// generously rather than to match the tiny target.
+void WriteDeepModDepthsPatchVersion(const std::filesystem::path& patchDir, float carrierValue, float carrier2Value,
+                                    std::chrono::system_clock::time_point when) {
+    synth::ParameterManager scratchManager;
+    auto& group = scratchManager.CreateGroup(
+        {.numVoices = 1, .numModulators = 4, .numScenes = 1, .maxParameters = 32});
+    for (synth::ModulatorMetadata& metadata : group.GetModulators().Metadata()) {
+        metadata.connected = true;
+    }
+    auto& carrier = scratchManager.CreateParameter(group, {.name = "Carrier", .defaultValue = 0.5f});
+    carrier.SceneCenter(0) = carrierValue;
+    auto& carrier2 = scratchManager.CreateParameter(group, {.name = "Carrier2", .defaultValue = 0.5f});
+    carrier2.SceneCenter(0) = carrier2Value;
+    for (synth::Parameter* target : {&carrier, &carrier2}) {
+        for (std::size_t modIx = 0; modIx < 4; ++modIx) {
+            synth::Parameter* depth = target->EnsureModulationDepth(modIx);
+            REQUIRE_TRUE(depth != nullptr);
+            // A depth at its own default (neutral, zero) is never written to
+            // patch JSON (Parameter::ToValueJSON skips a HasNonDefaultState()
+            // depth entirely), so BuildPatchJSON would name none of the eight
+            // depths below and the shortfall this test drives would never fire.
+            depth->SceneCenter(0) = 0.7f + 0.05f * static_cast<float>(modIx);  // away from the depth's own 0.5f neutral default
+        }
+    }
+    scratchManager.CaptureDefaultControlState();
+    scratchManager.ComputeAllParameters();
+
+    synth::JsonArena arena(64 * 1024);
+    synth::JSON root = synth::BuildPatchJSON(arena, "Deep Patch", scratchManager, synth::MidiInstrumentConfig{});
+    REQUIRE_TRUE(!root.IsNull());
+    char* dumped = root.Dumps(JSON_ENCODE_ANY);
+    REQUIRE_TRUE(dumped != nullptr);
+    const std::string jsonText(dumped);
+    std::free(dumped);
+
+    synth::SavePatchVersionInDirectory(patchDir, jsonText, when);
+}
+
 synth::MidiInstrumentConfig MakeRuntimeConfigInstrument(std::string name) {
     synth::MidiInstrumentConfig instrument;
     synth::MidiControllerSlot slot;
@@ -340,6 +501,34 @@ std::string ReadTextFile(const std::filesystem::path& path) {
     std::ostringstream out;
     out << in.rdbuf();
     return out.str();
+}
+
+// Unlike WriteProbePatchVersion (which writes an instrument section
+// BuildPatchJSON's schemaVersion 1 output makes LoadPatchJSON ignore, per
+// its own doc comment), this writes a genuine schemaVersion 2 patch whose
+// midiInstrument section a catalog that carries mappings actually applies.
+void WriteCarryingInstrumentPatchVersion(const std::filesystem::path& patchDir, float carrierValue,
+                                         std::chrono::system_clock::time_point when,
+                                         const synth::MidiInstrumentConfig& instrument) {
+    synth::ParameterManager scratchManager;
+    auto& group = scratchManager.CreateGroup(
+        {.numVoices = 1, .numModulators = 1, .numScenes = 1, .maxParameters = 4});
+    const synth::ParameterId carrierId =
+        scratchManager.RegisterParameter(group, {.name = "Carrier", .defaultValue = 0.4f});
+    scratchManager.ParameterById(carrierId).SceneCenter(0) = carrierValue;
+    scratchManager.CaptureDefaultControlState();
+    scratchManager.ComputeAllParameters();
+
+    synth::JsonArena arena(64 * 1024);
+    synth::JSON root = synth::BuildPatchJSON(arena, "Carrying Patch", scratchManager, instrument,
+                                             /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(!root.IsNull());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+    char* dumped = root.Dumps(JSON_ENCODE_ANY);
+    REQUIRE_TRUE(dumped != nullptr);
+    const std::string jsonText(dumped);
+    std::free(dumped);
+    synth::SavePatchVersionInDirectory(patchDir, jsonText, when);
 }
 
 }  // namespace
@@ -599,7 +788,7 @@ TEST_CASE(engine_save_runtime_configuration_snapshots_current_midi_and_audio_sta
     EngineTestApp::wantEncoderMidiInput = false;
 }
 
-TEST_CASE(engine_runtime_page_back_policy_saves_config_for_audio_and_controllers_only) {
+TEST_CASE(engine_runtime_page_back_policy_saves_config_for_audio_and_sync_only) {
     const std::filesystem::path dataRoot =
         std::filesystem::temp_directory_path() / "engine-runtime-page-back-save-data-root";
     std::filesystem::remove_all(dataRoot);
@@ -637,18 +826,13 @@ TEST_CASE(engine_runtime_page_back_policy_saves_config_for_audio_and_controllers
     simulateBack(synth::RuntimePageKind::File);
     REQUIRE_TRUE(!std::filesystem::exists(paths.configFile));
 
-    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
-        REQUIRE_TRUE(instrument.RenameController(0, "controllers-back-controller"));
-    });
-    engine.SetAudioDeviceFromHost(synth::AudioDeviceState{.outputDeviceName = "Controllers Back Output",
-                                                          .inputDeviceName = "Controllers Back Input"});
-    simulateBack(synth::RuntimePageKind::Controllers);
+    const synth::SyncConfig syncBack{true, false, true, false, 48};
+    REQUIRE_TRUE(engine.RequestSyncConfiguration(syncBack));
+    simulateBack(synth::RuntimePageKind::Sync);
 
     REQUIRE_TRUE(synth::LoadRuntimeConfigFile(paths.configFile, loadedInstrument, loadedAudio, loadedSync) ==
                  synth::RuntimeConfigFileStatus::Ok);
-    REQUIRE_TRUE(loadedInstrument.controllers.front().name == "controllers-back-controller");
-    REQUIRE_TRUE(loadedAudio.outputDeviceName == "Controllers Back Output");
-    REQUIRE_TRUE(loadedAudio.inputDeviceName == "Controllers Back Input");
+    REQUIRE_TRUE(loadedSync == syncBack);
 
     std::filesystem::remove_all(dataRoot);
     EngineTestApp::wantEncoderMidiInput = false;
@@ -1487,6 +1671,159 @@ TEST_CASE(engine_pump_populates_ui_state_at_throttle_cadence) {
     REQUIRE_NEAR(cell.values[0].load(), advancedCurrentCenter, 1e-4f);
 }
 
+// ui-state-before-audio (openspec/changes/ui-state-before-audio): the
+// following three tests cover the design's Testing section exactly --
+// pre-audio population (positive control: identical content to a post-audio
+// frame), the four-assertion transition test at the claim primitive's own
+// seam, and null-safety. The "browser-level: freshly installed app ..."
+// scenario needs no engine-level test of its own and no browser worker code
+// change: browser/src/main.ts:355-356 already calls MessageThreadTick (via
+// the "message-tick" request -> BrowserRuntime.hpp:717) unconditionally on
+// every frame, including the very first (browser/src/main.ts:355-356, before the
+// frame timer even starts and before any user activation), so the fix here
+// is exercised by the existing browser frame loop with no seam changes
+// needed there (task 1.1 trace obligation).
+
+TEST_CASE(engine_message_thread_populates_ui_state_before_audio_ever_runs) {
+    EngineTestApp::processLiteAlpha = 1.0f;
+    synth::Engine<EngineTestApp> engine([] { return std::uint64_t{7}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 256);
+
+    REQUIRE_TRUE(engine.Context().uiState != nullptr);
+    auto& cell = engine.Context().uiState->slots[0].cells[0];
+    auto& probe = engine.Manager().ParameterById(engine.Application().probeId);
+
+    // Move the probe's target directly (Parameter::HandleIncDec is exactly
+    // what a UI ParamIncDec message ultimately calls) and slew it, with NO
+    // engine.ProcessBlock(...) call anywhere in this test -- the audio pump
+    // must never run, so only MessageThreadTick's claim path can ever
+    // publish here.
+    probe.HandleIncDec(engine.Manager().Scene(), 0.4f);
+    for (std::uint64_t sample = 0; sample < 8000; ++sample) {
+        probe.ProcessSample(sample);
+    }
+    const float movedCenter = probe.UIDisplayCenter(0);
+
+    // Positive control (omni §9.1): before any populate runs, the published
+    // cell must NOT already carry the moved value, or ticking would prove
+    // nothing.
+    REQUIRE_TRUE(std::fabs(cell.values[0].load() - movedCenter) > 1e-4f);
+    REQUIRE_TRUE(engine.UiStatePublisherIsQuiescentForTest());
+    REQUIRE_TRUE(!engine.AudioOwnsUiStateForTest());
+
+    engine.MessageThreadTick();
+
+    // Content is identical to what a post-audio (ProcessBlock) publish would
+    // have produced -- same PopulateUIState pair, same buffers.
+    REQUIRE_NEAR(cell.values[0].load(), movedCenter, 1e-4f);
+    REQUIRE_TRUE(!engine.AudioOwnsUiStateForTest());
+    // The message thread releases its claim back to Quiescent after
+    // publishing (design: "then store Quiescent (release)"). Proven below,
+    // not merely asserted here: a second, independently-moved value is
+    // published by a second tick.
+    REQUIRE_TRUE(engine.UiStatePublisherIsQuiescentForTest());
+
+    probe.HandleIncDec(engine.Manager().Scene(), -0.2f);
+    for (std::uint64_t sample = 0; sample < 8000; ++sample) {
+        probe.ProcessSample(sample);
+    }
+    const float secondMovedCenter = probe.UIDisplayCenter(0);
+    REQUIRE_TRUE(std::fabs(secondMovedCenter - movedCenter) > 1e-4f);
+    engine.MessageThreadTick();
+    REQUIRE_NEAR(cell.values[0].load(), secondMovedCenter, 1e-4f);
+}
+
+TEST_CASE(engine_ui_state_claim_skips_then_latches_then_blocks_message_thread_forever) {
+    EngineTestApp::processLiteAlpha = 1.0f;
+    synth::Engine<EngineTestApp> engine([] { return std::uint64_t{11}; });
+    engine.Initialize();
+    // config_.uiFrameHz defaults to 30 (EngineTestApp::Config() doesn't
+    // override it): uiPublishInterval_ = round(48000 / (30 * 256)) = 6,
+    // matching engine_pump_populates_ui_state_at_throttle_cadence above.
+    engine.Prepare(48000.0, 256);
+
+    REQUIRE_TRUE(engine.Context().uiState != nullptr);
+    auto& cell = engine.Context().uiState->slots[0].cells[0];
+    auto& probe = engine.Manager().ParameterById(engine.Application().probeId);
+
+    TestBlockBuffers buffers(2, 4);
+
+    // --- (a) CAS-fail skip, without blocking ---
+    // Force the claim into MessageThread state (design Testing: "hold the
+    // claim in MessageThread state via a test hook"), simulating a
+    // message-thread populate in flight, then run one full throttle window
+    // on the audio side. The published cell must stay untouched and
+    // sampleCounter_ must still advance by the full window -- audio never
+    // waits on the held claim.
+    const float beforeSkip = cell.values[0].load();
+    const std::uint64_t sampleCountBeforeSkip = engine.SampleCount();
+    engine.HoldUiStatePublisherAsMessageThreadForTest();
+    for (int i = 0; i < 6; ++i) {  // exactly one uiPublishInterval_ window
+        synth::AudioBlock block = buffers.Block(4);
+        engine.ProcessBlock(block, /*timestamp=*/11);
+    }
+    REQUIRE_NEAR(cell.values[0].load(), beforeSkip, 1e-6f);                    // no populate happened
+    REQUIRE_TRUE(engine.SampleCount() == sampleCountBeforeSkip + 6 * 4);       // audio kept advancing, did not block
+    REQUIRE_TRUE(!engine.AudioOwnsUiStateForTest());                          // no latch yet
+    REQUIRE_TRUE(engine.UiStatePublisherIsMessageThreadForTest());            // the held claim is untouched by the failed CAS
+
+    // --- (b) claim-and-latch at the next window ---
+    // Release the held claim (simulating the message thread finishing its
+    // populate and storing Quiescent per the design) and move the probe so
+    // a real, observable value exists for the audio side to publish.
+    engine.ReleaseUiStatePublisherHoldForTest();
+    probe.HandleIncDec(engine.Manager().Scene(), 0.4f);
+    for (std::uint64_t sample = 0; sample < 8000; ++sample) {
+        probe.ProcessSample(sample);
+    }
+    const float movedCenter = probe.UIDisplayCenter(0);
+    REQUIRE_TRUE(std::fabs(movedCenter - beforeSkip) > 1e-4f);  // positive control: this value would move the cell if published
+
+    for (int i = 0; i < 6; ++i) {  // the next uiPublishInterval_ window
+        synth::AudioBlock block = buffers.Block(4);
+        engine.ProcessBlock(block, /*timestamp=*/11);
+    }
+    REQUIRE_TRUE(engine.AudioOwnsUiStateForTest());               // latched
+    REQUIRE_TRUE(engine.UiStatePublisherIsAudioThreadForTest());  // permanently AudioThread
+
+    // --- (d) a frame built after the latch reflects audio-published state ---
+    REQUIRE_NEAR(cell.values[0].load(), movedCenter, 1e-4f);
+
+    // --- (c) message-thread CAS fails forever after the latch ---
+    // If MessageThreadTick's CAS incorrectly succeeded post-latch, the
+    // design has it end the tick by storing Quiescent -- directly
+    // observable here, so this assertion has a real failure mode (it is not
+    // a tautology: engine_message_thread_populates_ui_state_before_audio_
+    // ever_runs above is the positive control proving the tick's claim path
+    // actually runs and mutates this same state when it is allowed to).
+    engine.MessageThreadTick();
+    REQUIRE_TRUE(engine.UiStatePublisherIsAudioThreadForTest());
+    REQUIRE_TRUE(engine.AudioOwnsUiStateForTest());
+}
+
+TEST_CASE(engine_message_thread_tick_before_initialize_does_not_crash_or_populate) {
+    synth::Engine<EngineTestApp> engine([] { return std::uint64_t{0}; });
+    // No Initialize() call: uiState_/gridUIState_ are both still nullptr, so
+    // the message-thread claim path must null-check exactly as the
+    // audio-thread publish site already does (Engine.hpp:433/:436 -- see
+    // MessageThreadTick's mirrored checks).
+    REQUIRE_TRUE(engine.Context().uiState == nullptr);
+    REQUIRE_TRUE(engine.UiStatePublisherIsQuiescentForTest());
+
+    engine.MessageThreadTick();  // must not crash
+
+    REQUIRE_TRUE(engine.Context().uiState == nullptr);
+    // The claim was still taken and released even with nothing to populate
+    // (the CAS branch ran; it did not merely no-op on a load check), leaving
+    // the machine exactly where a real Initialize() + populate later expects
+    // to find it. That the claimed branch's populate calls actually write
+    // real data when buffers ARE present is the positive control, proven by
+    // engine_message_thread_populates_ui_state_before_audio_ever_runs above.
+    REQUIRE_TRUE(engine.UiStatePublisherIsQuiescentForTest());
+    REQUIRE_TRUE(!engine.AudioOwnsUiStateForTest());
+}
+
 TEST_CASE(engine_pump_stash_is_a_drain_barrier_with_retry_first_ordering) {
     EngineTestApp::processLiteAlpha = 1.0f;  // snap immediately so applied/reverted values are visible this block
 
@@ -1532,9 +1869,9 @@ TEST_CASE(engine_pump_stash_is_a_drain_barrier_with_retry_first_ordering) {
 
     // Now enqueue a second patch command (revert to defaults) directly onto
     // patchInputBus_ via the engine's AppContext, bypassing PatchManager's
-    // own SavePatchAs/RevertPatch bookkeeping entirely (which is orthogonal
+    // own SavePatchAs bookkeeping entirely (which is orthogonal
     // to — and would otherwise confound observing — the engine's drain
-    // barrier: e.g. PatchManager::RevertPatch()/NewPatch() reset
+    // barrier: e.g. PatchManager::NewPatch() resets
     // PatchManager's pendingSave_ synchronously at dispatch time, regardless
     // of whether the engine's drain has actually applied the pending save
     // yet). If the drain barrier holds, this RevertAllToDefault message must
@@ -1580,6 +1917,34 @@ TEST_CASE(engine_pump_stash_is_a_drain_barrier_with_retry_first_ordering) {
     REQUIRE_NEAR(engine.Manager().ParameterById(engine.Application().probeId).SceneCenter(0), initial, 1e-4f);
 
     std::filesystem::remove_all(saveDir);
+}
+
+TEST_CASE(engine_drain_applies_an_app_command_before_a_later_turn_in_the_same_block_and_starts_the_transport) {
+    AppCommandTestApp::processLiteAlpha = 1.0f;
+    synth::Engine<AppCommandTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 256);
+
+    // Pushed in this order: a command, then a turn, then Start. The command
+    // must apply before the turn (same drain, FIFO pop order), and Start --
+    // a realtime message -- is lifted into the batch and applied after both
+    // drains, so the transport is running once this block returns.
+    engine.UiBus().Push(synth::MessageIn::AppCommand(0, /*command=*/7, /*value=*/0.9f));
+    engine.UiBus().Push(synth::MessageIn::ParamIncDec(0, /*slotIx=*/0, /*position=*/0, /*delta=*/0.3f));
+    engine.UiBus().Push(synth::MessageIn::Start(0));
+
+    TestBlockBuffers buffers(2, 256);
+    synth::AudioBlock block = buffers.Block(256);
+    engine.ProcessBlock(block, 0);
+
+    REQUIRE_TRUE(engine.Application().appliedCommands.size() == 1);
+    REQUIRE_TRUE(engine.Application().appliedCommands[0].first == 7);
+    REQUIRE_NEAR(engine.Application().appliedCommands[0].second, 0.9f, 1e-6f);
+    // The command ran while the probe still held its default: the turn,
+    // popped after it from the same bus, had not applied yet.
+    REQUIRE_NEAR(engine.Application().probeCenterWhenApplied[0], 0.25f, 1e-6f);
+    REQUIRE_NEAR(engine.Manager().ParameterById(engine.Application().probeId).SceneCenter(0), 0.55f, 1e-4f);
+    REQUIRE_TRUE(engine.Clock().IsTransportRunning());
 }
 
 TEST_CASE(engine_initialize_without_startup_patch_never_fires_rebuilt_callback) {
@@ -1813,6 +2178,130 @@ TEST_CASE(engine_tick_grows_arena_and_retries_stashed_patch_message) {
     std::filesystem::remove_all(saveDir);
 }
 
+TEST_CASE(engine_initialize_opens_a_startup_patch_whole_when_it_needs_more_storage_than_the_group_starts_with) {
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-initialize-storage-shortfall-data-root";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+    // The tiny group (StorageShortfallTestApp) starts with 8 - 2 = 6 slots
+    // available after both carriers register; the patch names 8 depths
+    // across them (more than the 6 free slots alone hold). PatchManager::
+    // LoadPatch, called from Initialize() before any block runs, provisions
+    // every group the parsed patch would leave short (8 slots plus the
+    // default watermark of 8 here) before pushing the load message, so
+    // opening it whole needs no retry -- it applies on Initialize()'s own
+    // single drain of the message.
+    WriteDeepModDepthsPatchVersion(paths.patchesRoot / "AAA", 0.9f, 0.8f, std::chrono::system_clock::now());
+
+    StorageShortfallTestApp::processLiteAlpha = 1.0f;
+    synth::Engine<StorageShortfallTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();
+
+    const synth::ParameterId carrierId = engine.Application().carrierId;
+    const synth::ParameterId carrier2Id = engine.Application().carrier2Id;
+    REQUIRE_NEAR(engine.Manager().ParameterById(carrierId).SceneCenter(0), 0.9f, 1e-5f);
+    REQUIRE_NEAR(engine.Manager().ParameterById(carrier2Id).SceneCenter(0), 0.8f, 1e-5f);
+    for (std::size_t modIx = 0; modIx < 4; ++modIx) {
+        REQUIRE_TRUE(engine.Manager().ParameterById(carrierId).ModulationDepthParameter(modIx) != nullptr);
+        REQUIRE_TRUE(engine.Manager().ParameterById(carrier2Id).ModulationDepthParameter(modIx) != nullptr);
+    }
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(engine_running_load_that_fits_leaves_one_press_of_storage_behind_it) {
+    LoadFitsWithHeadroomTestApp::processLiteAlpha = 1.0f;
+    synth::Engine<LoadFitsWithHeadroomTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 256);
+
+    const synth::ParameterId carrierId = engine.Application().carrierId;
+    const synth::ParameterId otherId = engine.Application().otherId;
+    synth::ParameterGroup& group = engine.Manager().ParameterById(carrierId).Group();
+    const std::size_t watermark = group.StorageLowWatermark();
+
+    // Two carriers already registered leave 12 - 2 = 10 free slots. The
+    // patch names 2 depths for Carrier only: available(10) == need(2) +
+    // watermark(8) exactly, the tightest case that still fits, so this Load
+    // applies without ever stashing.
+    synth::ParameterManager scratchManager;
+    auto& scratchGroup =
+        scratchManager.CreateGroup({.numVoices = 1, .numModulators = 4, .numScenes = 1, .maxParameters = 8});
+    for (synth::ModulatorMetadata& metadata : scratchGroup.GetModulators().Metadata()) {
+        metadata.connected = true;
+    }
+    auto& scratchCarrier = scratchManager.CreateParameter(scratchGroup, {.name = "Carrier", .defaultValue = 0.5f});
+    scratchCarrier.SceneCenter(0) = 0.9f;
+    for (std::size_t modIx = 0; modIx < 2; ++modIx) {
+        synth::Parameter* depth = scratchCarrier.EnsureModulationDepth(modIx);
+        REQUIRE_TRUE(depth != nullptr);
+        depth->SceneCenter(0) = 0.7f + 0.05f * static_cast<float>(modIx);  // away from the depth's own 0.5f neutral default
+    }
+    scratchManager.CaptureDefaultControlState();
+    scratchManager.ComputeAllParameters();
+
+    auto arena = std::make_shared<synth::JsonArena>(64 * 1024);
+    synth::JSON root = synth::BuildPatchJSON(*arena, "Small Patch", scratchManager, synth::MidiInstrumentConfig{});
+    REQUIRE_TRUE(!root.IsNull());
+    REQUIRE_TRUE(engine.Context().patchInputBus->Push(
+        synth::PatchMessageIn::LoadFromJSON(synth::JsonDocument{.arena = arena, .root = root})));
+
+    TestBlockBuffers buffers(2, 256);
+    {
+        synth::AudioBlock b = buffers.Block(256);
+        engine.ProcessBlock(b, 0);
+    }
+    REQUIRE_TRUE(!engine.HasStashedPatchMessageForTest());  // never shortfell; applied in this same block
+    REQUIRE_NEAR(engine.Manager().ParameterById(carrierId).SceneCenter(0), 0.9f, 1e-4f);
+    REQUIRE_TRUE(engine.Manager().ParameterById(carrierId).ModulationDepthParameter(0) != nullptr);
+    REQUIRE_TRUE(engine.Manager().ParameterById(carrierId).ModulationDepthParameter(1) != nullptr);
+
+    // The Load's own two depths are the only slots it drew: at least a full
+    // watermark's worth is still free for the next press.
+    REQUIRE_TRUE(group.AvailableParameterSlots() >= watermark);
+
+    // The press: an encoder opening a modulation view on a different
+    // parameter finds room immediately, with no stash.
+    synth::Parameter* pressDepth = engine.Manager().ParameterById(otherId).EnsureModulationDepth(0);
+    REQUIRE_TRUE(pressDepth != nullptr);
+    REQUIRE_TRUE(!engine.HasStashedPatchMessageForTest());
+}
+
+TEST_CASE(engine_context_exposes_clock_diagnostics_transport_state_and_sync_configuration) {
+    EngineTestApp::processLiteAlpha = 1.0f;
+    synth::Engine<EngineTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 256);
+
+    const synth::AppContext& context = engine.Context();
+    REQUIRE_TRUE(context.clockDiagnostics != nullptr);
+
+    TestBlockBuffers buffers(2, 256);
+    REQUIRE_TRUE(engine.UiBus().Push(synth::MessageIn::Start(0)));
+    {
+        synth::AudioBlock block = buffers.Block(256);
+        engine.ProcessBlock(block, 0);
+    }
+    REQUIRE_TRUE(context.clockDiagnostics->Snapshot().transportState == synth::ClockTransportState::Running);
+
+    REQUIRE_TRUE(engine.UiBus().Push(synth::MessageIn::Stop(1)));
+    {
+        synth::AudioBlock block = buffers.Block(256);
+        engine.ProcessBlock(block, 1);
+    }
+    REQUIRE_TRUE(context.clockDiagnostics->Snapshot().transportState == synth::ClockTransportState::Stopped);
+
+    REQUIRE_TRUE(!context.syncConfiguration().receiveClock);
+    REQUIRE_TRUE(engine.RequestSyncConfiguration({.receiveClock = true}));
+    {
+        synth::AudioBlock block = buffers.Block(256);
+        engine.ProcessBlock(block, 2);
+    }
+    REQUIRE_TRUE(context.syncConfiguration().receiveClock);
+}
+
 TEST_CASE(engine_logs_patch_apply_and_storage_batch_activity_for_slog_7) {
     // Regression for slog-7: the audio-thread patch drain (ProcessBlock) must
     // INFO-log each ApplyPatchMessage outcome, and the message-thread tick
@@ -2001,14 +2490,14 @@ TEST_CASE(engine_process_frame_hook_runs_once_per_block_after_messages_before_pr
     REQUIRE_TRUE(engine.Application().processFrameRanBeforeProcessBlockThisCall);
 }
 
-TEST_CASE(engine_revert_all_to_default_restores_app_init_midi_profile_not_empty) {
-    // Regression for the default-MIDI-profile gap: Engine::Initialize() must
-    // snapshot defaultInstrumentConfig_ from the live instrument the app's
-    // Init() configured, BEFORE any startup patch applies. Without that
-    // snapshot, RevertAllToDefault (dispatched by Patches().NewPatch()
-    // below) resets instrumentConfig_ to a default-constructed (empty,
-    // zero-controller) MidiInstrumentConfig instead of back to the app's
-    // real default, silently dropping MIDI control surface responsiveness.
+TEST_CASE(engine_default_instrument_snapshot_carries_app_init_controller_after_new_patch) {
+    // Initialize() snapshots defaultInstrumentConfig_ from the live
+    // instrument right after the app's Init() runs, before any startup patch
+    // applies. RevertAllToDefault (dispatched by Patches().NewPatch() below)
+    // reverts parameters only: it never reads or writes
+    // defaultInstrumentConfig_ or instrumentConfig_, the same as host audio
+    // device selection. This checks the snapshot directly, since a
+    // NewPatch()/revert cycle cannot disturb it either way.
     EngineTestApp::processLiteAlpha = 1.0f;
     EngineTestApp::wantEncoderMidiInput = true;  // Init() adds a non-empty controller (encoderInput)
 
@@ -2040,18 +2529,10 @@ TEST_CASE(engine_revert_all_to_default_restores_app_init_midi_profile_not_empty)
     }
     engine.MessageThreadTick();
 
-    // The live instrument must still equal the app's Init-configured default
-    // -- i.e. still have a controller with an encoderInput mapping -- NOT
-    // have been reset to an empty (zero-controller) MidiInstrumentConfig{}.
-    REQUIRE_TRUE(!engine.Context().instrument->controllers.empty());
-    REQUIRE_TRUE(engine.Context().instrument->controllers.front().config.encoderInput.has_value());
-
-    // Also confirm the default instrument snapshot itself carries the
-    // controller (not just that the live instrument happens to still have
-    // it): the revert path copies defaultInstrumentConfig_ into
-    // instrumentConfig_, so if the snapshot were empty the assertion above
-    // would already have failed; this checks the snapshot directly for a
-    // clearer failure signal.
+    // The default instrument snapshot still carries the controller with its
+    // encoderInput mapping: Initialize() captured it from the app's
+    // Init()-configured instrument before any startup patch ran, and the
+    // NewPatch()/revert path above leaves it untouched.
     REQUIRE_TRUE(!engine.Context().defaultInstrument->controllers.empty());
     REQUIRE_TRUE(engine.Context().defaultInstrument->controllers.front().config.encoderInput.has_value());
 
@@ -2241,7 +2722,7 @@ TEST_CASE(engine_startup_and_runtime_patch_loads_do_not_change_audio_device_shad
     std::filesystem::remove_all(runtimePatchDir);
 }
 
-TEST_CASE(engine_revert_after_host_selection_preserves_audio_device) {
+TEST_CASE(engine_new_patch_after_host_selection_preserves_audio_device) {
     EngineTestApp::processLiteAlpha = 1.0f;
     synth::Engine<EngineTestApp> engine([] { return std::uint64_t{0}; });
     engine.Initialize();
@@ -2265,9 +2746,9 @@ TEST_CASE(engine_revert_after_host_selection_preserves_audio_device) {
     REQUIRE_TRUE(engine.AudioDeviceSnapshot().outputDeviceName == "DeviceX");
     REQUIRE_TRUE(callbackCalls == 0);  // host-initiated changes never fire the callback (see (b) below)
 
-    // Drive a patch REVERT through ProcessBlock + MessageThreadTick.
-    const synth::PatchCommandResult revertResult = engine.Patches().RevertPatch();
-    REQUIRE_TRUE(revertResult.status == synth::PatchCommandStatus::Ok);
+    // Drive a NEW PATCH through ProcessBlock + MessageThreadTick.
+    const synth::PatchCommandResult newPatchResult = engine.Patches().NewPatch();
+    REQUIRE_TRUE(newPatchResult.status == synth::PatchCommandStatus::Ok);
 
     TestBlockBuffers buffers(2, 4);
     {
@@ -2806,6 +3287,1257 @@ TEST_CASE(engine_instrument_snapshot_is_deep_copy_equal_to_live_instrument) {
     REQUIRE_TRUE(engine.LiveInstrument().controllers.front().input.identifier == "in-id");
 
     EngineTestApp::wantEncoderMidiInput = false;  // restore default for subsequent tests
+}
+
+namespace {
+
+// Records every dispatched action so tests can assert what the engine sent
+// to the app's own surface.
+struct MidiCatalogTestSurface final : synth::ui::Surface {
+    std::vector<synth::ui::Action> dispatched;
+
+    synth::ui::NodeTree BuildTree() override {
+        constexpr synth::ui::Bounds bounds{0.0f, 0.0f, 100.0f, 100.0f};
+        synth::ui::Builder builder;
+        builder.Root("midi-catalog-test.root", bounds);
+        return builder.Build(bounds);
+    }
+    void SetActionHandler(ActionHandler) override {}
+    void DispatchAction(const synth::ui::Action& action) override { dispatched.push_back(action); }
+};
+
+// An app with a MIDI catalog: satisfies HasMidiCatalog<App> and, via
+// PortableSurface(), SynthApplication<App>. Its bank/slot layout gives
+// position 5 a pressable encoder with one modulator, so a ParamPush that
+// reaches the library (catalog forwarding off) opens the modulation view,
+// exactly as it does for an app without a catalog.
+struct MidiCatalogTestApp {
+    static inline synth::MidiAppCatalog catalog;
+    synth::AppContext* context = nullptr;
+    synth::BankSlot* probeSlot = nullptr;
+    synth::ParameterId carrierId = 0;
+    MidiCatalogTestSurface surface;
+
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "MidiCatalogTest";
+        config.numAudioOutputs = 2;
+        return config;
+    }
+
+    void Init(synth::AppContext* ctx) {
+        context = ctx;
+        auto& group = ctx->parameterManager->CreateGroup({.numVoices = 1,
+                                                           .numModulators = 1,
+                                                           .numScenes = 1,
+                                                           .maxParameters = 4});
+        for (synth::ModulatorMetadata& metadata : group.GetModulators().Metadata()) {
+            metadata.connected = true;
+        }
+        auto& carrier = ctx->parameterManager->CreateParameter(group, {.name = "Carrier", .defaultValue = 0.4f});
+        carrierId = carrier.Id();
+        auto& bank = ctx->parameterManager->CreateBank();
+        bank.AddMapping(5, carrier);
+        probeSlot = &ctx->parameterManager->CreateBankSlot();
+        for (synth::PhysicalEncoderId encoderId = 0; encoderId <= 5; ++encoderId) {
+            probeSlot->AddPhysicalEncoder(encoderId);
+        }
+        probeSlot->SelectBank(&bank);
+    }
+    void ProcessBlock(synth::AudioBlock&) {}
+    synth::ui::Surface& PortableSurface() { return surface; }
+    synth::MidiAppCatalog MidiCatalog() const { return catalog; }
+};
+
+}  // namespace
+
+TEST_CASE(engine_dispatches_catalog_app_actions_to_surface) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.plain", .value = "3", .label = "Plain"});
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.analog",
+                                                    .value = "",
+                                                    .label = "Analog",
+                                                    .analogRange = std::make_pair(30.0f, 300.0f)});
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::AppAction(0, 0, 0.0f)));
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::AppAction(0, 1, 0.5f)));
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    const auto& dispatched = engine.Application().surface.dispatched;
+    REQUIRE_TRUE(dispatched.size() == 2);
+    REQUIRE_TRUE(dispatched[0].name == "test.plain");
+    REQUIRE_TRUE(dispatched[0].value == "3");
+    REQUIRE_TRUE(dispatched[1].name == "test.analog");
+    REQUIRE_TRUE(dispatched[1].value == std::to_string(165.0f));
+}
+
+TEST_CASE(engine_app_action_out_of_range_dispatches_nothing) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.plain", .value = "3", .label = "Plain"});
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::AppAction(0, 5, 0.0f)));
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(engine.Application().surface.dispatched.empty());
+}
+
+TEST_CASE(engine_tempo_action_range_reaches_the_message_bus) {
+    // A catalog naming a tempo action with an analog range: a tempo
+    // increment pushed onto the MIDI bus moves the master clock's tempo.
+    {
+        MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+        MidiCatalogTestApp::catalog.actions.push_back({.action = "test.tempo",
+                                                        .value = "",
+                                                        .label = "Tempo",
+                                                        .analogRange = std::make_pair(30.0f, 300.0f)});
+        MidiCatalogTestApp::catalog.tempoAction = "test.tempo";
+
+        synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+        engine.Initialize();
+        engine.Prepare(48000.0, 32);
+
+        const double before = engine.Clock().TempoBpm();
+        REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::TempoBpmIncDec(0, 5.0f)));
+
+        TestBlockBuffers buffers(2, 32);
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+
+        REQUIRE_NEAR(engine.Clock().TempoBpm(), before + 5.0, 0.0001);
+    }
+
+    // A catalog naming no tempo action: the same increment moves nothing.
+    {
+        MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+        MidiCatalogTestApp::catalog.actions.push_back({.action = "test.plain", .value = "3", .label = "Plain"});
+
+        synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+        engine.Initialize();
+        engine.Prepare(48000.0, 32);
+
+        const double before = engine.Clock().TempoBpm();
+        REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::TempoBpmIncDec(0, 5.0f)));
+
+        TestBlockBuffers buffers(2, 32);
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+
+        REQUIRE_NEAR(engine.Clock().TempoBpm(), before, 0.0001);
+    }
+}
+
+TEST_CASE(engine_rebuild_resolves_app_action_rows_and_drops_unknown_ones) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.known", .value = "1", .label = "Known"});
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "catalog-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+
+        synth::MidiControllerSystemMessageAssociation known;
+        known.control = synth::MidiControlAddress{.channel = 0, .cc = 10};
+        known.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+        known.appAction = "test.known";
+        known.appActionValue = "1";
+        known.feedback = known.press;
+
+        synth::MidiControllerSystemMessageAssociation unknown;
+        unknown.control = synth::MidiControlAddress{.channel = 0, .cc = 11};
+        unknown.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+        unknown.appAction = "test.unknown";
+        unknown.appActionValue = "9";
+        unknown.feedback = unknown.press;
+
+        slot.config.systemMessages.push_back(known);
+        slot.config.systemMessages.push_back(unknown);
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    // The persisted instrument keeps both rows, including the one the
+    // catalog cannot currently resolve, so a later catalog that knows it
+    // gets it back.
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    REQUIRE_TRUE(snapshot.controllers.front().config.systemMessages.size() == 2);
+
+    synth::MidiInProcessor* processor = engine.MidiInputProcessor(0);
+    REQUIRE_TRUE(processor != nullptr);
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+
+    processor->Process(synth::BasicMidi::CC(0, 0, 10, 127));
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    const auto& dispatched = engine.Application().surface.dispatched;
+    REQUIRE_TRUE(dispatched.size() == 1);
+    REQUIRE_TRUE(dispatched[0].name == "test.known");
+
+    // The unresolved row was dropped from the built profile, so its control
+    // address has no association left to match.
+    processor->Process(synth::BasicMidi::CC(0, 0, 11, 127));
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+    REQUIRE_TRUE(engine.Application().surface.dispatched.size() == 1);
+}
+
+TEST_CASE(engine_rebuild_resolves_shifted_app_action_and_clears_an_unknown_one) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.actionA", .value = "1", .label = "A"});
+    MidiCatalogTestApp::catalog.actions.push_back({.action = "test.actionB", .value = "1", .label = "B"});
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "catalog-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+
+        synth::MidiControllerSystemMessageAssociation shiftButton;
+        shiftButton.control = synth::MidiControlAddress{.channel = 0, .cc = 30};
+        shiftButton.press = synth::MessageIn::Shift(0, true);
+        shiftButton.release = synth::MessageIn::Shift(0, false);
+        shiftButton.feedback = shiftButton.press;
+
+        // Row A: ordinary press names action 0; its shifted press names
+        // action 1, which the catalog knows.
+        synth::MidiControllerSystemMessageAssociation rowA;
+        rowA.control = synth::MidiControlAddress{.channel = 0, .cc = 10};
+        rowA.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+        rowA.appAction = "test.actionA";
+        rowA.appActionValue = "1";
+        rowA.feedback = rowA.press;
+        rowA.shiftedPress = synth::MessageIn::AppAction(0, 0, 0.0f);
+        rowA.shiftedAppAction = "test.actionB";
+        rowA.shiftedAppActionValue = "1";
+
+        // Row B: ordinary press also names action 0; its shifted press
+        // names an action the catalog does not have.
+        synth::MidiControllerSystemMessageAssociation rowB;
+        rowB.control = synth::MidiControlAddress{.channel = 0, .cc = 11};
+        rowB.press = synth::MessageIn::AppAction(0, 0, 0.0f);
+        rowB.appAction = "test.actionA";
+        rowB.appActionValue = "1";
+        rowB.feedback = rowB.press;
+        rowB.shiftedPress = synth::MessageIn::AppAction(0, 0, 0.0f);
+        rowB.shiftedAppAction = "test.unknown";
+        rowB.shiftedAppActionValue = "9";
+
+        slot.config.systemMessages.push_back(shiftButton);
+        slot.config.systemMessages.push_back(rowA);
+        slot.config.systemMessages.push_back(rowB);
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    synth::MidiInProcessor* processor = engine.MidiInputProcessor(0);
+    REQUIRE_TRUE(processor != nullptr);
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+
+    processor->Process(synth::BasicMidi::CC(0, 0, 30, 127));  // shift on
+    processor->Process(synth::BasicMidi::CC(0, 0, 10, 127));  // row A, shifted
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    const auto& dispatched = engine.Application().surface.dispatched;
+    REQUIRE_TRUE(dispatched.size() == 1);
+    REQUIRE_TRUE(dispatched[0].name == "test.actionB");
+
+    // Row B's shifted press was unresolved and cleared from the built
+    // profile, so pressing it while shifted still fires its ordinary press.
+    processor->Process(synth::BasicMidi::CC(0, 0, 11, 127));
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+    REQUIRE_TRUE(dispatched.size() == 2);
+    REQUIRE_TRUE(dispatched[1].name == "test.actionA");
+
+    // The persisted instrument keeps both shifted name/value pairs,
+    // including row B's, which the running catalog cannot currently
+    // resolve.
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    const auto& persisted = snapshot.controllers.front().config.systemMessages;
+    REQUIRE_TRUE(persisted.size() == 3);
+    bool foundRowA = false;
+    bool foundRowB = false;
+    for (const auto& association : persisted) {
+        if (!association.control.has_value()) {
+            continue;
+        }
+        if (association.control->cc == 10) {
+            REQUIRE_TRUE(association.shiftedAppAction == "test.actionB");
+            REQUIRE_TRUE(association.shiftedAppActionValue == "1");
+            foundRowA = true;
+        } else if (association.control->cc == 11) {
+            REQUIRE_TRUE(association.shiftedAppAction == "test.unknown");
+            REQUIRE_TRUE(association.shiftedAppActionValue == "9");
+            foundRowB = true;
+        }
+    }
+    REQUIRE_TRUE(foundRowA);
+    REQUIRE_TRUE(foundRowB);
+}
+
+TEST_CASE(engine_forwards_encoder_press_to_catalog_action_instead_of_opening_modulation_view) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.encoderPressAction = "test.press";
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::ParamPush(0, 0, 5)));
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    const auto& dispatched = engine.Application().surface.dispatched;
+    REQUIRE_TRUE(dispatched.size() == 1);
+    REQUIRE_TRUE(dispatched[0].name == "test.press");
+    REQUIRE_TRUE(dispatched[0].value == "5");
+    REQUIRE_TRUE(!engine.Application().probeSlot->SelectedBank()->ShowingModulation());
+}
+
+TEST_CASE(engine_encoder_press_without_catalog_forwarding_opens_modulation_view_as_today) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.encoderPressAction.clear();
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    REQUIRE_TRUE(engine.MidiBus().Push(synth::MessageIn::ParamPush(0, 0, 5)));
+
+    TestBlockBuffers buffers(2, 32);
+    synth::AudioBlock block = buffers.Block(32);
+    engine.ProcessBlock(block, 0);
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(engine.Application().surface.dispatched.empty());
+    REQUIRE_TRUE(engine.Application().probeSlot->SelectedBank()->ShowingModulation());
+}
+
+TEST_CASE(engine_patch_load_restores_saved_instrument_when_catalog_carries_mappings) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = true;
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "saved-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "saved-in";
+        slot.output.identifier = "saved-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    const std::filesystem::path saveDir =
+        std::filesystem::temp_directory_path() / "engine-patch-carries-instrument-save-dir";
+    std::filesystem::remove_all(saveDir);
+
+    const synth::PatchCommandResult saveResult = engine.Patches().SavePatchAs(saveDir);
+    REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::Pending);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    const synth::PatchCommandResult written = engine.Patches().ProcessResponses();
+    REQUIRE_TRUE(written.status == synth::PatchCommandStatus::Written);
+
+    // The saved file itself carries the instrument under schemaVersion 2 --
+    // confirm the real file on disk, not just the engine's in-memory path.
+    const std::string savedText = synth::LoadPatchVersionText(written.path);
+    synth::JsonArena checkArena(65536);
+    const synth::JSON savedRoot = checkArena.Loads(savedText.c_str());
+    REQUIRE_TRUE(!savedRoot.IsNull());
+    REQUIRE_TRUE(savedRoot.Get("schemaVersion").IntegerValue() == 2);
+    REQUIRE_TRUE(!savedRoot.Get("midiInstrument").IsNull());
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        instrument.controllers.clear();
+        synth::MidiControllerSlot slot;
+        slot.name = "changed-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "changed-in";
+        slot.output.identifier = "changed-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+    REQUIRE_TRUE(engine.InstrumentSnapshot().controllers.front().name == "changed-controller");
+
+    const synth::PatchCommandResult loadResult = engine.Patches().LoadPatch(saveDir);
+    REQUIRE_TRUE(loadResult.status == synth::PatchCommandStatus::Ok);
+
+    {
+        // ProcessBlock's drain parses the midiInstrument section and stages
+        // it; only MessageThreadTick's EditInstrument call actually replaces
+        // the live instrument.
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    REQUIRE_TRUE(engine.InstrumentSnapshot().controllers.front().name == "changed-controller");
+    engine.MessageThreadTick();
+
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    REQUIRE_TRUE(snapshot.controllers.front().name == "saved-controller");
+    REQUIRE_TRUE(snapshot.controllers.front().input.identifier == "saved-in");
+    REQUIRE_TRUE(snapshot.controllers.front().output.identifier == "saved-out");
+
+    std::filesystem::remove_all(saveDir);
+}
+
+TEST_CASE(engine_patch_load_leaves_instrument_untouched_when_catalog_does_not_carry_mappings) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = false;
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "saved-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "saved-in";
+        slot.output.identifier = "saved-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    const std::filesystem::path saveDir =
+        std::filesystem::temp_directory_path() / "engine-patch-no-carry-instrument-save-dir";
+    std::filesystem::remove_all(saveDir);
+
+    const synth::PatchCommandResult saveResult = engine.Patches().SavePatchAs(saveDir);
+    REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::Pending);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    const synth::PatchCommandResult written = engine.Patches().ProcessResponses();
+    REQUIRE_TRUE(written.status == synth::PatchCommandStatus::Written);
+
+    // Without a catalog that carries mappings, the saved file stays
+    // version 1 with no midiInstrument section, byte-for-byte what a
+    // parameter-only patch has always written.
+    const std::string savedText = synth::LoadPatchVersionText(written.path);
+    synth::JsonArena checkArena(65536);
+    const synth::JSON savedRoot = checkArena.Loads(savedText.c_str());
+    REQUIRE_TRUE(!savedRoot.IsNull());
+    REQUIRE_TRUE(savedRoot.Get("schemaVersion").IntegerValue() == 1);
+    REQUIRE_TRUE(savedRoot.Get("midiInstrument").IsNull());
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        instrument.controllers.clear();
+        synth::MidiControllerSlot slot;
+        slot.name = "changed-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "changed-in";
+        slot.output.identifier = "changed-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    const synth::PatchCommandResult loadResult = engine.Patches().LoadPatch(saveDir);
+    REQUIRE_TRUE(loadResult.status == synth::PatchCommandStatus::Ok);
+
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+
+    // No section was ever written, so nothing is staged to apply: the
+    // instrument the operator changed to after saving stays live.
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    REQUIRE_TRUE(snapshot.controllers.front().name == "changed-controller");
+    REQUIRE_TRUE(snapshot.controllers.front().input.identifier == "changed-in");
+    REQUIRE_TRUE(snapshot.controllers.front().output.identifier == "changed-out");
+
+    std::filesystem::remove_all(saveDir);
+}
+
+TEST_CASE(engine_ignores_version_two_midi_instrument_section_when_catalog_does_not_carry_mappings) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = false;
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        instrument.controllers.clear();
+        synth::MidiControllerSlot slot;
+        slot.name = "changed-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "changed-in";
+        slot.output.identifier = "changed-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    // A schemaVersion-2 patch file whose midiInstrument section is valid and
+    // carries a different controller -- written directly, not through this
+    // engine (whose catalog never asks BuildPatchJSON to carry the
+    // section), so the file's presence alone is what this test exercises.
+    synth::ParameterManager scratchManager;
+    auto& scratchGroup = scratchManager.CreateGroup(
+        {.numVoices = 1, .numModulators = 1, .numScenes = 1, .maxParameters = 4});
+    scratchManager.CreateParameter(scratchGroup, {.name = "Carrier", .defaultValue = 0.4f});
+    scratchManager.CaptureDefaultControlState();
+    scratchManager.ComputeAllParameters();
+
+    synth::MidiInstrumentConfig sectionInstrument;
+    synth::MidiControllerSlot sectionSlot;
+    sectionSlot.name = "smuggled-controller";
+    sectionSlot.kind = synth::MidiProfileKind::Generic;
+    sectionSlot.input.identifier = "smuggled-in";
+    sectionSlot.output.identifier = "smuggled-out";
+    sectionInstrument.controllers.push_back(std::move(sectionSlot));
+
+    synth::JsonArena buildArena(64 * 1024);
+    synth::JSON root = synth::BuildPatchJSON(buildArena, "Smuggled Patch", scratchManager, sectionInstrument,
+                                              /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(!root.IsNull());
+    REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 2);
+    char* dumped = root.Dumps(JSON_ENCODE_ANY);
+    REQUIRE_TRUE(dumped != nullptr);
+    const std::string jsonText(dumped);
+    std::free(dumped);
+
+    const std::filesystem::path patchDir =
+        std::filesystem::temp_directory_path() / "engine-no-carry-smuggled-instrument-dir";
+    std::filesystem::remove_all(patchDir);
+    synth::SavePatchVersionInDirectory(patchDir, jsonText, std::chrono::system_clock::now());
+
+    const synth::PatchCommandResult loadResult = engine.Patches().LoadPatch(patchDir);
+    REQUIRE_TRUE(loadResult.status == synth::PatchCommandStatus::Ok);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+
+    // The section was never even parsed (the catalog does not carry
+    // mappings), so nothing was staged to apply: the live instrument stays
+    // exactly what it was before the load.
+    const synth::MidiInstrumentConfig snapshot = engine.InstrumentSnapshot();
+    REQUIRE_TRUE(snapshot.controllers.size() == 1);
+    REQUIRE_TRUE(snapshot.controllers.front().name == "changed-controller");
+    REQUIRE_TRUE(snapshot.controllers.front().input.identifier == "changed-in");
+    REQUIRE_TRUE(snapshot.controllers.front().output.identifier == "changed-out");
+
+    std::filesystem::remove_all(patchDir);
+}
+
+TEST_CASE(engine_startup_restores_recorded_patch_parameters_and_the_runtime_configurations_instrument) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = true;
+
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-startup-restores-config-instrument";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    synth::Engine<MidiCatalogTestApp> engine1([] { return std::uint64_t{0}; });
+    engine1.SetRuntimeDataPaths(paths);
+    engine1.Initialize();
+    engine1.Prepare(48000.0, 32);
+
+    // Save a patch: the live Carrier value at save time becomes the patch's
+    // parameter value.
+    engine1.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "patch-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "patch-in";
+        slot.output.identifier = "patch-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+    engine1.Manager().ParameterById(engine1.Application().carrierId).SceneCenter(0) = 0.75f;
+
+    const std::filesystem::path patchDir = paths.patchesRoot / "TakeOne";
+    const synth::PatchCommandResult saveResult = engine1.Patches().SavePatchAs(patchDir);
+    REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::Pending);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine1.ProcessBlock(block, 0);
+    }
+    engine1.MessageThreadTick();
+    REQUIRE_TRUE(engine1.Patches().CurrentPatchDirectory() == patchDir);
+    REQUIRE_TRUE(std::filesystem::exists(patchDir));
+
+    // Edit the instrument after the save, so it differs from what the patch
+    // carries, and save the runtime configuration, as a Controllers-page
+    // commit does.
+    engine1.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        instrument.controllers.clear();
+        synth::MidiControllerSlot slot;
+        slot.name = "edited-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "edited-in";
+        slot.output.identifier = "edited-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+    REQUIRE_TRUE(engine1.SaveRuntimeConfiguration() == synth::RuntimeConfigFileStatus::Ok);
+
+    // Start a second engine on the same data root.
+    synth::Engine<MidiCatalogTestApp> engine2([] { return std::uint64_t{0}; });
+    engine2.SetRuntimeDataPaths(paths);
+    engine2.Initialize();
+    engine2.Prepare(48000.0, 32);
+    engine2.MessageThreadTick();
+
+    REQUIRE_TRUE(engine2.LiveInstrument().controllers.size() == 1);
+    REQUIRE_TRUE(engine2.LiveInstrument().controllers.front().name == "edited-controller");
+    REQUIRE_NEAR(engine2.Manager().ParameterById(engine2.Application().carrierId).SceneCenter(0), 0.75f, 1e-5f);
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(engine_opening_a_patch_that_carries_mappings_saves_its_instrument_to_the_runtime_configuration) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = true;
+
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-open-patch-saves-runtime-configuration";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        synth::MidiControllerSlot slot;
+        slot.name = "live-controller";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "live-in";
+        slot.output.identifier = "live-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+
+    const synth::MidiInstrumentConfig patchInstrument = MakeRuntimeConfigInstrument("from-patch");
+    const std::filesystem::path patchDir = paths.patchesRoot / "OpenMe";
+    WriteCarryingInstrumentPatchVersion(patchDir, 0.6f, std::chrono::system_clock::now(), patchInstrument);
+
+    const synth::PatchCommandResult loadResult = engine.LoadPatch(patchDir);
+    REQUIRE_TRUE(loadResult.status == synth::PatchCommandStatus::Ok);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(engine.LiveInstrument().controllers.size() == 1);
+    REQUIRE_TRUE(engine.LiveInstrument().controllers.front().name == "from-patch");
+
+    synth::MidiInstrumentConfig savedInstrument;
+    synth::AudioDeviceState savedAudio;
+    synth::SyncConfig savedSync;
+    REQUIRE_TRUE(synth::LoadRuntimeConfigFile(paths.configFile, savedInstrument, savedAudio, savedSync) ==
+                 synth::RuntimeConfigFileStatus::Ok);
+    REQUIRE_TRUE(savedInstrument.controllers.size() == 1);
+    REQUIRE_TRUE(savedInstrument.controllers.front().name == "from-patch");
+
+    synth::Engine<MidiCatalogTestApp> secondEngine([] { return std::uint64_t{0}; });
+    secondEngine.SetRuntimeDataPaths(paths);
+    secondEngine.Initialize();
+    REQUIRE_TRUE(secondEngine.LiveInstrument().controllers.size() == 1);
+    REQUIRE_TRUE(secondEngine.LiveInstrument().controllers.front().name == "from-patch");
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(engine_initialize_without_a_configuration_file_opens_no_startup_patch) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = true;
+
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-no-configuration-file-data-root";
+    std::filesystem::remove_all(dataRoot);
+    synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+    paths.configFile.clear();
+
+    const synth::MidiInstrumentConfig patchInstrument = MakeRuntimeConfigInstrument("from-patch");
+    const std::filesystem::path patchDir = paths.patchesRoot / "OnDisk";
+    WriteCarryingInstrumentPatchVersion(patchDir, 0.9f, std::chrono::system_clock::now(), patchInstrument);
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();
+    engine.MessageThreadTick();
+
+    REQUIRE_NEAR(engine.Manager().ParameterById(engine.Application().carrierId).SceneCenter(0), 0.4f, 1e-5f);
+    REQUIRE_TRUE(engine.LiveInstrument().controllers.empty());
+    REQUIRE_TRUE(engine.DefaultInstrument().controllers.empty());
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(host_snapshot_holds_a_save_requested_while_it_is_outstanding) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "patch-manager-host-snapshot-holds-save";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    const std::filesystem::path patchDir = paths.patchesRoot / "Current";
+    const synth::PatchCommandResult saveAsResult = engine.Patches().SavePatchAs(patchDir);
+    REQUIRE_TRUE(saveAsResult.status == synth::PatchCommandStatus::Pending);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+    REQUIRE_TRUE(engine.Patches().CurrentPatchDirectory() == patchDir);
+    engine.ConsumeLastTickPatchResult();  // discard the SaveAs's own Written result
+
+    int consumerCalls = 0;
+    engine.Patches().SetHostSnapshotConsumer([&](synth::JsonDocument&) { ++consumerCalls; });
+
+    const synth::PatchCommandResult snapshotResult = engine.Patches().RequestHostSnapshot("snapshot");
+    REQUIRE_TRUE(snapshotResult.status == synth::PatchCommandStatus::Pending);
+
+    // A save asked for while that snapshot is outstanding is held, not
+    // refused: it answers Pending, exactly as a save that reached the bus
+    // does.
+    const synth::PatchCommandResult saveResult = engine.Patches().SavePatch();
+    REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::Pending);
+
+    // Round 1: the snapshot's own SerializeToJSON is applied and answered;
+    // MessageThreadTick's ProcessResponses hands it to the consumer and then
+    // dispatches the held save onto the bus for real.
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+    REQUIRE_TRUE(consumerCalls == 1);
+    REQUIRE_TRUE(!engine.ConsumeLastTickPatchResult().has_value());
+
+    // Round 2: the held save's own SerializeToJSON, just dispatched, is
+    // applied and answered.
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+
+    const std::optional<synth::PatchCommandResult> tickResult = engine.ConsumeLastTickPatchResult();
+    REQUIRE_TRUE(tickResult.has_value());
+    REQUIRE_TRUE(tickResult->status == synth::PatchCommandStatus::Written);
+    REQUIRE_TRUE(tickResult->path.parent_path() == patchDir);
+    std::error_code ec;
+    REQUIRE_TRUE(std::filesystem::exists(tickResult->path, ec) && !ec);
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(host_snapshot_reaches_the_consumer_and_writes_no_file) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "patch-manager-host-snapshot-writes-no-file";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    engine.Manager().ParameterById(engine.Application().carrierId).SceneCenter(0) = 0.62f;
+
+    synth::JsonDocument consumedDocument;
+    int consumerCalls = 0;
+    engine.Patches().SetHostSnapshotConsumer([&](synth::JsonDocument& document) {
+        ++consumerCalls;
+        consumedDocument = document;
+    });
+
+    const synth::PatchCommandResult snapshotResult = engine.Patches().RequestHostSnapshot("snapshot");
+    REQUIRE_TRUE(snapshotResult.status == synth::PatchCommandStatus::Pending);
+
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(consumerCalls == 1);
+    REQUIRE_TRUE(!consumedDocument.IsNull());
+
+    // The document's parameter values are the engine's live ones: read it
+    // back into a scratch manager built with MidiCatalogTestApp's own
+    // topology (single group, one "Carrier" parameter), as
+    // WriteCarryingInstrumentPatchVersion does to build one.
+    synth::ParameterManager scratchManager;
+    auto& group = scratchManager.CreateGroup(
+        {.numVoices = 1, .numModulators = 1, .numScenes = 1, .maxParameters = 4});
+    for (synth::ModulatorMetadata& metadata : group.GetModulators().Metadata()) {
+        metadata.connected = true;
+    }
+    const synth::ParameterId carrierId =
+        scratchManager.RegisterParameter(group, {.name = "Carrier", .defaultValue = 0.4f});
+    scratchManager.CaptureDefaultControlState();
+    synth::MidiInstrumentConfig unusedInstrument;
+    REQUIRE_TRUE(synth::LoadPatchJSON(consumedDocument.root, scratchManager, unusedInstrument));
+    REQUIRE_NEAR(scratchManager.ParameterById(carrierId).SceneCenter(0), 0.62f, 1e-5f);
+
+    REQUIRE_TRUE(std::filesystem::is_empty(paths.patchesRoot));
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(host_snapshot_is_refused_while_a_save_is_outstanding) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "patch-manager-host-snapshot-refused-during-save";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    const std::filesystem::path patchDir = paths.patchesRoot / "InFlight";
+    const synth::PatchCommandResult saveResult = engine.Patches().SavePatchAs(patchDir);
+    REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::Pending);
+
+    const std::size_t busSizeBeforeSnapshot = engine.Context().patchInputBus->Size();
+    const synth::PatchCommandResult snapshotResult = engine.Patches().RequestHostSnapshot("snapshot");
+    REQUIRE_TRUE(snapshotResult.status == synth::PatchCommandStatus::Busy);
+    REQUIRE_TRUE(engine.Context().patchInputBus->Size() == busSizeBeforeSnapshot);
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(naming_an_existing_patch_makes_it_current_without_a_message) {
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-name-current-patch-existing";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    synth::Engine<EngineTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();  // patchesRoot is empty here: no startup patch opens
+    engine.Prepare(48000.0, 32);
+
+    const std::filesystem::path patchDir = paths.patchesRoot / "p";
+    WriteProbePatchVersion(patchDir, 0.5f, std::chrono::system_clock::now());
+
+    REQUIRE_TRUE(engine.Context().patchInputBus->Size() == 0);
+    REQUIRE_TRUE(engine.NameCurrentPatch(std::filesystem::path("p")));
+    REQUIRE_TRUE(engine.Context().patchInputBus->Size() == 0);
+    REQUIRE_TRUE(engine.CurrentPatchRelativePath().has_value());
+    REQUIRE_TRUE(*engine.CurrentPatchRelativePath() == "p");
+
+    // A trailing separator names the same directory.
+    REQUIRE_TRUE(engine.NameCurrentPatch(std::filesystem::path("p/")));
+    REQUIRE_TRUE(engine.Context().patchInputBus->Size() == 0);
+    REQUIRE_TRUE(*engine.CurrentPatchRelativePath() == "p");
+
+    const synth::PatchCommandResult saveResult = engine.Patches().SavePatch();
+    REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::Pending);
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+    const std::optional<synth::PatchCommandResult> tickResult = engine.ConsumeLastTickPatchResult();
+    REQUIRE_TRUE(tickResult.has_value());
+    REQUIRE_TRUE(tickResult->status == synth::PatchCommandStatus::Written);
+    // NameCurrentPatch records PatchBrowser::ResolveLoadPath's canonical
+    // form, which can differ textually from patchDir when the OS temp
+    // directory itself resolves through a symlink (e.g. macOS's /var), so
+    // this compares the two paths as the same directory rather than as
+    // equal strings.
+    std::error_code equivalentEc;
+    REQUIRE_TRUE(std::filesystem::equivalent(tickResult->path.parent_path(), patchDir, equivalentEc) &&
+                 !equivalentEc);
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(naming_a_patch_outside_the_root_leaves_no_current_patch) {
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-name-current-patch-outside-root";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    const std::filesystem::path regularFile = paths.patchesRoot / "regular.txt";
+    {
+        std::ofstream out(regularFile, std::ios::binary);
+        out << "not a directory";
+    }
+
+    const std::filesystem::path outsideTarget =
+        std::filesystem::temp_directory_path() / "engine-name-current-patch-outside-root-target";
+    std::filesystem::remove_all(outsideTarget);
+    std::filesystem::create_directories(outsideTarget);
+    const std::filesystem::path linkOutside = paths.patchesRoot / "link-out";
+    std::error_code linkEc;
+    std::filesystem::create_directory_symlink(outsideTarget, linkOutside, linkEc);
+    REQUIRE_TRUE(!linkEc);
+
+    synth::Engine<EngineTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+
+    const std::vector<std::filesystem::path> refusedNames = {
+        std::filesystem::path("missing"), std::filesystem::path("regular.txt"),
+        std::filesystem::path("."),       std::filesystem::path(""),
+        std::filesystem::path("../x"),    std::filesystem::path("/etc"),
+        std::filesystem::path("link-out"),
+    };
+    for (const std::filesystem::path& name : refusedNames) {
+        REQUIRE_TRUE(!engine.NameCurrentPatch(name));
+        REQUIRE_TRUE(!engine.CurrentPatchRelativePath().has_value());
+        const synth::PatchCommandResult saveResult = engine.Patches().SavePatch();
+        REQUIRE_TRUE(saveResult.status == synth::PatchCommandStatus::NeedsSaveAsPath);
+    }
+
+    std::filesystem::remove_all(dataRoot);
+    std::filesystem::remove_all(outsideTarget);
+}
+
+TEST_CASE(engine_relaunch_reopens_the_patch_version_last_opened_even_when_a_newer_version_exists) {
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-relaunch-reopens-recorded-version";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    const std::filesystem::path patchDir = paths.patchesRoot / "Versions";
+    const auto earlier = std::chrono::system_clock::from_time_t(1700000000);
+    const auto later = earlier + std::chrono::seconds(1);
+    WriteProbePatchVersion(patchDir, 0.3f, earlier);
+    WriteProbePatchVersion(patchDir, 0.6f, later);
+
+    std::filesystem::path olderVersionFile;
+    for (const auto& entry : std::filesystem::directory_iterator(patchDir)) {
+        if (olderVersionFile.empty() || entry.path().filename().string() < olderVersionFile.filename().string()) {
+            olderVersionFile = entry.path();
+        }
+    }
+    REQUIRE_TRUE(!olderVersionFile.empty());
+    const std::optional<std::filesystem::path> newestVersion = synth::LatestPatchVersion(patchDir);
+    REQUIRE_TRUE(newestVersion.has_value() && *newestVersion != olderVersionFile);
+
+    synth::Engine<EngineTestApp> engine1([] { return std::uint64_t{0}; });
+    engine1.SetRuntimeDataPaths(paths);
+    engine1.Initialize();  // no record yet: opens the newest version (0.6) and records it
+
+    const synth::PatchCommandResult loadResult = engine1.LoadPatch(olderVersionFile);
+    REQUIRE_TRUE(loadResult.status == synth::PatchCommandStatus::Ok);
+
+    synth::Engine<EngineTestApp> engine2([] { return std::uint64_t{0}; });
+    engine2.SetRuntimeDataPaths(paths);
+    engine2.Initialize();
+
+    REQUIRE_NEAR(engine2.Manager().ParameterById(engine2.Application().probeId).GetRaw(0), 0.3f, 1e-5f);
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+TEST_CASE(engine_relaunch_after_upgrading_records_the_opened_version_and_keeps_a_later_edit) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = true;
+
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-relaunch-upgrade-records-and-keeps-edit";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+
+    // A configuration saved before this record existed (a player upgrading):
+    // written with the pre-existing four-argument call, so it has no
+    // lastPatchVersion field.
+    WriteRuntimeConfigFile(paths.configFile, MakeRuntimeConfigInstrument("pre-upgrade"),
+                           synth::AudioDeviceState{});
+
+    const synth::MidiInstrumentConfig patchInstrument = MakeRuntimeConfigInstrument("from-patch");
+    const std::filesystem::path patchDir = paths.patchesRoot / "Upgrade";
+    WriteCarryingInstrumentPatchVersion(patchDir, 0.5f, std::chrono::system_clock::now(), patchInstrument);
+
+    synth::Engine<MidiCatalogTestApp> engine1([] { return std::uint64_t{0}; });
+    engine1.SetRuntimeDataPaths(paths);
+    engine1.Initialize();
+    engine1.Prepare(48000.0, 32);
+    engine1.MessageThreadTick();  // applies the staged midiInstrument section
+
+    REQUIRE_TRUE(engine1.LiveInstrument().controllers.size() == 1);
+    REQUIRE_TRUE(engine1.LiveInstrument().controllers.front().name == "from-patch");
+
+    synth::MidiInstrumentConfig recordedInstrument;
+    synth::AudioDeviceState recordedAudio;
+    synth::SyncConfig recordedSync;
+    std::optional<std::string> recordedVersion;
+    REQUIRE_TRUE(synth::LoadRuntimeConfigFile(paths.configFile, recordedInstrument, recordedAudio, recordedSync,
+                                              &recordedVersion) == synth::RuntimeConfigFileStatus::Ok);
+    REQUIRE_TRUE(recordedVersion.has_value() && !recordedVersion->empty());
+
+    // A Controllers edit made in between, saved the way the page saves every
+    // committed edit: the engine's live instrument changes and the runtime
+    // configuration is saved.
+    engine1.EditInstrument([](synth::MidiInstrumentConfig& instrument) {
+        instrument.controllers.clear();
+        synth::MidiControllerSlot slot;
+        slot.name = "controllers-page-edit";
+        slot.kind = synth::MidiProfileKind::Generic;
+        slot.input.identifier = "edit-in";
+        slot.output.identifier = "edit-out";
+        instrument.controllers.push_back(std::move(slot));
+    });
+    REQUIRE_TRUE(engine1.SaveRuntimeConfiguration() == synth::RuntimeConfigFileStatus::Ok);
+
+    synth::Engine<MidiCatalogTestApp> engine2([] { return std::uint64_t{0}; });
+    engine2.SetRuntimeDataPaths(paths);
+    engine2.Initialize();
+    engine2.Prepare(48000.0, 32);
+    engine2.MessageThreadTick();  // would apply a staged patch instrument, if any were staged
+
+    REQUIRE_TRUE(engine2.LiveInstrument().controllers.size() == 1);
+    REQUIRE_TRUE(engine2.LiveInstrument().controllers.front().name == "controllers-page-edit");
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+// A plugin host restores its saved state by pushing a patch straight onto the
+// patch bus. That restore must never write the runtime configuration the
+// plugin shares with the standalone app, including on the first launch after
+// an upgrade whose newest patch predates patches carrying controller setups.
+TEST_CASE(engine_host_state_restore_after_upgrading_from_a_patch_without_mappings_writes_no_runtime_configuration) {
+    MidiCatalogTestApp::catalog = synth::MidiAppCatalog{};
+    MidiCatalogTestApp::catalog.patchCarriesMappings = true;
+
+    const std::filesystem::path dataRoot =
+        std::filesystem::temp_directory_path() / "engine-host-restore-after-upgrade-writes-nothing";
+    std::filesystem::remove_all(dataRoot);
+    const synth::RuntimeDataPaths paths = synth::RuntimeDataPaths::FromDataRoot(dataRoot);
+    std::filesystem::create_directories(paths.patchesRoot);
+    WriteRuntimeConfigFile(paths.configFile, MakeRuntimeConfigInstrument("pre-upgrade"),
+                           synth::AudioDeviceState{});
+
+    // The newest patch was saved before patches carried controller setups.
+    synth::ParameterManager scratchManager;
+    auto& group = scratchManager.CreateGroup(
+        {.numVoices = 1, .numModulators = 1, .numScenes = 1, .maxParameters = 4});
+    scratchManager.RegisterParameter(group, {.name = "Carrier", .defaultValue = 0.4f});
+    scratchManager.CaptureDefaultControlState();
+    scratchManager.ComputeAllParameters();
+    {
+        synth::JsonArena arena(64 * 1024);
+        synth::JSON root = synth::BuildPatchJSON(arena, "Old Patch", scratchManager, synth::MidiInstrumentConfig{},
+                                                 /*audioDevice=*/{}, /*carryInstrument=*/false);
+        REQUIRE_TRUE(root.Get("schemaVersion").IntegerValue() == 1);
+        char* dumped = root.Dumps(JSON_ENCODE_ANY);
+        REQUIRE_TRUE(dumped != nullptr);
+        const std::string jsonText(dumped);
+        std::free(dumped);
+        synth::SavePatchVersionInDirectory(paths.patchesRoot / "Old", jsonText, std::chrono::system_clock::now());
+    }
+
+    synth::Engine<MidiCatalogTestApp> engine([] { return std::uint64_t{0}; });
+    engine.SetRuntimeDataPaths(paths);
+    engine.Initialize();
+    engine.Prepare(48000.0, 32);
+    engine.MessageThreadTick();
+
+    const auto readConfig = [&paths] {
+        std::ifstream in(paths.configFile, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    const std::string before = readConfig();
+    REQUIRE_TRUE(!before.empty());
+
+    auto arena = std::make_shared<synth::JsonArena>(64 * 1024);
+    synth::JSON restored = synth::BuildPatchJSON(*arena, "Host State", scratchManager,
+                                                 MakeRuntimeConfigInstrument("from-host-restore"),
+                                                 /*audioDevice=*/{}, /*carryInstrument=*/true);
+    REQUIRE_TRUE(engine.Context().patchInputBus->Push(
+        synth::PatchMessageIn::LoadFromJSON(synth::JsonDocument{.arena = arena, .root = restored})));
+    TestBlockBuffers buffers(2, 32);
+    {
+        synth::AudioBlock block = buffers.Block(32);
+        engine.ProcessBlock(block, 0);
+    }
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(engine.LiveInstrument().controllers.size() == 1);
+    REQUIRE_TRUE(engine.LiveInstrument().controllers.front().name == "from-host-restore");
+    REQUIRE_TRUE(readConfig() == before);
+
+    std::filesystem::remove_all(dataRoot);
+}
+
+namespace {
+
+// An app with a file-export queue: satisfies HasFileExports<App> and
+// nothing else beyond SynthApplicationCore, matching InitTopologyApp's
+// minimal shape.
+struct FileExportTestApp {
+    static inline std::vector<synth::FileExport> pending;
+
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "EngineFileExportTest";
+        return config;
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+
+    std::optional<synth::FileExport> TakePendingFileExport() {
+        if (pending.empty()) {
+            return std::nullopt;
+        }
+        synth::FileExport fileExport = std::move(pending.front());
+        pending.erase(pending.begin());
+        return fileExport;
+    }
+};
+
+// An app with a per-tick message-thread hook: satisfies
+// HasMessageThreadTick<App> and nothing else beyond SynthApplicationCore,
+// matching FileExportTestApp's minimal shape.
+struct MessageThreadTickTestApp {
+    static inline std::size_t tickCount = 0;
+    static inline std::vector<std::thread::id> tickThreads;
+
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "EngineMessageThreadTickTest";
+        return config;
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+
+    void MessageThreadTick() {
+        ++tickCount;
+        tickThreads.push_back(std::this_thread::get_id());
+    }
+};
+
+}  // namespace
+
+TEST_CASE(engine_delivers_a_queued_file_export_to_the_installed_handler_once) {
+    FileExportTestApp::pending.clear();
+    FileExportTestApp::pending.push_back(
+        synth::FileExport{.fileName = "probe.txt",
+                          .mediaType = "text/plain",
+                          .bytes = std::vector<std::uint8_t>{'h', 'i'},
+                          .note = "a note"});
+
+    synth::Engine<FileExportTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+
+    std::vector<synth::FileExport> received;
+    engine.SetFileExportHandler(
+        [&received](synth::FileExport fileExport) { received.push_back(std::move(fileExport)); });
+
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(received.size() == 1);
+    REQUIRE_TRUE(received[0].fileName == "probe.txt");
+    REQUIRE_TRUE(received[0].mediaType == "text/plain");
+    REQUIRE_TRUE(received[0].bytes == std::vector<std::uint8_t>({'h', 'i'}));
+    REQUIRE_TRUE(received[0].note == "a note");
+    REQUIRE_TRUE(FileExportTestApp::pending.empty());
+}
+
+TEST_CASE(engine_takes_a_file_export_with_no_handler_and_logs_it) {
+    FileExportTestApp::pending.clear();
+    FileExportTestApp::pending.push_back(synth::FileExport{
+        .fileName = "dropped.txt", .mediaType = "text/plain", .bytes = {}, .note = ""});
+
+    synth::Engine<FileExportTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+
+    engine.MessageThreadTick();
+
+    REQUIRE_TRUE(FileExportTestApp::pending.empty());
+}
+
+TEST_CASE(engine_calls_the_app_message_thread_tick_once_per_tick) {
+    MessageThreadTickTestApp::tickCount = 0;
+    MessageThreadTickTestApp::tickThreads.clear();
+
+    synth::Engine<MessageThreadTickTestApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+
+    constexpr std::size_t kTicks = 5;
+    for (std::size_t ix = 0; ix < kTicks; ++ix) {
+        engine.MessageThreadTick();
+    }
+
+    REQUIRE_TRUE(MessageThreadTickTestApp::tickCount == kTicks);
+    REQUIRE_TRUE(MessageThreadTickTestApp::tickThreads.size() == kTicks);
+    for (const std::thread::id& id : MessageThreadTickTestApp::tickThreads) {
+        REQUIRE_TRUE(id == std::this_thread::get_id());
+    }
 }
 
 int main() {
