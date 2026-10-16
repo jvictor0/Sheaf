@@ -163,6 +163,23 @@ int main() {
                 "launcher passes braid app patch root");
     }
 
+    {
+        std::vector<synth::SynthAppRegistration> apps;
+        apps.push_back(TestRegistration("alpha", "Alpha", "tools"));
+        apps.push_back(TestRegistration("zeta", "Zeta", "test"));
+
+        const auto* known = synth_sheaf_patch::ResolveDirectLaunchApp(apps, "zeta");
+        Require(known != nullptr, "known appId resolves to a registration");
+        Require(known == &apps[1], "known appId resolves to the matching registration, not a copy");
+        Require(known->manifest.appId == "zeta", "resolved registration has the requested appId");
+
+        const auto* unknown = synth_sheaf_patch::ResolveDirectLaunchApp(apps, "not-a-registered-app");
+        Require(unknown == nullptr, "unknown appId falls back to the picker sentinel");
+
+        const auto* empty = synth_sheaf_patch::ResolveDirectLaunchApp(apps, "");
+        Require(empty == nullptr, "empty argument falls back to the picker sentinel");
+    }
+
     std::cout << "LauncherHarnessTests passed\n";
     return 0;
 }
