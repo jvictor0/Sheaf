@@ -1,7 +1,7 @@
 // Reads a constant-returning exported function straight out of a compiled
 // `.wasm` module.
 //
-// Why this exists (tasks.md 7.5a): the first-party packages advertise their UI
+// Why this exists: the first-party packages advertise their UI
 // protocol version twice -- once in the catalog metadata the publisher writes,
 // and once in `synth_browser_ui_protocol_version()` compiled into the module.
 // Only the second one is what the shell actually calls. A stale Wasm build meets
