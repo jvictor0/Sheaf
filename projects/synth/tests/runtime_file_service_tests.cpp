@@ -36,7 +36,6 @@ public:
         callbacks.loadPatch = [this](const std::filesystem::path& path) {
             calls.push_back("load:" + path.string());
         };
-        callbacks.revertPatch = [this] { calls.push_back("revert"); };
         return synth::runtime_ui::RuntimeFileService(std::move(callbacks));
     }
 
@@ -104,11 +103,6 @@ void TestDispatchMapsDirectAndConfirmedActions()
             "load patch operation");
     Require(snapshot.statusText == "Load requested: /tmp/sheaf-patches/Patch D",
             "load status");
-
-    service.Dispatch(synth::ui::Action::Named(synth::runtime_ui::Actions::kFileRevert));
-    service.Refresh(snapshot);
-    Require(harness.calls.back() == "revert", "revert patch operation");
-    Require(snapshot.statusText == "Revert requested", "revert status");
 }
 
 void TestRawBrowserActionsRemainSurfaceOwned()

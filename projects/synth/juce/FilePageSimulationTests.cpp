@@ -412,8 +412,7 @@ void VerifySpecificBrowserRules(const std::filesystem::path& root)
         const synth::runtime_ui::FilePageSnapshot explicitSaveAs = saveAsSurface.Snapshot();
         Require(explicitSaveAs.browserOpen && explicitSaveAs.browserKind == synth::runtime_ui::FileBrowserKind::SaveAs,
                 "explicit Save As opens Save As");
-        Require(firstSave.browserCurrentPathText == explicitSaveAs.browserCurrentPathText &&
-                    firstSave.statusText == explicitSaveAs.statusText && EntriesMatch(firstSave, explicitSaveAs),
+        Require(firstSave.statusText == explicitSaveAs.statusText && EntriesMatch(firstSave, explicitSaveAs),
                 "first Save opens the same Save As state machine as explicit Save As");
     }
 

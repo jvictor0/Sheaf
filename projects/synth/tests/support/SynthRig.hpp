@@ -183,11 +183,6 @@ public:
         engine_.UiBus().Push(synth::MessageIn::Stop(timestamp));
     }
 
-    void ExternalStartAt(std::size_t controllerSlot, std::uint64_t timestamp) {
-        engine_.MidiBus().Push(synth::MessageIn::Start(
-            timestamp, synth::MessageIn::Origin::ExternalMidi, controllerSlot));
-    }
-
     void ExternalContinueAt(std::size_t controllerSlot, std::uint64_t timestamp) {
         engine_.MidiBus().Push(synth::MessageIn::Continue(
             timestamp, synth::MessageIn::Origin::ExternalMidi, controllerSlot));
@@ -312,16 +307,12 @@ public:
     std::optional<synth::ClockTimePoint> ClockTimeAtSample(double sample) const {
         return engine_.Clock().TimeAtSample(sample);
     }
-    std::optional<synth::ClockTimePoint> ClockTimeAtTimestamp(std::uint64_t timestamp) const {
-        return engine_.Clock().TimeAtTimestamp(timestamp);
-    }
     std::span<const synth::ScheduledMidiEvent> ScheduledMidiEvents() const {
         return scheduledMidiSink_.Events();
     }
     std::uint64_t DroppedScheduledMidiEventCount() const {
         return scheduledMidiSink_.DroppedCount();
     }
-    void ClearScheduledMidiEvents() { scheduledMidiSink_.Clear(); }
 
     // Test-support: install a full MIDI instrument (any number of controller
     // slots) as the engine's live instrument and rebuild the MIDI processors
@@ -357,11 +348,6 @@ public:
     RigPatchStatus LoadPatch(const std::filesystem::path& path) {
         const synth::PatchCommandResult result = engine_.Patches().LoadPatch(path);
         return PumpLoadLike(result);
-    }
-
-    RigPatchStatus RevertPatch() {
-        const synth::PatchCommandResult result = engine_.Patches().RevertPatch();
-        return PumpAcceptedLike(result);
     }
 
 private:
@@ -456,39 +442,6 @@ private:
     // bus has drained and no message is stashed behind the arena-grow
     // barrier — until the block budget is exhausted.
     RigPatchStatus PumpLoadLike(const synth::PatchCommandResult& dispatchResult) {
-        if (IsImmediateFailure(dispatchResult.status)) {
-            return RigPatchStatus::Failed;
-        }
-        if (dispatchResult.status != synth::PatchCommandStatus::Ok) {
-            return RigPatchStatus::Failed;
-        }
-        for (std::size_t i = 0; i < patchPumpBudgetBlocks_; ++i) {
-            RunBlocks(1);
-            const std::optional<synth::PatchCommandResult> tickResult = engine_.ConsumeLastTickPatchResult();
-            if (tickResult.has_value() && IsImmediateFailure(tickResult->status)) {
-                return RigPatchStatus::Failed;
-            }
-            const bool drained = engine_.Context().patchInputBus->Size() == 0 &&
-                                 !engine_.HasStashedPatchMessageForTest();
-            if (drained) {
-                return RigPatchStatus::Ok;
-            }
-        }
-        return RigPatchStatus::TimedOut;
-    }
-
-    // Revert/New-family commands (RevertPatch) also report Ok immediately
-    // once queued, but unlike a fresh LoadPatch there is no new document to
-    // wait for landing in observable state beyond the drain itself. Since
-    // RunBlocks(1) already drives MessageThreadTick()'s ProcessResponses()
-    // call, calling ProcessResponses() again here would only ever observe
-    // NoCompletion (the tick consumed the real result already), so the
-    // settle condition is expressed directly in terms of the deterministic,
-    // budget-bounded state RunBlocks(1) leaves behind: the input bus has
-    // drained and no message is stashed behind the arena-grow barrier (same
-    // terminal condition as PumpLoadLike), while any tick-observed result
-    // that is an immediate failure short-circuits the pump.
-    RigPatchStatus PumpAcceptedLike(const synth::PatchCommandResult& dispatchResult) {
         if (IsImmediateFailure(dispatchResult.status)) {
             return RigPatchStatus::Failed;
         }
