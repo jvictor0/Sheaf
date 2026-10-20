@@ -176,7 +176,19 @@ while IFS= read -r discovered; do
     APP_PRODUCER_HEADERS+=("$discovered")
 done < <(rg --files apps -g '*.hpp' "${APP_PRODUCER_EXCLUDED[@]}" | sort)
 
-PRODUCER_HEADERS=("${PAGE_PRODUCER_HEADERS[@]}" "${APP_PRODUCER_HEADERS[@]}")
+# The discovery-floor diagnostic runs before any expansion of the discovered
+# set below (the line-179 concatenation and everything after it): an empty
+# discovery must reach this `fail` rather than abort the shell. macOS bash 3.2
+# treats `"${arr[@]}"` on a zero-element array as unbound under `set -u`, so
+# every later `${APP_PRODUCER_HEADERS[@]}` use is guarded with
+# `${arr[@]+"${arr[@]}"}`, but the floor check itself only takes the count
+# (`${#arr[@]}`), which bash 3.2 evaluates to 0 without complaint.
+APP_PRODUCER_DISCOVERY_FLOOR=8
+if [ "${#APP_PRODUCER_HEADERS[@]}" -lt "$APP_PRODUCER_DISCOVERY_FLOOR" ]; then
+    fail "check_ui_boundary.sh: app producer discovery found only ${#APP_PRODUCER_HEADERS[@]} headers; expected at least $APP_PRODUCER_DISCOVERY_FLOOR"
+fi
+
+PRODUCER_HEADERS=("${PAGE_PRODUCER_HEADERS[@]}" ${APP_PRODUCER_HEADERS[@]+"${APP_PRODUCER_HEADERS[@]}"})
 
 # Every enumerated path must exist: a renamed or moved file must break this
 # script loudly rather than quietly reduce its coverage to nothing.
@@ -186,13 +198,9 @@ for path in "${CODEC_SOURCES[@]}" "${LIBRARY_HEADERS[@]}" "${PAGE_PRODUCER_HEADE
     fi
 done
 
-APP_PRODUCER_DISCOVERY_FLOOR=8
-if [ "${#APP_PRODUCER_HEADERS[@]}" -lt "$APP_PRODUCER_DISCOVERY_FLOOR" ]; then
-    fail "check_ui_boundary.sh: app producer discovery found only ${#APP_PRODUCER_HEADERS[@]} headers; expected at least $APP_PRODUCER_DISCOVERY_FLOOR"
-fi
 for required in apps/braid-4/Braid4UI.hpp apps/miniapp/MiniAppUI.hpp apps/braid-4/Braid4Draw.hpp apps/miniapp/MiniAppDraw.hpp; do
     found=0
-    for path in "${APP_PRODUCER_HEADERS[@]}"; do
+    for path in ${APP_PRODUCER_HEADERS[@]+"${APP_PRODUCER_HEADERS[@]}"}; do
         [ "$path" = "$required" ] && found=1
     done
     if [ "$found" -eq 0 ]; then
@@ -210,7 +218,7 @@ if [ "${#BACKEND_SOURCES[@]}" -lt "$BACKEND_DISCOVERY_FLOOR" ]; then
 fi
 for required in juce/PortableJuceBackend.hpp browser/src/ui.ts; do
     found=0
-    for path in "${BACKEND_SOURCES[@]}"; do
+    for path in ${BACKEND_SOURCES[@]+"${BACKEND_SOURCES[@]}"}; do
         [ "$path" = "$required" ] && found=1
     done
     if [ "$found" -eq 0 ]; then
@@ -265,7 +273,7 @@ run_scanner_self_test() {
         fail "check_ui_boundary.sh: ${#PATTERNS[@]} patterns but ${#SELF_TEST_SAMPLES[@]} self-test samples; every scan needs one"
         return
     fi
-    for pattern in "${PATTERNS[@]}"; do
+    for pattern in ${PATTERNS[@]+"${PATTERNS[@]}"}; do
         sample="${SELF_TEST_SAMPLES[$index]}"
         index=$((index + 1))
 
@@ -402,6 +410,7 @@ while IFS=: read -r path line match; do
         runtime/FilePage.hpp|\
         runtime/HostDataPaths.cpp|\
         runtime/JuceRuntimeMainServices.hpp|\
+        runtime/LauncherWindow.hpp|\
         runtime/MainPane.hpp|\
         runtime/MidiConnectionManager.hpp|\
         runtime/Runtime.hpp|\
@@ -433,12 +442,12 @@ fi
 register_sample '#include "synth/PortableUILayout.hpp"'
 scan 'a backend includes a component-library header (sru-51)' \
     '(#include|from|import).*(PortableUIBuilders|PortableUILayout|PortableUIMetrics|PortableUIStandardLayout)' \
-    "${BACKEND_SOURCES[@]}"
+    ${BACKEND_SOURCES[@]+"${BACKEND_SOURCES[@]}"}
 
 register_sample 'import { x } from "./RuntimePages.js";'
 scan 'a backend includes a producer header (sru-51)' \
     '(#include|from|import).*(RuntimePages|RuntimePageStyle|ControllersPageUI|ControllerWizard|RuntimeMainComponent|Braid4|MiniApp)' \
-    "${BACKEND_SOURCES_FOR_PRODUCER_SCAN[@]}"
+    ${BACKEND_SOURCES_FOR_PRODUCER_SCAN[@]+"${BACKEND_SOURCES_FOR_PRODUCER_SCAN[@]}"}
 
 # ---------------------------------------------------------------------------
 # 3. A wire codec includes no library, page, or app header.
@@ -496,20 +505,20 @@ scan 'a producer includes a wire codec or a backend (sru-51)' \
 register_sample '    FlowCursor cursor{kControlMargin, kControlGap};'
 scan 'the deleted auto-flow cursor reappears in a backend (sru-51)' \
     '\b(FlowCursor|flowCursor|cursors|kControlMargin|kControlGap|CONTROL_MARGIN|CONTROL_GAP)\b' \
-    "${BACKEND_SOURCES[@]}"
+    ${BACKEND_SOURCES[@]+"${BACKEND_SOURCES[@]}"}
 
 # The default-size table (deleted in 3.6 and 3.8). Intrinsic extents are the
 # library's metrics contract, not a backend table.
 register_sample '    const auto size = DefaultSizeForNode(node);'
 scan 'the deleted default-size table reappears in a backend (sru-51)' \
     '\b(DefaultSizeForNode|defaultSize)\b' \
-    "${BACKEND_SOURCES[@]}"
+    ${BACKEND_SOURCES[@]+"${BACKEND_SOURCES[@]}"}
 
 # Coordinate classifier family one: draw geometry (deleted in 3.5 and 3.8).
 register_sample '    if (DrawCommandsLookLocal(node)) { commandsAreNodeLocal_ = true; }'
 scan 'the deleted draw-coordinate classifier reappears in a backend (sru-51)' \
     '(LooksLocal|LookLocal|nodeLocal|commandsAreNodeLocal)' \
-    "${BACKEND_SOURCES[@]}"
+    ${BACKEND_SOURCES[@]+"${BACKEND_SOURCES[@]}"}
 
 # Coordinate classifier family two: node bounds, including the browser's
 # `parentBounds` subtraction plumbing (deleted in 3.5 and 3.8).
@@ -522,7 +531,7 @@ scan 'the deleted draw-coordinate classifier reappears in a backend (sru-51)' \
 register_sample '    if (ExplicitBoundsAreParentLocal(node, parentBounds)) { return; }'
 scan 'the deleted node-bounds classifier reappears in a backend (sru-51)' \
     '(ExplicitBoundsAreParentLocal|explicitBoundsAreParentLocal|parentBounds)' \
-    "${BACKEND_SOURCES[@]}"
+    ${BACKEND_SOURCES[@]+"${BACKEND_SOURCES[@]}"}
 
 # The per-variant colour table (retired in 1.2, its branches deleted in 3.7 and
 # 3.8, the model field deleted in 7.2). Both the identifier and every one of the
@@ -530,14 +539,14 @@ scan 'the deleted node-bounds classifier reappears in a backend (sru-51)' \
 register_sample '    const juce::Colour fill = ColourForVariant(node.variant);'
 scan 'the retired per-variant colour table reappears in a backend (sru-51)' \
     '\bvariant' \
-    "${BACKEND_SOURCES[@]}"
+    ${BACKEND_SOURCES[@]+"${BACKEND_SOURCES[@]}"}
 # Both quote styles: `ui.ts` already mixes them, so a TypeScript
 # reintroduction as `'primary'` would have walked straight past a
 # double-quote-only pattern.
 register_sample "    if (token === 'muted-title') { return kTitleColour; }"
 scan 'a retired appearance-variant token reappears in a backend (sru-51)' \
     '['"'"'"](danger|primary|quiet|secondary|muted|muted-title|title|list-row|panel|field)['"'"'"]' \
-    "${BACKEND_SOURCES[@]}"
+    ${BACKEND_SOURCES[@]+"${BACKEND_SOURCES[@]}"}
 
 # ---------------------------------------------------------------------------
 # 5. JUCE-free compile coverage for the library and the producers.

@@ -54,7 +54,8 @@ std::optional<int> RuntimeConfigVersion(JSON root) {
     const JSON schema = root.Get("schema");
     const JSON version = root.Get("schemaVersion");
     if (!IsString(schema) || std::string_view(schema.StringValue()) != kRuntimeConfigSchema ||
-        !IsInteger(version) || (version.IntegerValue() != 1 && version.IntegerValue() != 2)) {
+        !IsInteger(version) ||
+        (version.IntegerValue() != 1 && version.IntegerValue() != 2 && version.IntegerValue() != 3)) {
         return std::nullopt;
     }
     return static_cast<int>(version.IntegerValue());
@@ -191,9 +192,14 @@ bool LoadRuntimeConfigJSON(JSON root,
     if (!FromJSON(root.Get("audioDevice"), parsedAudioDevice)) {
         return false;
     }
+    if (*version < 3) {
+        // A device name persisted under the older schema is not evidence that the
+        // operator chose it, so it is dropped here rather than restored and opened.
+        parsedAudioDevice.inputDeviceName.clear();
+    }
 
     SyncConfig parsedSync;
-    if (*version == 2 && !FromJSON(root.Get("sync"), parsedSync)) {
+    if (*version >= 2 && !FromJSON(root.Get("sync"), parsedSync)) {
         return false;
     }
 

@@ -108,6 +108,9 @@ bool MessageInFullyEquivalent(const MessageIn& a, const MessageIn& b) {
             return a.slotIx == b.slotIx && a.position == b.position && a.delta == b.delta;
         case MessageIn::Type::ParamSetAbsolute:
             return a.slotIx == b.slotIx && a.position == b.position && a.value == b.value;
+        case MessageIn::Type::ParamSetAbsoluteOnBank:
+            return a.bankIx == b.bankIx && a.slotIx == b.slotIx && a.position == b.position &&
+                   a.value == b.value;
         case MessageIn::Type::ParamPush:
             return a.slotIx == b.slotIx && a.position == b.position;
         case MessageIn::Type::ToggleReset:

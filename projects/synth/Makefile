@@ -43,8 +43,9 @@ RUNTIME_PAGE_HEADERS := include/synth/RuntimePages.hpp include/synth/RuntimePage
 APPS_DIR := apps
 MINIAPP_DIR := $(APPS_DIR)/miniapp
 SHEAF_PATCH_DIR := $(APPS_DIR)/sheaf-patch
+JUCE_DIR ?= $(HOME)/JUCE
 
-.PHONY: all build test dsp_tests master_clock_tests contract_tests audio_input_tests engine_tests controller_wizard_tests check-ui-boundary miniapp sheaf-patch apps browser browser-apps browser-fixture-app browser-apps-run browser-apps-smoke browser-unit-test browser-command-buffer-test browser-audio-device-test browser-midi-bridge-test clean
+.PHONY: all build test dsp_tests master_clock_tests contract_tests audio_input_tests engine_tests controller_wizard_tests check-ui-boundary check-ui-boundary-empty-discovery check-app-bundle-plist miniapp sheaf-patch apps browser browser-apps browser-fixture-app browser-apps-run browser-apps-smoke browser-unit-test browser-command-buffer-test browser-audio-device-test browser-midi-bridge-test clean
 
 all: build test
 
@@ -52,6 +53,12 @@ build: $(LIB)
 
 check-ui-boundary:
 	bash scripts/check_ui_boundary.sh
+
+check-ui-boundary-empty-discovery:
+	bash scripts/check_ui_boundary_empty_discovery.sh
+
+check-app-bundle-plist:
+	bash scripts/check_app_bundle_plist.sh
 
 $(BUILD_SENTINEL):
 	mkdir -p $(BUILD_DIR)
@@ -223,7 +230,7 @@ browser-audio-device-test: $(BROWSER_AUDIO_DEVICE_TEST_BIN)
 browser-midi-bridge-test: $(BROWSER_MIDI_BRIDGE_TEST_BIN)
 	$(BROWSER_MIDI_BRIDGE_TEST_BIN)
 
-test: check-ui-boundary $(TEST_BIN) $(BUTTON_GRID_TEST_BIN) $(DSP_TEST_BIN) $(MASTER_CLOCK_TEST_BIN) $(MODULE_TEST_BIN) $(INSTRUMENT_TEST_BIN) $(CONTRACT_TEST_BIN) $(AUDIO_INPUT_TEST_BIN) $(LOGGING_TEST_BIN) $(ENGINE_TEST_BIN) $(RIG_TEST_BIN) $(MINIAPP_SYSTEM_TEST_BIN) $(BRAID4_SYSTEM_TEST_BIN) $(BRAID4_DEADLINE_TEST_BIN) $(RECONCILE_TEST_BIN) $(RECONCILE_EXECUTOR_TEST_BIN) $(POLLER_TEST_BIN) $(MIDI_SENDER_TEST_BIN) $(VIEWMODEL_TEST_BIN) $(BLOCKS_TEST_BIN) $(PORTABLE_UI_TEST_BIN) $(PORTABLE_UI_LAYOUT_TEST_BIN) $(RUNTIME_MAIN_COMPONENT_TEST_BIN) $(RUNTIME_FILE_SERVICE_TEST_BIN) $(CONTROLLERS_PAGE_UI_TEST_BIN) $(BROWSER_CONTRACT_TEST_BIN) $(BROWSER_COMMAND_BUFFER_TEST_BIN) $(BROWSER_AUDIO_DEVICE_TEST_BIN) $(BROWSER_MIDI_BRIDGE_TEST_BIN) $(CONTROLLER_WIZARD_TEST_BIN)
+test: check-ui-boundary check-ui-boundary-empty-discovery check-app-bundle-plist $(TEST_BIN) $(BUTTON_GRID_TEST_BIN) $(DSP_TEST_BIN) $(MASTER_CLOCK_TEST_BIN) $(MODULE_TEST_BIN) $(INSTRUMENT_TEST_BIN) $(CONTRACT_TEST_BIN) $(AUDIO_INPUT_TEST_BIN) $(LOGGING_TEST_BIN) $(ENGINE_TEST_BIN) $(RIG_TEST_BIN) $(MINIAPP_SYSTEM_TEST_BIN) $(BRAID4_SYSTEM_TEST_BIN) $(BRAID4_DEADLINE_TEST_BIN) $(RECONCILE_TEST_BIN) $(RECONCILE_EXECUTOR_TEST_BIN) $(POLLER_TEST_BIN) $(MIDI_SENDER_TEST_BIN) $(VIEWMODEL_TEST_BIN) $(BLOCKS_TEST_BIN) $(PORTABLE_UI_TEST_BIN) $(PORTABLE_UI_LAYOUT_TEST_BIN) $(RUNTIME_MAIN_COMPONENT_TEST_BIN) $(RUNTIME_FILE_SERVICE_TEST_BIN) $(CONTROLLERS_PAGE_UI_TEST_BIN) $(BROWSER_CONTRACT_TEST_BIN) $(BROWSER_COMMAND_BUFFER_TEST_BIN) $(BROWSER_AUDIO_DEVICE_TEST_BIN) $(BROWSER_MIDI_BRIDGE_TEST_BIN) $(CONTROLLER_WIZARD_TEST_BIN)
 	$(TEST_BIN)
 	$(BUTTON_GRID_TEST_BIN)
 	$(DSP_TEST_BIN)
@@ -254,6 +261,11 @@ test: check-ui-boundary $(TEST_BIN) $(BUTTON_GRID_TEST_BIN) $(DSP_TEST_BIN) $(MA
 	$(BROWSER_AUDIO_DEVICE_TEST_BIN)
 	$(BROWSER_MIDI_BRIDGE_TEST_BIN)
 	$(CONTROLLER_WIZARD_TEST_BIN)
+	@if [ -d "$(JUCE_DIR)/modules" ]; then \
+		$(MAKE) -C $(MINIAPP_DIR) test; \
+	else \
+		echo "JUCE not found at $(JUCE_DIR); skipping $(MINIAPP_DIR) JUCE-backed tests."; \
+	fi
 
 miniapp:
 	$(MAKE) -C $(MINIAPP_DIR)
