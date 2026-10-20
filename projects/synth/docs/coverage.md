@@ -101,6 +101,7 @@ Prior audits: portable UI component library, 2026-07-31; controller configuratio
 | `smi-12` | covered | host-lead and immediate-fallback sender cases, browser timestamp-epoch and scheduled-Web-MIDI tests, and `portable_draw_geometry_tests` JUCE scheduling-capability/epoch/deadline assertions |
 | `sar-3` (modified) | covered | Engine stable-clock/prepare/current-plan cases and `rig_exposes_deterministic_clock_injection_queries_and_scheduled_output` |
 | `sar-6` (modified) | covered | Engine timestamp-order/commit/delegation cases, allocation-free block path, internal-timeline trace, Braid fractional 4x query case, and input-clamped block delegation in `audio_input_tests` / `browser_runtime_contract_tests` |
+| `sar-8` (modified) | covered | `engine_startup_restores_recorded_patch_parameters_and_the_runtime_configurations_instrument`, `engine_opening_a_patch_that_carries_mappings_saves_its_instrument_to_the_runtime_configuration`, `engine_relaunch_reopens_the_patch_version_last_opened_even_when_a_newer_version_exists`, `engine_relaunch_after_upgrading_records_the_opened_version_and_keeps_a_later_edit` |
 | `sar-11` (modified) | covered | MiniApp clocked ADSR topology, exact nondivisor-block gate boundaries, current-frame voice publication, tempo authority, and Rig clock surface cases |
 | `sar-18` (modified) | covered | Engine load-before-rebuild/default/save cases; runtime-config migration/atomic-save/patch-exclusion cases; JUCE/browser Sync Back persistence |
 | `sar-30` (modified) | covered | `browser_audio_device_tests` System Default input/output catalog cases, JUCE native enumeration retention, and Playwright Audio page zero-input/input-capable assertions |
@@ -108,23 +109,19 @@ Prior audits: portable UI component library, 2026-07-31; controller configuratio
 | `sar-32` | covered | `audio_input_tests` `SynthRig` deterministic channel/frame/block injection, invalid-shape rejection, silence-before-injection, no-stale-input cases, and allocation probe showing injection adds no allocations beyond the rig's existing capture vector path |
 | `sru-2` (modified) | covered | `TestSidebarOpensEachPageAndBackRestoresApp`, `TestRefreshUpdatesRuntimePageModelsAndRollingDeadline`, `TestSidebarWarningReflectsControllersDiscoverySnapshot`, `TestWizardDiscoveryCacheRecomputesOnlyForCachedSnapshotChanges`, `TestBrowserControllerDiscoveryCacheUsesSignalsAndSuccessfulCommits`, JUCE sidebar warning marker, browser navigation |
 | `sru-3` (modified) | covered | `portable_ui_tests` Audio selector/status surface cases, `browser_audio_device_tests` host catalog/status/retry cases, and Playwright input diagnostics in `tests/audio-input.spec.ts` |
-| `sru-12` (modified) | covered | `TestBackFromConfigurationPageSavesRuntimeConfiguration`, `TestSyncStagesRefreshesCommitsAndReopensFromEngineSnapshot`, JUCE runtime-shell Sync save/reopen, browser Sync Back persistence |
+| `sru-12` (modified) | covered | `engine_runtime_page_back_policy_saves_config_for_audio_and_sync_only`, `TestBackFromConfigurationPageSavesRuntimeConfiguration` (Controllers Back adds no save), `TestControllersUseLatestBridgeSnapshotCommitEditsSaveImmediatelyBackAddsNoSave`, `TestSyncStagesRefreshesCommitsAndReopensFromEngineSnapshot`, JUCE runtime-shell Sync save/reopen, browser Sync Back persistence |
 | `sru-31` | covered | portable Sync surface assertions, `TestSyncStagesRefreshesCommitsAndReopensFromEngineSnapshot`, `TestBrowserSyncUsesSharedStagingPersistsAndResolvesSourceNames`, JUCE runtime-page/session and fake-app Playwright Sync cases |
 | `scw-1` | covered | `controller_wizard_tests` typed wizard/form ownership, validation refusal, and wrong-form mismatch cases plus `check-ui-boundary` |
 | `scw-2` | covered | `controller_wizard_tests` registry-order, case-insensitive exact alias, fuzzy-rejection, unmatched-diagnostic, exclusivity, and Active/Blacklisted claim cases |
-| `scw-3` | covered | `controller_wizard_tests` Twister form geometry/choice/enablement/numeric cases and generation cases; `instrument_tests` kind-valid generated slot |
-| `scw-4` | covered | `controllers_page_ui_tests` submit/ignore/reconfigure/refusal cases, `MfTwisterSeedExtractionRequiresOneExactRepresentableProfileShape`, host save tests, and JUCE reconfigure/refusal simulations |
+| `scw-3` | covered | `controller_wizard_tests` Twister form field/choice/enablement/numeric cases and generation cases; `instrument_tests` kind-valid generated slot |
 | `smi-1` (modified) | covered | `instrument_tests` Active/Blacklisted validity, opaque wizard identity, dormant-profile, and cross-disposition uniqueness cases |
 | `smi-2` (modified) | covered | `instrument_tests` schema-2 round trips for both dispositions, previous-schema migration, and atomic rejection cases |
 | `smi-3` (modified) | covered | `reconcile_tests` four blacklist-disposition cases and `mark_unconfigured_preserves_stored_refs_and_plan_order` |
 | `smi-6` (modified) | covered | `blacklisted_slot_with_present_populated_refs_stays_unconfigured_and_inert` plus retained `startup_shaped_reconcile_one_of_two_controllers_present_no_failure` |
 | `smi-8` (modified) | covered | `engine_tests` drop-only profile, Active/Blacklisted rebuild switch, and middle-slot resize cases; `TestActiveToBlacklistedTearsDownEndpointsAndDropsStaleBrowserCallback` |
 | `smi-10` (modified) | covered | retained terminal-realtime cases plus the blacklisted drop-only and rebuild-switch `engine_tests` cases |
-| `sru-4` (modified) | covered | `TestDiscoveryRendersPortableAvailableRowsAndDiagnostics`, `TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`, `ControllerLifecycleMutationsPreserveIdentityAndGateRegistryActions` (including both cross-disposition duplicate-rename directions), JUCE manual-record simulation, fake-app lifecycle Playwright |
+| `sru-4` (modified) | covered | `TestConnectedNotSetUpListsDevicesWithoutActions`, `TestAddRowStartsOnTheFirstWaitingDevicesPreset`, `TestAddBindsAConnectedDeviceForEveryPresetItMatches`, `TestSystemMessageRowShowsAStoredKindTheCatalogLacks`, `TestControllerLifecycleActionsUseTheNormalCommitAndSavePath`, `ControllerLifecycleMutationsPreserveIdentity` (including both cross-disposition duplicate-rename directions), `TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence`, JUCE manual-record simulation |
 | `sru-30` (modified) | covered | retained low-level relative-bank view-model/blocks cases plus the wizard-owned argument table in `controller_wizard_tests` |
-| `sru-32` | covered | `controllers_page_ui_tests` session/chooser/submit/ignore cases, `TestThreeClickWizardSubmitCommitsThenSaves`, JUCE wizard parity simulation, fake-app three-click Playwright |
-| `sru-33` | covered | `portable_ui_tests` wizard-session composition, `ControllersPageSimulationTests` parity simulations, fake-app Playwright, `check-ui-boundary` and `check:generic-runtime` |
-| `sru-34` | covered | `TestDisabledSemanticNodesCarryEnabledState`, `ui-backend.spec.ts` disabled-control cases, `PortableJuceBackendTests` disabled semantic controls |
 | `sru-43` | covered | `portable_ui_layout_tests` nesting/splice/insertion cases, and `controllers_page_ui_tests`' `SourceAssemblesUiNodeByHand` sweep over every producer source — which is the durable form of the requirement's grep-backed inspection scenario |
 | `sru-44` | covered | `portable_ui_layout_tests` allocation, clamping, fraction, out-of-flow, overlay, wrapping, form-grid and metrics cases |
 | `sru-45` | covered | `portable_ui_tests` per-kind colour/text-style cases, `PortableJuceBackendTests` carried-colour/derived-state cases, `ui-backend.spec.ts` carried-colour and derivation cases, `browser_command_buffer_tests` presence-flag round trips |
@@ -138,6 +135,8 @@ Prior audits: portable UI component library, 2026-07-31; controller configuratio
 | `sru-53` | covered | `portable_ui_layout_tests` standard-layout cases, `braid4_system_tests`, `miniapp_system_tests`, `MiniAppJuceBackendParityTests` |
 | `sru-54` | covered | `portable_ui_layout_tests` overflow-diagnostic and absorber cases, `portable_ui_tests` per-surface absorbing-region pins at the 480px floor and a taller surface |
 | `sru-55` | covered | `portable_ui_tests` File-panel fill/border/radius pins, `browser_command_buffer_tests` border presence flags, `PortableJuceBackendTests` container-fill cases, `renders a container fill and rounded border across padding and gaps` |
+| `sru-64` | covered | `browser_runtime_contract_tests` `TestControllersPageSavesEachCommittedEdit` (edits survive a reload without Back), `controllers_page_ui_tests` `TestSaveFailureKeepsTheCommittedEditAndReportsIt` (a failed save keeps the edit and reports it); Back adding no save for the Controllers page is covered under `sru-12` |
+| `sru-65` | covered | `controllers_page_ui_tests` `TestAddedRowOpensWithEverySectionOpen` (an added preset shows its mappings expanded, the player can still collapse it, and an added Custom row opens too) |
 
 ## Requirement Mappings
 
@@ -231,7 +230,7 @@ There is no per-descendant offset loop and no auto-flow anywhere in the path.
 - [`browser_runtime_contract_tests.cpp`](../tests/browser_runtime_contract_tests.cpp):
   `TestBrowserPrepareFeedsNegotiatedAudioPageAndRejectsOversizedBlocks`,
   `TestSharedBrowserNavigationReplacesAndRestoresEveryRuntimePage`,
-  `TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack`, and
+  `TestControllersUseLatestBridgeSnapshotCommitEditsSaveImmediatelyBackAddsNoSave`, and
   `TestFilePageDispatchesPatchLifecycleThroughBrowserRuntime`.
 - [`browser_midi_bridge_tests.cpp`](../tests/browser_midi_bridge_tests.cpp):
   `TestReconcileBindsSlotsIndependentlyAndResyncsOutputs`,
@@ -275,8 +274,7 @@ There is no per-descendant offset loop and no auto-flow anywhere in the path.
   geometry and portable encoder arc commands.
 - [`miniapp-smoke.spec.ts`](../browser/tests/miniapp-smoke.spec.ts):
   `real miniapp shared shell scales as one non-overlapping narrow surface`
-  verifies all seven encoder canvases retain nontrivial pixels, and the desktop
-  and narrow smoke tests write the reviewed runtime-shell screenshots.
+  verifies all seven encoder canvases retain nontrivial pixels.
 
 ### `sprs-6` (modified) - One Resolved Browser Coordinate System
 
@@ -393,9 +391,6 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
   action/commit simulation while rendering the real `ControllersPageSurface`
   through `synth_juce::PortableComponent` and comparing containment in common
   surface coordinates.
-- [`ControllersHarnessApp.cpp`](../juce/ControllersHarnessApp.cpp): the
-  standalone visual harness uses `synth_juce::PortableComponent` over the same
-  production `ControllersPageSurface` path.
 
 ### `sru-1` (modified) - Main Pane, Sidebar, And Content Host
 
@@ -912,7 +907,7 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
   and visible surfaces. Application grid creation, exposure, and rendering are
   intentionally out of scope, not deferred incomplete behavior.
 
-### `sru-26` and `sru-27` - Controllers Derived Grid Presentation
+### `sru-28` and `sru-29` - Controllers Derived Grid Presentation
 
 - [`blocks_tests.cpp`](../tests/blocks_tests.cpp)
   `ExpandGridButtonProducesAtomicMomentarySystemAndPressurePair`,
@@ -1167,8 +1162,9 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
 ### `scw-1` - Typed Controller Wizard And Portable Config Form
 
 - [`controller_wizard_tests.cpp`](../tests/controller_wizard_tests.cpp):
-  `ConfigFormOwnsStateAndDispatchActionMutatesIt` proves a form's state changes
-  only through `DispatchAction` and that the caller owns it through the abstract
+  `MfTwisterConfigFormValidatesExactSizeTIntegerTextAndIgnoresDisabledArguments`
+  proves the caller mutates a form's public fields directly and `Validate`
+  reads that state, with no dispatch surface on the abstract
   `ControllerConfigForm` contract;
   `TypedWizardGeneratesProfileFromItsConcreteForm` proves the checked typed
   generation path; `TypedWizardRejectsInvalidFormBeforeGeneration` proves
@@ -1209,14 +1205,10 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
 ### `scw-3` - MF Twister: One Encoder Slot And Exactly Six Buttons
 
 - [`controller_wizard_tests.cpp`](../tests/controller_wizard_tests.cpp):
-  `MfTwisterConfigFormPlacesSixButtonsInTwoColumnsOfThree` pins the two-column
-  3+3 geometry and the left CC 8-10 / right CC 11-13 column bounds.
-  `MfTwisterConfigFormBuildsClosedSixButtonSurfaceAndRoutesPortableActions` pins
-  one `controller-wizard.twister.encoder-slot` defaulting to `0`, exactly six
-  `...button.{N}.message` / `...button.{N}.argument` pairs, the six defaults
-  (Hold Reset, Hold Random, Hold Random Mod, Next Bank, Start, Previous Bank),
-  the closed sixteen-choice option set with no None/unassigned entry, the
-  wizard-owned argument-enablement table, and edits through portable actions.
+  the form's own fields, set directly rather than through any rendered node,
+  hold one `Encoder Slot` defaulting to `0` and exactly six buttons defaulting
+  to Hold Reset, Hold Random, Hold Random Mod, Next Bank, Start, and Previous
+  Bank, from a closed sixteen-choice set with no None/unassigned entry.
   `MfTwisterConfigFormValidatesExactSizeTIntegerTextAndIgnoresDisabledArguments`
   covers `0`, `std::numeric_limits<std::size_t>::max()`, and rejection of empty,
   negative, non-base-10, whitespace, and overflowing text, plus the rule that
@@ -1236,48 +1228,6 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
 - The narrower wizard argument table (`TwisterArgumentEnabled`) is deliberately
   not `UISystemMessageHasArg`; the low-level editor's Next/Previous Bank `Arg`
   behavior is covered separately under `sru-30`.
-
-### `scw-4` - Lifecycle: Submit, Ignore, And Reconfigure
-
-- [`controllers_page_ui_tests.cpp`](../tests/controllers_page_ui_tests.cpp):
-  `TestWizardSubmitCommitsCompleteProfileThenSaves` proves one instrument commit
-  with both endpoint references, the descriptor wizard id, and the generated
-  profile, followed by a save request.
-  `TestWizardSubmitRefusalsRetainFormAndPersistence` covers disconnected
-  candidates, contended endpoints, and invalid fields refusing without commit or
-  save while retaining form state.
-  `TestWizardSaveFailureDoesNotRollbackCommittedInstrument` pins the documented
-  save-after-commit behavior.
-  `TestWizardIgnoreCommitsOneInertBlacklistedRecord` proves Ignore commits one
-  Blacklisted record with the opaque wizard id, both endpoint identities, and no
-  profile, then saves.
-  `TestReconfigureSeedsExactProfilesAndReplacesOnlyTheValidatedRecord` covers
-  compatible seeding, defaults-plus-destructive-warning for incompatible shapes,
-  dormant-profile seeding on blacklisted rows, and preservation of name,
-  endpoints, wizard id, and ordered position.
-  `TestReconfigureRefusesEveryChangedExistingRecordIdentity` covers stale index,
-  name, endpoint, and disposition refusal. Deterministic ` 2`/` 3` suffix naming
-  is asserted inside the submit and ignore cases.
-- `MfTwisterSeedExtractionRequiresOneExactRepresentableProfileShape` in
-  [`controller_wizard_tests.cpp`](../tests/controller_wizard_tests.cpp) tests
-  each shape mismatch independently: analog config, extra mappings, missing or
-  altered default turn/push/output mappings, non-CC-8-13 or inexpressible
-  associations, and a slot that is not common across encoders and bank messages.
-- [`runtime_main_component_tests.cpp`](../tests/runtime_main_component_tests.cpp)
-  `TestThreeClickWizardSubmitCommitsThenSaves` and
-  [`browser_runtime_contract_tests.cpp`](../tests/browser_runtime_contract_tests.cpp)
-  `TestWizardSubmitRefusesACandidateRemovedSinceTheLastFrame` and
-  `TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack` prove the
-  same commit/save contract through both host service implementations.
-- [`ControllersPageSimulationTests.cpp`](../juce/ControllersPageSimulationTests.cpp)
-  `RunIncompatibleReconfigureSimulation` and
-  `RunControllerWizardRefusalSimulation` drive the destructive-replacement and
-  refusal paths through rendered JUCE controls.
-- Playwright [`fake-app.e2e.spec.ts`](../browser/tests/fake-app.e2e.spec.ts):
-  `controller wizard uses deterministic names for duplicate submitted Twisters`,
-  `controller wizard stale and invalid submit preserve entered values`,
-  `controller wizard reconfigure seeds exact-shape profiles`, and
-  `controller wizard reconfigure warns and replaces incompatible profiles`.
 
 ### `smi-1` And `smi-2` (modified) - Disposition Model And Instrument JSON
 
@@ -1382,41 +1332,38 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
   `TestWizardDiscoveryCacheRecomputesOnlyForCachedSnapshotChanges` proves an
   unchanged device source neither updates the cache nor recomputes discovery,
   that a device-list change recomputes it exactly once, and that a successful
-  instrument commit recomputes against the cached devices and clears the now
-  claimed candidate; and `TestThreeClickWizardSubmitCommitsThenSaves` proves the
-  marker is gone on the refresh after a successful commit. The
-  claimed/blacklisted suppression itself is proven by
-  `DiscoverySuppressesPairsClaimedByActiveAndBlacklistedRecords`.
+  instrument commit recomputes the cache against the cached devices and clears
+  the now claimed candidate. The claimed/blacklisted suppression itself is
+  proven by `DiscoverySuppressesPairsClaimedByActiveAndBlacklistedRecords`.
 - [`browser_runtime_contract_tests.cpp`](../tests/browser_runtime_contract_tests.cpp)
   `TestBrowserControllerDiscoveryCacheUsesSignalsAndSuccessfulCommits` pins the
   same contract on the browser services.
 - [`RuntimePagesJuceTests.cpp`](../juce/RuntimePagesJuceTests.cpp) renders and
   clears `runtime.sidebar.controllers.warning` as a JUCE label without replacing
-  the Controllers entry. Playwright
-  `controller wizard ignores an available row and restores warning after
-  blacklist removal` covers clearance and return in the real browser.
+  the Controllers entry.
 
 ### `sru-4` (modified) - Controllers List, Blacklisted Rows, And Lifecycle Actions
 
 - [`controllers_page_ui_tests.cpp`](../tests/controllers_page_ui_tests.cpp):
-  `TestDiscoveryRendersPortableAvailableRowsAndDiagnostics` covers the separate
-  Available controllers area, its Configure/Ignore actions, and the
-  unmatched-endpoint diagnostics.
+  `TestDiscoveryRendersPortableAvailableRowsAndDiagnostics`,
+  `TestConnectedNotSetUpListsDevicesWithoutActions`,
+  `TestAddRowStartsOnTheFirstWaitingDevicesPreset`, and
+  `TestAddBindsAConnectedDeviceForEveryPresetItMatches` cover the read-only
+  "Available controllers" block and the add row starting on a waiting device's
+  preset.
   `TestControllerLifecycleActionsUseTheNormalCommitAndSavePath` covers Rename,
-  Delete, Blacklist, Remove-from-blacklist, registry-gated action visibility,
-  unknown-opaque-id recovery, the `Blacklisted` badge with stored endpoint labels
-  and no mapping/endpoint controls, and commit-then-save routing.
+  Delete on either disposition, unknown-opaque-id recovery, the `Blacklisted`
+  badge with stored endpoint labels and no mapping/endpoint controls, and
+  commit-then-save routing.
   `TestEndpointSelectorsPreferTheExactStoredIdentifier` covers the Active
   endpoint choice list including an absent stored reference.
+  `TestRestoreReinstallsADivergedPresetAndIsGatedByDivergence` covers Restore.
 - [`viewmodel_tests.cpp`](../tests/viewmodel_tests.cpp)
-  `ControllerLifecycleMutationsPreserveIdentityAndGateRegistryActions` covers
-  `RenameController`, `DeleteController`, `BlacklistController`, and
-  `RemoveFromBlacklist` on scratch instrument state: rename refused for an
-  empty, unchanged, or already-used name and applied to Active, Blacklisted, and
-  unknown-id rows; mandatory `config` to `dormantConfig` retention with name,
-  kind, wizard id, and both endpoints preserved; Blacklist refused for a manual
-  record, an unknown id, and an incomplete endpoint pair; and Delete/Remove
-  preserving list order. The same case asserts the "Rename rejects duplicates"
+  `ControllerLifecycleMutationsPreserveIdentity` covers
+  `RenameController` and `DeleteController` on scratch instrument state: rename
+  refused for an empty, unchanged, or already-used name and applied to Active,
+  Blacklisted, and unknown-id rows; and Delete preserving list order. The same
+  case asserts the "Rename rejects duplicates"
   scenario directly in **both** cross-disposition directions: renaming the Active
   record to the Blacklisted record's name and renaming the Blacklisted record to
   an Active record's name are each refused with an "already exists" reason, and
@@ -1429,14 +1376,7 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
   `AddControllerGenericSeedsEmptyConfig` cases keep the manual "+" add contract.
 - [`ControllersPageSimulationTests.cpp`](../juce/ControllersPageSimulationTests.cpp)
   `RunManualRecordSimulation` proves a manually added record keeps Rename and
-  Delete and is offered no Reconfigure, Blacklist, or Configure.
-- Playwright [`fake-app.e2e.spec.ts`](../browser/tests/fake-app.e2e.spec.ts):
-  `controller wizard supports rename and delete on active records`,
-  `controller wizard actions are absent on a manually added record`,
-  `controller wizard retains dormant profile when an active record is
-  blacklisted`, `controller wizard configures a blacklisted record through its
-  wizard`, and `controller wizard ignores an available row and restores warning
-  after blacklist removal`.
+  Delete.
 
 ### `sru-30` (modified) - Relative Bank Editing Versus The Wizard Table
 
@@ -1450,92 +1390,10 @@ colour table are gone, and `check-ui-boundary` fails if any of them reappears.
   them individual press-only rows through reconstruction and commit; the
   randomized controller view-model simulation still exercises them.
 - The added sentence deferring wizard behavior to `scw-3` is covered by
-  `MfTwisterConfigFormBuildsClosedSixButtonSurfaceAndRoutesPortableActions`
+  `MfTwisterConfigFormValidatesExactSizeTIntegerTextAndIgnoresDisabledArguments`
   (Next/Previous Bank arguments disabled) and
   `MfTwisterWizardGeneratesCompleteActiveProfileFromItsForm` (their `slotIx`
   comes from the form-wide Encoder Slot).
-
-### `sru-32` - Three-Click Configuration Wizard Flow
-
-- [`controllers_page_ui_tests.cpp`](../tests/controllers_page_ui_tests.cpp)
-  `TestWizardSessionRoutesPortableChooserAndForm` covers the visible-but-disabled
-  zero-candidate action with its explanation, the unique candidate opening its
-  form directly, the multi-candidate chooser with controller and endpoint labels,
-  one open session at a time, chooser entries disappearing with their candidates,
-  the one Encoder Slot plus exactly six rows in two columns, dispatch into the
-  form, Back/Cancel leaving the instrument untouched, `Ignore this controller` on
-  new-candidate sessions, and its absence on existing-record sessions.
-  `TestWizardSubmitRefusalsRetainFormAndPersistence` covers refusal retaining
-  every entered choice with an inline status.
-- [`runtime_main_component_tests.cpp`](../tests/runtime_main_component_tests.cpp)
-  `TestThreeClickWizardSubmitCommitsThenSaves` proves the whole path from the
-  runtime shell requires only the Controllers, Configuration Wizard, and Submit
-  activations, performs exactly one commit followed by one save, installs one
-  Active record with the descriptor wizard id, both endpoint identifiers,
-  sixteen turn mappings and six system associations, and clears the sidebar
-  warning. The per-mapping slot-0 targeting is asserted by the Playwright case
-  below and by `MfTwisterWizardGeneratesCompleteActiveProfileFromItsForm`.
-- Playwright [`fake-app.e2e.spec.ts`](../browser/tests/fake-app.e2e.spec.ts)
-  `controller wizard unique candidate configures a default Twister profile in
-  exactly three clicks` performs literally three `.click()` calls on
-  `runtime.sidebar.controllers`, `runtime.controllers.wizard.launch`, and
-  `runtime.controllers.wizard.submit`, checks the form's six defaults and 3+3
-  column geometry before Submit, and then checks the installed record's kind,
-  both reconciled endpoints, all sixteen encoder mappings on slot `0`, exactly
-  six side associations, the cleared warning, and survival of a real runtime
-  restart;
-  `controller wizard disables configuration when no candidate exists`,
-  `controller wizard presents a chooser for duplicate available Twisters`, and
-  `controller wizard ignores from a new-candidate form` cover the remaining
-  scenarios.
-- [`ControllersPageSimulationTests.cpp`](../juce/ControllersPageSimulationTests.cpp)
-  `RunControllerWizardParitySimulation` drives the same sequence through JUCE.
-
-### `sru-33` - Portable Wizard Backend Parity
-
-- [`portable_ui_tests.cpp`](../tests/portable_ui_tests.cpp) proves the portable
-  Controllers page exposes the enabled `runtime.controllers.wizard.launch` action
-  and that dispatching it composes the form's own
-  `controller-wizard.twister.encoder-slot` node together with
-  `runtime.controllers.wizard.submit` and `runtime.controllers.wizard.ignore`
-  into one tree.
-- [`ControllersPageSimulationTests.cpp`](../juce/ControllersPageSimulationTests.cpp)
-  `RunControllerWizardParitySimulation`, `RunManualRecordSimulation`,
-  `RunIncompatibleReconfigureSimulation`, and
-  `RunControllerWizardRefusalSimulation` drive the production portable actions
-  through rendered JUCE controls and compare node ids, labels, option ids and
-  labels, selected values, enabled states, two-column bounds, dispatched actions,
-  and resulting portable state against the JUCE-free expectations.
-- Playwright [`fake-app.e2e.spec.ts`](../browser/tests/fake-app.e2e.spec.ts)
-  covers the same ids and actions in real Chromium against real WASM, with
-  test-controlled Web MIDI ports from
-  [`helpers/fake-midi.ts`](../browser/tests/helpers/fake-midi.ts); persistence is
-  verified by reloading the runtime, not by mutating C++ state.
-- `make -C projects/synth check-ui-boundary` and
-  `npm --prefix projects/synth/browser run check:generic-runtime` are the gates
-  that keep wizard, Twister, blacklist, generation, and validation policy out of
-  both backends.
-
-### `sru-34` - Portable Semantic Enabled State
-
-- [`browser_command_buffer_tests.cpp`](../tests/browser_command_buffer_tests.cpp)
-  `TestDisabledSemanticNodesCarryEnabledState` proves the enabled flag crosses
-  the command buffer for semantic control nodes.
-- Playwright [`ui-backend.spec.ts`](../browser/tests/ui-backend.spec.ts):
-  `renders disabled native controls and keeps their portable values`,
-  `suppresses actions from disabled native controls`,
-  `suppresses double-click and drag actions from disabled semantic nodes`,
-  `stops an in-flight drag when its node becomes disabled`, and
-  `keeps dispatching once a previously disabled node becomes enabled`.
-- [`PortableJuceBackendTests.cpp`](../juce/PortableJuceBackendTests.cpp) renders
-  disabled Button, ComboBox, TextField, Toggle, Slider, and Draw nodes as
-  disabled JUCE components, preserves their values and selected options, and
-  dispatches no action while disabled.
-- The wizard-specific instance — a Next Bank, Previous Bank, or Start button
-  disabling its paired argument — is covered by
-  `MfTwisterConfigFormBuildsClosedSixButtonSurfaceAndRoutesPortableActions` in
-  the portable tree, `RunControllerWizardRefusalSimulation` in JUCE, and the
-  Playwright three-click case in Chrome.
 
 ## Portable UI Component Library Requirement Mappings
 
@@ -1644,10 +1502,8 @@ sections, which pin the two backends' halves of the same contract.
   `TestFilePageCarriesPageColoursAndTextStyles`,
   `TestFilePanelsCarryAppearanceWithoutUnderlays`, and
   `TestFilePageDelegatesItsListsToSplicedSubtrees`.
-- [`controller_wizard_tests.cpp`](../tests/controller_wizard_tests.cpp):
-  `MfTwisterConfigFormResolvesItsExtentsFromItsDeclarationsAlone` pins the wizard
-  form's extents now that they come from its declarations rather than from a
-  producer-side table.
+- Not yet delivered as a resolvable case: no test pins the wizard form's
+  extents coming from its declarations rather than from a producer-side table.
 - [`FilePageSimulationTests.cpp`](../juce/FilePageSimulationTests.cpp) and
   [`ControllersPageSimulationTests.cpp`](../juce/ControllersPageSimulationTests.cpp)
   keep the model-based simulations green over the rebuilt pages.
@@ -1734,12 +1590,13 @@ sections, which pin the two backends' halves of the same contract.
   `TestAWeightedChildAbsorbsTheRemainder`, and
   `TestAWrappingRowStillFailsOnAChildWiderThanTheRow`.
 - [`portable_ui_tests.cpp`](../tests/portable_ui_tests.cpp):
-  `TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface`,
-  `TestEveryRebuiltPageAbsorbsAtTheSmallestDeclaredSurface`,
-  `TestControllersChooserAndBraid4PinTheirAbsorbingRegions`, and
-  `TestTheWizardFormIsReachableRatherThanClipped`. Each pins what the absorbing
-  region actually does at the 480px floor and at a taller surface, not merely
-  that resolution succeeded.
+  `TestEveryPageAndAppResolvesAtTheSmallestDeclaredSurface` and
+  `TestEveryRebuiltPageAbsorbsAtTheSmallestDeclaredSurface` pin what the
+  absorbing region actually does at the 480px floor and at a taller surface,
+  not merely that resolution succeeded.
+- Not yet delivered as resolvable cases: no test pins the Controllers chooser
+  and braid4's own absorbing regions, or that the wizard form stays reachable
+  rather than clipped.
 
 ### `sru-55` - Container Background And Border
 

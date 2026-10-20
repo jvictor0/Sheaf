@@ -2,7 +2,8 @@ schema: spec-driven
 
 context: |
   Sheaf is a multi-project monorepo. Each project lives under projects/<name>
-  (conductor, dictator, quest-runner, realtime-agent, sheaf-chat, web).
+  (agents, conductor, dictator, quest-runner, realtime-agent, sheaf-chat,
+  synth, web, xagent).
 
   Spec layout and naming:
   - One spec per capability at openspec/specs/<project>-<capability>/spec.md

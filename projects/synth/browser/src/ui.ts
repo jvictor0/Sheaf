@@ -1,6 +1,29 @@
 import { Action, CommandBufferError, CommandBufferFrame, Color, DrawCommand, DrawKind, Node, NodeKind, decodeCommandBuffer } from "./protocol.js";
 import type { Bounds } from "./protocol.js";
 
+// Height of the slider's value strip, carved out of the bottom of the
+// node's own wire-set bounds so the number never overlaps the track. 14px is
+// this backend's 9px glyph plus breathing room; JUCE reserves 18px for the
+// same purpose at its own default text size (CreateControlForNode's Slider
+// case, juce::Slider::setTextBoxStyle).
+const SLIDER_READOUT_HEIGHT_PX = 14;
+// Below this the strip cannot letter a 9px glyph at all, so the readout is
+// dropped rather than rendered illegibly or spilling past the node's bounds.
+const SLIDER_READOUT_MIN_PX = 8;
+// The track always keeps the majority of the box: the strip may take at most
+// this share of a short node's height before it is dropped entirely.
+const SLIDER_READOUT_MAX_SHARE = 0.4;
+
+// Height of the value strip for a node of `boundsHeight`, or 0 when the node
+// is too short to carry one. An earlier fixed-height cut
+// hardcoded 14px, which overflowed the wire-set bounds and zeroed the track's
+// hit area on any slider ≤14px tall.
+function sliderReadoutStrip(boundsHeight: number): number {
+  if (!Number.isFinite(boundsHeight) || boundsHeight <= 0) return 0;
+  const strip = Math.min(SLIDER_READOUT_HEIGHT_PX, Math.floor(boundsHeight * SLIDER_READOUT_MAX_SHARE));
+  return strip >= SLIDER_READOUT_MIN_PX ? strip : 0;
+}
+
 export { CommandBufferError, decodeCommandBuffer } from "./protocol.js";
 export type { Action, CommandBufferFrame } from "./protocol.js";
 
@@ -16,7 +39,7 @@ type CapturedPointer = { element: NodeElement; action: Action; anchorClientX: nu
 type PendingDrag = { action: Action; delta: number };
 // The surface the frame resolves to: which node is the parentless root, and the
 // extent the host is sized to. Nothing else needs resolving — every node's
-// bounds are already in its parent's space (sru-46), so the DOM's own
+// bounds are already in its parent's space, so the DOM's own
 // absolute-positioning-within-a-positioned-parent does the fold.
 type ResolvedSurface = { rootId?: string; width: number; height: number };
 export type ActionDispatcher = (action: Action) => void;
@@ -85,7 +108,7 @@ export class BrowserUiBackend {
     element.dataset.nodeId = node.id;
     element.dataset.nodeKind = kind;
     element.style.position = "absolute";
-    // Bounds are parent-relative (sru-46) and this element is an absolutely
+    // Bounds are parent-relative and this element is an absolutely
     // positioned child of its parent's element, which is what parent-relative
     // means in the DOM. So the CSS offset is the wire value itself: no origin
     // subtraction, no coordinate-space classification.
@@ -94,7 +117,7 @@ export class BrowserUiBackend {
     element.style.transform = "";
     element.style.transformOrigin = "";
     // A node arriving with no resolved bounds renders at its parent's origin
-    // with zero extent (sprs-6). The backend never flows or sizes it.
+    // with zero extent. The backend never flows or sizes it.
     element.style.width = `${node.bounds.width}px`;
     element.style.height = `${node.bounds.height}px`;
     // The resolved width, published so a control's own chrome can be capped
@@ -133,12 +156,58 @@ export class BrowserUiBackend {
   private createElement(node: Node): NodeElement {
     const element = document.createElement(node.kind === NodeKind.Button ? "button" : node.kind === NodeKind.Section ? "section" : "div") as NodeElement;
     if (node.kind === NodeKind.Toggle) { const input = document.createElement("input"); input.type = "checkbox"; element.append(input, document.createElement("span")); input.addEventListener("change", () => this.dispatchValue(element, input.checked ? "1" : "0")); }
-    if (node.kind === NodeKind.Slider) { const input = document.createElement("input"); input.type = "range"; element.append(input); input.addEventListener("input", () => this.dispatchValue(element, input.value)); }
+    if (node.kind === NodeKind.Slider) {
+      const input = document.createElement("input"); input.type = "range";
+      // The readout is a sibling `<output>`, not a wrapper, appended
+      // after the input. It is absolutely positioned within the node's own
+      // element -- already `position: absolute` (updateNode, above), so it
+      // is already a valid containing block -- which keeps the readout
+      // inside the wire-set bounds instead of growing them.
+      // `pointer-events: none` keeps it out of hit-testing
+      // so it never steals a press meant for the input underneath it.
+      // Colour reads the same `--synth-glyph` custom property every other
+      // carried-text-style surface reads (applyCarriedStyle sets it on this
+      // same element), falling back to `inherit` -- the toggle label's own
+      // fallback, not a new hardcoded colour.
+      // The readout gets its OWN strip at the bottom of the node box and the
+      // track is shortened to make room, exactly as JUCE's TextBoxBelow
+      // splits its own bounds (CreateControlForNode's Slider case asks for
+      // an 18px box below the slider via juce::Slider::setTextBoxStyle).
+      // Overlaying the number ON the track instead --
+      // the first cut of this -- put the digits across the filled track and
+      // under the thumb, unreadable at every value.
+      const output = document.createElement("output");
+      output.style.position = "absolute";
+      output.style.left = "0"; output.style.right = "0"; output.style.bottom = "0";
+      output.style.height = `${SLIDER_READOUT_HEIGHT_PX}px`;
+      output.style.lineHeight = `${SLIDER_READOUT_HEIGHT_PX}px`;
+      output.style.textAlign = "center";
+      output.style.font = `9px/${SLIDER_READOUT_HEIGHT_PX}px inherit`;
+      output.style.color = "var(--synth-glyph, inherit)";
+      output.style.pointerEvents = "none";
+      // Track occupies everything above the readout strip. `absolute` (not
+      // the browser default static) so the two never fight over flow, and so
+      // a short node box shrinks the track rather than pushing the readout
+      // out of the wire-set bounds.
+      input.style.position = "absolute";
+      input.style.left = "0"; input.style.right = "0"; input.style.top = "0";
+      input.style.width = "100%";
+      input.style.height = `calc(100% - ${SLIDER_READOUT_HEIGHT_PX}px)`;
+      input.style.margin = "0";
+      element.append(input, output);
+      // The `input` event is the only seam a drag updates on BETWEEN frames:
+      // `updateControl` only reaches the readout once the next
+      // frame lands, which would otherwise leave it stale mid-drag.
+      input.addEventListener("input", () => {
+        output.textContent = formatSliderValue(Number(input.value), element.synthNode?.step ?? node.step);
+        this.dispatchValue(element, input.value);
+      });
+    }
     if (node.kind === NodeKind.ComboBox) { const select = document.createElement("select"); element.append(select); select.addEventListener("change", () => this.dispatchValue(element, select.value)); }
     if (node.kind === NodeKind.TextField) { const input = document.createElement("input"); input.type = "text"; element.append(input); input.addEventListener("input", () => this.dispatchValue(element, input.value)); }
     if (node.kind === NodeKind.Draw) { const canvas = document.createElement("canvas"); element.append(canvas); }
     if (node.kind === NodeKind.ScrollArea) { const content = document.createElement("div"); content.style.position = "relative"; element.scrollContent = content; element.append(content); }
-    // sru-52 adds `Draw` here: a `Draw` node carrying a plain click action
+    // A `Draw` node carrying a plain click action
     // dispatches it through the same `dispatchValue` a `Button` does, on one
     // shared listener so the two kinds cannot diverge. `acceptsPointerEvents`
     // already lets a node with an action take pointer input, so a `Draw` node
@@ -169,7 +238,7 @@ export class BrowserUiBackend {
     }
   }
 
-  // sru-52: the DOM fires a native `click` for a press and release inside one
+  // The DOM fires a native `click` for a press and release inside one
   // element however far the pointer travelled between them, so a gesture that
   // has already dispatched a drag consumes the click it would otherwise also be
   // read as. The drag threshold is `continuePointerDrag`'s and only its — this
@@ -196,12 +265,40 @@ export class BrowserUiBackend {
     });
   }
 
+  // The element's own current on-screen scale, derived from its live rect
+  // vs its wire-set (design-space) width, instead of the single root-wide
+  // `surfaceScale`. `surfaceScale` only reflects the ONE transform
+  // `fitSurface` puts on the surface root -- it says nothing about any
+  // additional transform a host page may put on an ancestor further down
+  // the tree (e.g. a per-block container transform), and composing
+  // transforms multiply, so `surfaceScale` alone silently under/over-counts
+  // the true effective scale as soon as such a transform exists. Reading
+  // the rect directly is transform-robust by construction: whatever
+  // ancestor transforms are in play, `getBoundingClientRect()` already
+  // reflects their combined effect.
+  // Recomputed on every call rather than cached at drag start, matching
+  // the existing "uses the current surface scale for each accepted drag
+  // increment" contract (a resize mid-drag must retarget sensitivity
+  // immediately, not just at the next drag's start) -- ui-backend.spec.ts's
+  // "uses the current surface scale for each accepted drag increment" test
+  // pins this. Falls back to `surfaceScale` (today's behavior, so the
+  // untransformed case is unchanged) whenever the rect or wire width is
+  // degenerate (not yet laid out, zero-extent node, etc).
+  private effectiveScaleFor(element: NodeElement): number {
+    const wireWidth = element.synthNode?.bounds.width;
+    if (!wireWidth || wireWidth <= 0) return this.surfaceScale;
+    const rectWidth = element.getBoundingClientRect().width;
+    if (!(rectWidth > 0)) return this.surfaceScale;
+    return rectWidth / wireWidth;
+  }
+
   private continuePointerDrag(element: NodeElement, event: PointerEvent) {
     const captured = this.capturedPointers.get(event.pointerId);
     if (!captured || captured.element !== element) return;
     if (!enabledNodeOf(element)) return this.clearPointer(event.pointerId, true);
-    const delta = (((event.clientX - captured.anchorClientX) / this.surfaceScale) -
-      ((event.clientY - captured.anchorClientY) / this.surfaceScale)) * 0.0025;
+    const scale = this.effectiveScaleFor(element);
+    const delta = (((event.clientX - captured.anchorClientX) / scale) -
+      ((event.clientY - captured.anchorClientY) / scale)) * 0.0025;
     if (Math.abs(delta) < 0.001) return;
     element.draggedSincePointerDown = true;
     this.dispatchDrag(captured.action, delta);
@@ -243,6 +340,23 @@ export class BrowserUiBackend {
       const input = element.querySelector("input")!;
       input.min = String(node.minValue); input.max = String(node.maxValue); input.step = String(node.step);
       if (document.activeElement !== input) input.value = String(node.value);
+      // Deliberately NOT gated by the focused-input guard above:
+      // the readout has no focus semantics of its own, so gating it
+      // the same way would freeze it mid-drag whenever the input is focused.
+      const output = element.querySelector("output")!;
+      output.textContent = formatSliderValue(node.value, node.step);
+      // The strip is carved out of the node's OWN height, so it must adapt to
+      // it: a fixed 14px would overflow the wire-set bounds
+      // on a node ≤14px tall, and `calc(100% - 14px)` would clamp the track to
+      // a 0-height, silently un-draggable control. Below the legibility floor
+      // the readout is dropped entirely and the track keeps the whole box —
+      // a slider too short to letter is still a slider.
+      const strip = sliderReadoutStrip(node.bounds.height);
+      output.style.display = strip > 0 ? "" : "none";
+      output.style.height = `${strip}px`;
+      output.style.lineHeight = `${strip}px`;
+      output.style.font = `9px/${strip}px inherit`;
+      input.style.height = strip > 0 ? `calc(100% - ${strip}px)` : "100%";
       input.disabled = !node.enabled;
     }
     if (node.kind === NodeKind.ComboBox) {
@@ -322,7 +436,7 @@ export class BrowserUiBackend {
     canvas.width = Math.max(1, Math.round(bounds.width)); canvas.height = Math.max(1, Math.round(bounds.height));
     canvas.style.width = "100%"; canvas.style.height = "100%";
     const context = canvas.getContext("2d")!;
-    // Draw geometry is relative to the owning node's own origin (sru-46), and
+    // Draw geometry is relative to the owning node's own origin, and
     // the canvas already spans exactly that node, so the canvas origin is the
     // node origin. No translation and no classification of the commands.
     const nodeExtent: Bounds = { x: 0, y: 0, width: bounds.width, height: bounds.height };
@@ -397,7 +511,7 @@ function resolveFrameSurface(nodesInOrder: Node[], nodes: Map<string, Node>): Re
   if (multipleParentError) throw new Error(multipleParentError);
 
   // The host extent is the resolved root extent, never the union of flowed
-  // content (sprs-6). Nothing the backend does can place content below it.
+  // content. Nothing the backend does can place content below it.
   const root = roots[0];
   return { rootId: root?.id, width: root?.bounds.width ?? 0, height: root?.bounds.height ?? 0 };
 }
@@ -410,11 +524,11 @@ function kindAttribute(kind: NodeKind) {
 
 // Per-node custom properties rather than per-surface inline styles: one carried
 // value, and `synth-browser.css` decides which surface it paints for each kind
-// (sru-45's per-kind table). The properties are set on *every* node, absent
+// (a per-kind table). The properties are set on *every* node, absent
 // ones to `initial`, because custom properties inherit — otherwise a container's
 // carried fill would leak into an unstyled descendant.
 function applyCarriedStyle(element: NodeElement, node: Node) {
-  // `Draw` carries no node colour: its commands carry their own (sru-45).
+  // `Draw` carries no node colour: its commands carry their own.
   const carried = node.kind === NodeKind.Draw ? undefined : node.color;
   // A checked toggle reads as selected, as it does in the JUCE backend.
   const selected = node.selected || (node.kind === NodeKind.Toggle && node.checked);
@@ -444,7 +558,7 @@ function setCarriedProperty(element: NodeElement, name: string, value?: string) 
 function flexAlignment(align: number) { return align === 1 ? "center" : align === 2 ? "flex-end" : "flex-start"; }
 
 // Selected and disabled presentation is derived from the carried colour, never
-// substituted from a palette (sru-45). Fold for fold the same as `StateColourFor`
+// substituted from a palette. Fold for fold the same as `StateColourFor`
 // in `PortableJuceBackend.hpp` — `darker(0.35f)` disabled, `brighter(0.14f)`
 // selected, alpha carried through untouched — so both backends land on the same
 // bytes for the same carried colour.
@@ -463,6 +577,53 @@ function darker(color: Color, amount: number): Color {
   const factor = 1 / (1 + amount);
   const channel = (value: number) => Math.trunc(factor * value);
   return { r: channel(color.r), g: channel(color.g), b: channel(color.b), a: color.a };
+}
+
+// Shared formatter, called from both the Slider create-path `input`
+// listener and the Slider `updateControl` branch, so the two update sites
+// cannot drift apart.
+//
+// JUCE parity, traced to the vendored source (not re-derived from memory):
+// `juce_Slider.cpp`'s `updateRange()` -- the private `numDecimalPlaces`
+// default-path branch, ported literally below. `step === 0` (continuous)
+// never enters the trailing-zero loop in JUCE either: it is guarded by
+// `if (! approximatelyEqual (interval, 0.0))`, so it is pinned to the
+// untouched default of 7 rather than folding through the loop (which would
+// otherwise collapse a literal 0 to N=0). No current producer sends step 0
+// today, but the function must be total.
+function sliderDecimalPlaces(step: number): number {
+  if (step === 0) return 7;
+  let places = 7;
+  let scaled = Math.round(Math.abs(step) * 1e7);
+  while (scaled % 10 === 0 && places > 0) {
+    places--;
+    scaled = Math.floor(scaled / 10);
+  }
+  return places;
+}
+
+// JUCE parity, traced to `juce_String.cpp`'s `StackArrayStream::writeDouble`
+// (the mechanism behind `getTextFromValue`'s `String (val, N)` in
+// `juce_Slider.cpp`): fixed-point formatting only applies for N > 0 --
+// `if (numDecPlaces > 0) { o.setf(fixed); o.precision(N); }` -- so `toFixed`
+// reproduces that branch exactly (confirmed by the byte-parity table in
+// ui-backend.spec.ts, including the classic 2.675/0.01 toFixed rounding case,
+// which happens to already match JUCE for the same binary double).
+// For N === 0 the stream keeps iostream's OWN default (non-fixed) formatting
+// instead of rounding to an integer, so a value that is not itself on a
+// whole-number step still renders its fraction. `String(Math.round(value))`
+// was the first candidate and was REJECTED by the
+// byte-parity table: for value 0.5 / step 1 it collapsed to "1" (and -0.5 to
+// "0", losing the sign and the value entirely) where the traced JUCE
+// mechanism -- compiled and run standalone to confirm, not assumed -- prints
+// "0.5" / "-0.5". `String(value)` reproduces JUCE exactly for every value
+// this app's producers carry (whole numbers when N is 0, matching JUCE's own
+// trailing-zero-free output for them; see the byte-parity table for the
+// measured rows). This matches JUCE's traced output exactly rather than
+// deriving a plausible independent format.
+function formatSliderValue(value: number, step: number): string {
+  const places = sliderDecimalPlaces(step);
+  return places > 0 ? value.toFixed(places) : String(value);
 }
 
 function enabledNodeOf(element: NodeElement) { const node = element.synthNode; return node?.enabled ? node : undefined; }

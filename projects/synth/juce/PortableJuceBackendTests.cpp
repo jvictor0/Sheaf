@@ -1180,7 +1180,7 @@ void TestDrawCommandsPaintNodeLocal()
 
     Require(image.getPixelAt(40, 40) == juce::Colour(220, 40, 30),
             "draw command bounds are node-local inside a nested hosted component");
-    Require(image.getPixelAt(65, 45) == juce::Colour(18, 20, 22),
+    Require(image.getPixelAt(65, 45) == synth_juce::UiToJuceColour(synth::kSurfaceBackground),
             "draw command overflow is clipped to the draw node bounds");
     Require(image.getPixelAt(100, 35) == juce::Colour(30, 180, 70),
             "node-local draw commands paint once inside a nested hosted component");
@@ -1441,7 +1441,7 @@ void TestDisabledSemanticControlsRenderDisabledAndKeepTheirState()
 
 void TestRetainedControlsFollowThePortableTreeNotTheirOwnState()
 {
-    // sru-33: a retained control follows the portable tree, not its own
+    // A retained control follows the portable tree, not its own
     // last user input, when the surface changes a selection or value
     // out-of-band (a refused edit reverting, or reconciliation choosing a
     // different device).
@@ -1508,7 +1508,7 @@ void TestRetainedControlsFollowThePortableTreeNotTheirOwnState()
 
 void TestContainerNodesRenderAsPanelsAndPaintNoLabel()
 {
-    // sru-33 host parity: a Row's or Section's own label paints nothing in
+    // Host parity: a Row's or Section's own label paints nothing in
     // either host. The browser backend writes textContent only for
     // Button/Label/StatusText, and this pins JUCE to the same rule so the
     // two hosts cannot drift.
@@ -1572,7 +1572,7 @@ void TestContainerNodesRenderAsPanelsAndPaintNoLabel()
 
 void TestDeclaredColumnBoundsResolveWithoutReflow()
 {
-    // scw-3 / sru-33: a form that declares explicit parent-local column
+    // A form that declares explicit parent-local column
     // bounds keeps them in JUCE instead of being reflowed into the
     // renderer's own wrapping cursor.
     RecordingSurface columnSurface;
