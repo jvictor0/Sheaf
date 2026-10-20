@@ -1180,7 +1180,7 @@ void TestDrawCommandsPaintNodeLocal()
 
     Require(image.getPixelAt(40, 40) == juce::Colour(220, 40, 30),
             "draw command bounds are node-local inside a nested hosted component");
-    Require(image.getPixelAt(65, 45) == juce::Colour(18, 20, 22),
+    Require(image.getPixelAt(65, 45) == synth_juce::UiToJuceColour(synth::kSurfaceBackground),
             "draw command overflow is clipped to the draw node bounds");
     Require(image.getPixelAt(100, 35) == juce::Colour(30, 180, 70),
             "node-local draw commands paint once inside a nested hosted component");
