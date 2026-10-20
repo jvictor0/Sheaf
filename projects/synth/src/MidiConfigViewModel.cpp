@@ -1,6 +1,8 @@
 #include "synth/MidiConfigViewModel.hpp"
 
 #include "synth/ControllerWizard.hpp"
+#include "synth/ControllersPageUI.hpp"
+#include "synth/MidiAppCatalog.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +45,10 @@ std::optional<std::size_t> PrimaryMessageArg(const MessageIn& message) {
         case MessageIn::Type::GridRelease:
         case MessageIn::Type::GridPressureChange:
         case MessageIn::Type::SelectGrid:
+        case MessageIn::Type::ParamSetAbsoluteOnBank:
+        case MessageIn::Type::AppAction:
+        case MessageIn::Type::HoldDrill:
+        case MessageIn::Type::Shift:
             return std::nullopt;
     }
     return std::nullopt;
@@ -82,6 +88,10 @@ bool SetPrimaryMessageArg(MessageIn& message, std::size_t arg) {
         case MessageIn::Type::GridRelease:
         case MessageIn::Type::GridPressureChange:
         case MessageIn::Type::SelectGrid:
+        case MessageIn::Type::ParamSetAbsoluteOnBank:
+        case MessageIn::Type::AppAction:
+        case MessageIn::Type::HoldDrill:
+        case MessageIn::Type::Shift:
             return false;
     }
     return false;
@@ -111,6 +121,9 @@ bool UISystemMessageHasArg(UISystemMessage message) {
         case UISystemMessage::Stop:
         case UISystemMessage::Clock:
         case UISystemMessage::SetSceneBlend:
+        case UISystemMessage::AppAction:
+        case UISystemMessage::HoldDrill:
+        case UISystemMessage::Shift:
             return false;
     }
     return false;
@@ -171,7 +184,14 @@ UISystemMessage UISystemMessageForAssociation(const MidiControllerSystemMessageA
         case MessageIn::Type::GridRelease:
         case MessageIn::Type::GridPressureChange:
         case MessageIn::Type::SelectGrid:
+        case MessageIn::Type::ParamSetAbsoluteOnBank:
             return UISystemMessage::Clock;
+        case MessageIn::Type::AppAction:
+            return UISystemMessage::AppAction;
+        case MessageIn::Type::HoldDrill:
+            return UISystemMessage::HoldDrill;
+        case MessageIn::Type::Shift:
+            return UISystemMessage::Shift;
     }
     return UISystemMessage::Clock;
 }
@@ -221,6 +241,12 @@ MessageIn PressForUISystemMessage(UISystemMessage message, const MidiControllerS
             return MessageIn::SceneSelect(0, arg);
         case UISystemMessage::SetSceneBlend:
             return MessageIn::SetSceneBlend(0, previous.press.value);
+        case UISystemMessage::AppAction:
+            return MessageIn::AppAction(0, previous.press.appActionIx, 0.0f);
+        case UISystemMessage::HoldDrill:
+            return MessageIn::HoldDrill(0, true);
+        case UISystemMessage::Shift:
+            return MessageIn::Shift(0, true);
     }
     return MessageIn::Clock(0);
 }
@@ -252,7 +278,12 @@ std::optional<MessageIn> ReleaseForUISystemMessage(UISystemMessage message, cons
         case UISystemMessage::SetGestureValue:
         case UISystemMessage::SceneSelect:
         case UISystemMessage::SetSceneBlend:
+        case UISystemMessage::AppAction:
             return std::nullopt;
+        case UISystemMessage::HoldDrill:
+            return MessageIn::HoldDrill(0, false);
+        case UISystemMessage::Shift:
+            return MessageIn::Shift(0, false);
     }
     return std::nullopt;
 }
@@ -317,6 +348,8 @@ bool FieldIsInteger(MidiMappingRowVM::Field field) {
         case Field::AddressType:
         case Field::MessageKind:
         case Field::BlockMessageType:
+        case Field::AppAction:
+        case Field::ShiftAction:
             return false;
     }
     return false;
@@ -341,13 +374,6 @@ const std::vector<std::string>& BlockableMessageCatalog() {
     return catalog;
 }
 
-const std::vector<std::string>& LaunchpadVariantCatalog() {
-    // Indexed by LaunchpadController's declaration order (MidiController.hpp):
-    // 0 = LaunchpadX, 1 = LaunchpadProMk3, 2 = LaunchpadMiniMk3.
-    static const std::vector<std::string> catalog = {"Launchpad X", "Launchpad Pro MK3", "Launchpad Mini MK3"};
-    return catalog;
-}
-
 const char* FieldShortLabel(MidiMappingRowVM::Field field) {
     switch (field) {
         case Field::Channel:
@@ -364,6 +390,8 @@ const char* FieldShortLabel(MidiMappingRowVM::Field field) {
             return "Step";
         case Field::MessageKind:
             return "Message";
+        case Field::AppAction:
+            return "Target";
         case Field::MessageArg:
             return "Arg";
         case Field::LaunchpadX:
@@ -414,53 +442,157 @@ const char* FieldShortLabel(MidiMappingRowVM::Field field) {
             return "Y Min";
         case Field::GridYMax:
             return "Y Max";
+        case Field::ShiftAction:
+            return "Shift";
     }
     return "";
 }
 
 const std::vector<UISystemMessageChoice>& UISystemMessageCatalog() {
     static const std::vector<UISystemMessageChoice> catalog = {
-        {"Param Inc/Dec", UISystemMessage::ParamIncDec},
-        {"Param Set Absolute", UISystemMessage::ParamSetAbsolute},
-        {"Param Push", UISystemMessage::ParamPush},
-        {"Toggle Reset", UISystemMessage::ToggleReset},
-        {"Hold Reset", UISystemMessage::HoldReset},
-        {"Toggle Random", UISystemMessage::ToggleRandom},
-        {"Hold Random", UISystemMessage::HoldRandom},
-        {"Toggle Random Mod", UISystemMessage::ToggleRandomMod},
-        {"Hold Random Mod", UISystemMessage::HoldRandomMod},
-        {"Toggle Gesture Select", UISystemMessage::ToggleGestureSelect},
-        {"Hold Gesture Select", UISystemMessage::HoldGestureSelect},
-        {"Bank Select", UISystemMessage::SelectParamBank},
-        {"Next Bank", UISystemMessage::NextParamBank},
-        {"Previous Bank", UISystemMessage::PrevParamBank},
-        {"Start", UISystemMessage::Start},
-        {"Continue", UISystemMessage::Continue},
-        {"Stop", UISystemMessage::Stop},
-        {"Clock", UISystemMessage::Clock},
-        {"Gesture Value", UISystemMessage::SetGestureValue},
-        {"Scene Select", UISystemMessage::SceneSelect},
-        {"Scene Blend", UISystemMessage::SetSceneBlend},
+        UISystemMessageChoice{.label = "Param Inc/Dec", .message = UISystemMessage::ParamIncDec},
+        UISystemMessageChoice{.label = "Param Set Absolute", .message = UISystemMessage::ParamSetAbsolute},
+        UISystemMessageChoice{.label = "Param Push", .message = UISystemMessage::ParamPush},
+        UISystemMessageChoice{.label = "Toggle Reset", .message = UISystemMessage::ToggleReset},
+        UISystemMessageChoice{.label = "Hold Reset", .message = UISystemMessage::HoldReset},
+        UISystemMessageChoice{.label = "Toggle Random", .message = UISystemMessage::ToggleRandom},
+        UISystemMessageChoice{.label = "Hold Random", .message = UISystemMessage::HoldRandom},
+        UISystemMessageChoice{.label = "Toggle Random Mod", .message = UISystemMessage::ToggleRandomMod},
+        UISystemMessageChoice{.label = "Hold Random Mod", .message = UISystemMessage::HoldRandomMod},
+        UISystemMessageChoice{.label = "Toggle Gesture Select", .message = UISystemMessage::ToggleGestureSelect},
+        UISystemMessageChoice{.label = "Hold Gesture Select", .message = UISystemMessage::HoldGestureSelect},
+        UISystemMessageChoice{.label = "Bank Select", .message = UISystemMessage::SelectParamBank},
+        UISystemMessageChoice{.label = "Next Bank", .message = UISystemMessage::NextParamBank},
+        UISystemMessageChoice{.label = "Previous Bank", .message = UISystemMessage::PrevParamBank},
+        UISystemMessageChoice{.label = "Start", .message = UISystemMessage::Start},
+        UISystemMessageChoice{.label = "Continue", .message = UISystemMessage::Continue},
+        UISystemMessageChoice{.label = "Stop", .message = UISystemMessage::Stop},
+        UISystemMessageChoice{.label = "Clock", .message = UISystemMessage::Clock},
+        UISystemMessageChoice{.label = "Gesture Value", .message = UISystemMessage::SetGestureValue},
+        UISystemMessageChoice{.label = "Scene Select", .message = UISystemMessage::SceneSelect},
+        UISystemMessageChoice{.label = "Scene Blend", .message = UISystemMessage::SetSceneBlend},
     };
     return catalog;
 }
 
-const UISystemMessageChoice* FindUISystemMessageChoice(UISystemMessage message) {
-    const auto& catalog = UISystemMessageCatalog();
-    const auto found = std::find_if(catalog.begin(), catalog.end(), [message](const auto& choice) {
-        return choice.message == message;
+const UISystemMessageChoice* FindUISystemMessageChoice(UISystemMessage message,
+                                                        const std::vector<UISystemMessageChoice>& catalog,
+                                                        std::string_view appAction,
+                                                        std::string_view appActionValue) {
+    const auto found = std::find_if(catalog.begin(), catalog.end(), [&](const UISystemMessageChoice& choice) {
+        if (choice.message != message) {
+            return false;
+        }
+        if (message == UISystemMessage::AppAction) {
+            return choice.appAction == appAction && choice.appActionValue == appActionValue;
+        }
+        return true;
     });
     return found == catalog.end() ? nullptr : &*found;
 }
 
 MidiControllerSystemMessageAssociation MakeUISystemMessageAssociation(
-    UISystemMessage message, std::size_t argument) {
+    const UISystemMessageChoice& choice, std::size_t argument) {
     MidiControllerSystemMessageAssociation association;
     association.press = MessageIn::Clock(0);
     association.feedback = association.press;
-    ApplyUISystemMessage(association, message);
-    SetUISystemMessageArg(association, argument);
+    if (choice.message == UISystemMessage::AppAction) {
+        association.press = MessageIn::AppAction(0, choice.appActionIx, 0.0f);
+        association.release = std::nullopt;
+        association.feedback = association.press;
+        association.appAction = choice.appAction;
+        association.appActionValue = choice.appActionValue;
+    } else {
+        ApplyUISystemMessage(association, choice.message);
+        SetUISystemMessageArg(association, argument);
+    }
     return association;
+}
+
+std::vector<UISystemMessageChoice> MakeUISystemMessageChoices(const MidiAppCatalog& catalog) {
+    if (catalog.libraryKinds.empty() && catalog.actions.empty()) {
+        return UISystemMessageCatalog();
+    }
+    std::vector<UISystemMessageChoice> choices;
+    choices.reserve(catalog.libraryKinds.size() + catalog.actions.size());
+    for (const UISystemMessage kind : catalog.libraryKinds) {
+        if (kind == UISystemMessage::HoldDrill) {
+            choices.push_back(UISystemMessageChoice{.label = "Hold Drill", .message = UISystemMessage::HoldDrill});
+            continue;
+        }
+        if (kind == UISystemMessage::Shift) {
+            choices.push_back(UISystemMessageChoice{.label = "Shift", .message = UISystemMessage::Shift});
+            continue;
+        }
+        if (const UISystemMessageChoice* found = FindUISystemMessageChoice(kind)) {
+            choices.push_back(*found);
+        }
+    }
+    for (std::size_t ix = 0; ix < catalog.actions.size(); ++ix) {
+        const MidiAppAction& action = catalog.actions[ix];
+        if (action.analogRange.has_value()) {
+            continue;
+        }
+        choices.push_back(UISystemMessageChoice{.label = action.label,
+                                                 .message = UISystemMessage::AppAction,
+                                                 .appAction = action.action,
+                                                 .appActionValue = action.value,
+                                                 .appActionIx = ix});
+    }
+    return choices;
+}
+
+std::vector<UISystemMessageChoice> MakeAnalogAppActionChoices(const MidiAppCatalog& catalog) {
+    std::vector<UISystemMessageChoice> choices;
+    for (std::size_t ix = 0; ix < catalog.actions.size(); ++ix) {
+        const MidiAppAction& action = catalog.actions[ix];
+        if (!action.analogRange.has_value()) {
+            continue;
+        }
+        choices.push_back(UISystemMessageChoice{.label = action.label,
+                                                 .message = UISystemMessage::AppAction,
+                                                 .appAction = action.action,
+                                                 .appActionValue = action.value,
+                                                 .appActionIx = ix});
+    }
+    return choices;
+}
+
+std::vector<UISystemMessageChoice> DeriveShiftCatalog(const std::vector<UISystemMessageChoice>& messageCatalog) {
+    std::vector<UISystemMessageChoice> catalog;
+    catalog.push_back(UISystemMessageChoice{.label = "(none)", .message = UISystemMessage::Clock});
+    for (const UISystemMessageChoice& choice : messageCatalog) {
+        if (UISystemMessageHasArg(choice.message)) {
+            continue;
+        }
+        if (choice.message == UISystemMessage::Shift || choice.message == UISystemMessage::HoldDrill) {
+            continue;
+        }
+        catalog.push_back(choice);
+    }
+    return catalog;
+}
+
+void MidiConfigViewModel::SetMessageCatalog(std::vector<UISystemMessageChoice> choices) {
+    messageCatalog_ = std::move(choices);
+    shiftCatalog_ = DeriveShiftCatalog(messageCatalog_);
+}
+
+void MidiConfigViewModel::SetAnalogActionCatalog(std::vector<UISystemMessageChoice> choices) {
+    analogActionCatalog_ = std::move(choices);
+}
+
+void MidiConfigViewModel::SetLayouts(std::vector<ControllerWizardDescriptor> layouts) {
+    layouts_ = std::move(layouts);
+}
+
+const std::vector<ControllerWizardDescriptor>& MidiConfigViewModel::Layouts() const {
+    if (!layouts_.empty()) {
+        return layouts_;
+    }
+    static const std::vector<ControllerWizardDescriptor> defaultLayouts =
+        MakeControllerWizardRegistry(MidiAppCatalog{});
+    return defaultLayouts;
 }
 
 namespace {
@@ -500,6 +632,47 @@ std::vector<MidiConfigSection> SectionsForKind(MidiProfileKind kind) {
         sections.push_back(MidiConfigSection::Analogs);
     }
     return sections;
+}
+
+// Whether `slot`'s config is still exactly what its stored wizard id would
+// generate today: false with no stored wizard id, an id that resolves to no
+// known descriptor, or a descriptor whose freshly generated profile
+// serializes differently from the slot's current config. Regenerates the
+// descriptor's profile into a scratch slot via the one shared install path
+// (runtime_ui::ControllersLayout::InstallDescriptorProfile) and compares
+// serialized JSON rather than adding struct equality, so this stays in sync
+// with whatever ToJSON already treats as significant.
+bool SlotMatchesWizardProfile(const MidiControllerSlot& slot,
+                              const std::vector<ControllerWizardDescriptor>& layouts) {
+    if (!slot.wizardId.has_value()) {
+        return false;
+    }
+    const ControllerWizardDescriptor* descriptor = FindControllerWizardDescriptor(layouts, *slot.wizardId);
+    if (descriptor == nullptr) {
+        return false;
+    }
+
+    MidiControllerSlot generated = slot;
+    if (!runtime_ui::ControllersLayout::InstallDescriptorProfile(layouts, *descriptor, generated, nullptr)) {
+        return false;
+    }
+
+    JsonArena arena(256 * 1024);
+    char* existingDump = ToJSON(arena, slot.config).Dumps(JSON_ENCODE_ANY);
+    if (existingDump == nullptr) {
+        return false;
+    }
+    const std::string existingJson(existingDump);
+    std::free(existingDump);
+
+    char* generatedDump = ToJSON(arena, generated.config).Dumps(JSON_ENCODE_ANY);
+    if (generatedDump == nullptr) {
+        return false;
+    }
+    const std::string generatedJson(generatedDump);
+    std::free(generatedDump);
+
+    return existingJson == generatedJson;
 }
 
 std::string DescribeMessage(const MessageIn& message) {
@@ -577,6 +750,17 @@ std::string DescribeMessage(const MessageIn& message) {
         case MessageIn::Type::SelectGrid:
             oss << "select grid " << message.gridIx << " (slot " << message.gridSlotIx << ")";
             break;
+        case MessageIn::Type::ParamSetAbsoluteOnBank:
+            break;
+        case MessageIn::Type::AppAction:
+            oss << "app action " << message.appActionIx;
+            break;
+        case MessageIn::Type::HoldDrill:
+            oss << (message.boolValue ? "hold drill on" : "hold drill off");
+            break;
+        case MessageIn::Type::Shift:
+            oss << (message.boolValue ? "shift on" : "shift off");
+            break;
     }
     return oss.str();
 }
@@ -620,6 +804,13 @@ std::string GestureLabel(const AnalogMidiMapping& mapping) {
     return oss.str();
 }
 
+std::string AppActionLabel(const AnalogAppActionMapping& mapping) {
+    std::ostringstream oss;
+    oss << "app action ch" << static_cast<int>(mapping.control.channel) << " cc"
+        << static_cast<int>(mapping.control.cc) << " -> " << mapping.appAction;
+    return oss.str();
+}
+
 std::string SceneBlendLabel(const std::optional<MidiControlAddress>& address) {
     // Issue #11: this row must read as clearly and distinctly "Scene blend"
     // -- not just another gesture -- since the renderer visually separates
@@ -647,7 +838,7 @@ std::string SystemMessageAddressLabel(const MidiControllerSystemMessageAssociati
         oss << "pos ch" << channel << " (" << static_cast<int>(association.wrldBldrPosition->x) << ","
             << static_cast<int>(association.wrldBldrPosition->y) << ")";
     } else if (kind == MidiProfileKind::MfTwister && association.control.has_value()) {
-        // sru-8/D1: twister's sole address is the logical side button (cc -
+        // Twister's sole address is the logical side button (cc -
         // 8); the fixed channel 3 is shown read-only alongside it.
         const int button = static_cast<int>(association.control->cc) - 8;
         oss << "ch" << static_cast<int>(association.control->channel) << " btn" << button;
@@ -663,13 +854,16 @@ std::string SystemMessageAddressLabel(const MidiControllerSystemMessageAssociati
 std::string SystemMessageLabel(const MidiControllerSystemMessageAssociation& association, MidiProfileKind kind) {
     std::ostringstream oss;
     oss << SystemMessageAddressLabel(association, kind) << " -> press: " << DescribeMessage(association.press);
+    if (association.press.type == MessageIn::Type::AppAction) {
+        oss << " " << association.appAction << " " << association.appActionValue;
+    }
     if (association.release.has_value()) {
         oss << ", release: " << DescribeMessage(*association.release);
     }
     return oss.str();
 }
 
-// --- Open section presentation (task group 2 / design.md D5) ---------------
+// --- Open section presentation -----------------------------------------------
 
 using PresentationRow = detail::PresentationRow;
 using SectionPresentation = detail::SectionPresentation;
@@ -702,17 +896,16 @@ void MidiConfigViewModel::Rebuild(const MidiInstrumentConfig& instrument, const 
         row.kind = slot.kind;
         row.disposition = slot.disposition;
         row.hasResolvedWizard = slot.wizardId.has_value() &&
-            std::any_of(ControllerWizardRegistry().begin(), ControllerWizardRegistry().end(),
-                        [&](const ControllerWizardDescriptor& descriptor) {
-                            return descriptor.id == *slot.wizardId;
-                        });
-        row.hasCompleteEndpointPair = slot.input.IsConfigured() && slot.output.IsConfigured();
+            FindControllerWizardDescriptor(Layouts(), *slot.wizardId) != nullptr;
+        row.matchesWizardProfile = SlotMatchesWizardProfile(slot, Layouts());
+        row.wizardId = slot.wizardId;
         row.inputStatus = inputConnection.status;
         row.outputStatus = outputConnection.status;
         row.inputDeviceLabel = DeviceLabel(slot.input, inputConnection.status);
         row.outputDeviceLabel = DeviceLabel(slot.output, outputConnection.status);
         row.storedInput = slot.input;
         row.storedOutput = slot.output;
+        row.launchpadModel = slot.config.launchpadModel;
         row.sections = SectionsForKind(slot.kind);
 
         // Ensure expand state exists for this controller (first appearance
@@ -727,7 +920,7 @@ void MidiConfigViewModel::Rebuild(const MidiInstrumentConfig& instrument, const 
         controllers_.push_back(std::move(row));
     }
 
-    // Finding 5: erase expand-state entries for controller names no longer
+    // Erase expand-state entries for controller names no longer
     // present, for the same reason presentation entries are erased below --
     // a same-name readd should start "fully collapsed" like any other
     // first-ever appearance (this class's own doc comment above, and
@@ -763,9 +956,8 @@ void MidiConfigViewModel::Rebuild(const MidiInstrumentConfig& instrument, const 
     // lazily building a fresh reconstruction from the reappeared
     // controller's actual config. Erasing lets PresentationFor's
     // find()-miss -> BuildFreshPresentation() path run again for that name,
-    // matching sru-11 "re-expanding presents the fresh minimal
-    // reconstruction" (a same-name readd is, presentation-wise, exactly
-    // like a fresh expand).
+    // so re-expanding presents a fresh minimal reconstruction (a same-name
+    // readd is, presentation-wise, exactly like a fresh expand).
     // Collects orphaned keys first and erases in a second pass, since
     // erasing a std::map entry while range-for is iterating that SAME
     // element is undefined behavior; this stays correct without relying on
@@ -794,6 +986,33 @@ const MidiConfigViewModel::ExpandState* MidiConfigViewModel::StateForConst(const
     return it != expandState_.end() ? &it->second : nullptr;
 }
 
+// expandState_ and presentations_ are two caches of one concept -- per-row UI
+// state keyed by a controller name the user can change -- so a rename has to
+// move both together or the row's cached state gets orphaned (and discarded)
+// by Rebuild()'s name-based sweeps the next time it runs.
+void MidiConfigViewModel::NoteControllerRenamed(const std::string& from, const std::string& to) {
+    auto expandIt = expandState_.find(from);
+    if (expandIt != expandState_.end()) {
+        expandState_[to] = std::move(expandIt->second);
+        expandState_.erase(expandIt);
+    }
+
+    // Collects the affected keys first and rewrites them in a second pass,
+    // since erasing a std::map entry while range-for is iterating that SAME
+    // element is undefined behavior.
+    std::vector<PresentationKey> renamedKeys;
+    for (const auto& [presentationKey, presentation] : presentations_) {
+        (void)presentation;
+        if (presentationKey.first == from) {
+            renamedKeys.push_back(presentationKey);
+        }
+    }
+    for (const PresentationKey& key : renamedKeys) {
+        presentations_[PresentationKey{to, key.second}] = std::move(presentations_[key]);
+        presentations_.erase(key);
+    }
+}
+
 void MidiConfigViewModel::ToggleConfig(std::size_t controllerIx) {
     if (controllerIx >= controllers_.size()) {
         return;
@@ -812,8 +1031,8 @@ void MidiConfigViewModel::ToggleSection(std::size_t controllerIx, MidiConfigSect
     bool& expanded = state.sections[section];
     expanded = !expanded;
     if (!expanded) {
-        // D5: "discarded on expanded->collapsed" -- the next expand rebuilds
-        // a fresh minimal reconstruction (sru-11's "collapsing and
+        // Discarded on expanded->collapsed -- the next expand rebuilds
+        // a fresh minimal reconstruction ("collapsing and
         // re-expanding present the fresh minimal reconstruction").
         DiscardPresentation(name, section);
     } else {
@@ -839,7 +1058,7 @@ bool MidiConfigViewModel::SectionExpanded(std::size_t controllerIx, MidiConfigSe
 
 namespace {
 
-// editableFields for an Individual SystemMessages row, per kind (D1/sru-8) --
+// editableFields for an Individual SystemMessages row, per kind --
 // factored out of the old SectionRows() SystemMessages case so
 // BuildFreshPresentation/BuildSectionRows share the exact same table.
 std::vector<Field> SystemRowEditableFields(MidiProfileKind kind,
@@ -874,14 +1093,18 @@ std::vector<Field> SystemRowEditableFields(MidiProfileKind kind,
         }
     }
     fields.push_back(Field::MessageKind);
-    if (UISystemMessageHasArg(UISystemMessageForAssociation(association))) {
+    const UISystemMessage message = UISystemMessageForAssociation(association);
+    if (UISystemMessageHasArg(message)) {
         fields.push_back(Field::MessageArg);
+    }
+    if (message != UISystemMessage::Shift && message != UISystemMessage::HoldDrill) {
+        fields.push_back(Field::ShiftAction);
     }
     return fields;
 }
 
-// editableFields for a Block row, per its form (D1/D3/D6 -- see
-// MidiMappingRowVM::Field's Block* doc comment).
+// editableFields for a Block row, per its form.
+// See MidiMappingRowVM::Field's Block* doc comment.
 std::vector<Field> EncoderBlockEditableFields() {
     return {Field::Channel, Field::BlockStartCc, Field::BlockEndCc, Field::SlotIx, Field::BlockStartPos};
 }
@@ -992,11 +1215,10 @@ namespace {
 // rows (Encoders' EncoderMode/TurnStep, Analogs' SceneBlend) as individual
 // ConfigLevel PresentationRows, and the blockable groups (encoder turns/
 // pushes, analog gestures, system messages) reconstructed via
-// MidiConfigBlocks.hpp's Reconstruct* (D5: "built ... at the collapsed ->
-// expanded transition"). This is also what a collapse+re-expand cycle
+// MidiConfigBlocks.hpp's Reconstruct* (built at the collapsed ->
+// expanded transition). This is also what a collapse+re-expand cycle
 // produces (DiscardPresentation followed by the next PresentationFor()
-// call), matching sru-11's "re-expanding presents the fresh minimal
-// reconstruction."
+// call), where re-expanding presents a fresh minimal reconstruction.
 SectionPresentation BuildFreshPresentation(const MidiControllerProfileConfig& config, MidiProfileKind kind,
                                            MidiConfigSection section) {
     SectionPresentation presentation;
@@ -1060,6 +1282,13 @@ SectionPresentation BuildFreshPresentation(const MidiControllerProfileConfig& co
                     const AnalogMidiMapping& mapping = analogInput.gestures[reconstructed.indices.front()];
                     row.data = mapping;
                 }
+                presentation.rows.push_back(std::move(row));
+            }
+            for (const AnalogAppActionMapping& mapping : analogInput.appActions) {
+                PresentationRow row;
+                row.kind = RowKind::Individual;
+                row.group = RowGroup::AnalogAppAction;
+                row.data = mapping;
                 presentation.rows.push_back(std::move(row));
             }
             {
@@ -1140,10 +1369,11 @@ namespace {
 // EXISTING row of that group, if any; otherwise immediately before the
 // first row of the nearest LATER group in RowGroup's declaration order
 // (EncoderTurn < EncoderPush < EncoderMode < EncoderStep < AnalogGesture <
-// AnalogSceneBlend < System, which is exactly section display order); if
+// AnalogAppAction < AnalogSceneBlend < System, which is exactly section
+// display order); if
 // neither exists (no rows of this group AND no later-group rows either),
-// the very end of the presentation. Shared by AddSingle/AddBlock (sru-11
-// "+"/"+B" append presentation rows at the end of their group) so both
+// the very end of the presentation. Shared by AddSingle/AddBlock
+// ("+"/"+B" append presentation rows at the end of their group) so both
 // paths agree on where "end of group" means -- a
 // group with zero existing rows still has a well-defined "end" (immediately
 // before mode/step/scene-blend), not the tail of the whole section.
@@ -1233,6 +1463,9 @@ std::vector<MidiMappingRowVM> MidiConfigViewModel::BuildSectionRows(std::size_t 
             } else if (const auto* mapping = std::get_if<AnalogMidiMapping>(&presentationRow.data)) {
                 row.editableFields = {Field::Channel, Field::Cc, Field::GestureIx};
                 row.label = GestureLabel(*mapping);
+            } else if (const auto* mapping = std::get_if<AnalogAppActionMapping>(&presentationRow.data)) {
+                row.editableFields = {Field::Channel, Field::Cc, Field::AppAction};
+                row.label = AppActionLabel(*mapping);
             } else if (const auto* association = std::get_if<MidiControllerSystemMessageAssociation>(&presentationRow.data)) {
                 row.editableFields = SystemRowEditableFields(slot.kind, *association);
                 row.label = SystemMessageLabel(*association, slot.kind);
@@ -1398,7 +1631,7 @@ bool MidiConfigViewModel::RowFieldValue(std::size_t controllerIx, MidiConfigSect
     if (std::find(editable.begin(), editable.end(), field) == editable.end()) {
         return false;
     }
-    if (field == Field::MessageKind || field == Field::BlockMessageType) {
+    if (field == Field::MessageKind || field == Field::BlockMessageType || field == Field::ShiftAction) {
         return false;
     }
 
@@ -1430,19 +1663,19 @@ bool MidiConfigViewModel::RowFieldValue(std::size_t controllerIx, MidiConfigSect
             return true;
         }
         if (presentationRow.group == RowGroup::AnalogSceneBlend && field == Field::SceneBlend) {
-            // Finding 4 audit fallout: an unassigned sceneBlend (a common,
+            // An unassigned sceneBlend (a common,
             // valid state -- SlotValidForKind places no requirement on it,
             // see SceneBlendLabelReadsClearlyWhenAssignedAndUnassigned)
             // used to make THIS return false even though the row always
             // advertises SceneBlend as editable and ApplyMappingEdit
             // genuinely accepts assigning it (defaulting the address via
             // value_or(MidiControlAddress{})). Returning false here made
-            // ControllersPage.hpp's renderer skip building an editor
+            // ControllersPageUI.hpp's renderer skip building an editor
             // entirely for this row once it started checking
-            // RowFieldValue's return value (finding 4's fix), which would
+            // RowFieldValue's return value, which would
             // have made an unassigned scene blend permanently unassignable
-            // from the UI -- a real regression the finding's own goal
-            // ("visible but not silently corruptible") doesn't intend.
+            // from the UI -- a real regression, and not what "visible but not
+            // silently corruptible" aims at.
             // 0.0 (cc 0) matches ApplyMappingEdit's own default-construction
             // value for the same unassigned case, so a freshly-seeded
             // editor and a freshly-committed edit agree on what "unassigned,
@@ -1486,6 +1719,30 @@ bool MidiConfigViewModel::RowFieldValue(std::size_t controllerIx, MidiConfigSect
             case Field::GestureIx:
                 out = static_cast<double>(mapping->gestureIx);
                 return true;
+            default:
+                return false;
+        }
+    }
+    if (const auto* mapping = std::get_if<AnalogAppActionMapping>(&presentationRow.data)) {
+        switch (field) {
+            case Field::Channel:
+                out = static_cast<double>(mapping->control.channel);
+                return true;
+            case Field::Cc:
+                out = static_cast<double>(mapping->control.cc);
+                return true;
+            case Field::AppAction: {
+                const auto& catalog = AnalogActionCatalog();
+                out = 0.0;
+                for (std::size_t ix = 0; ix < catalog.size(); ++ix) {
+                    if (catalog[ix].appAction == mapping->appAction &&
+                        catalog[ix].appActionValue == mapping->appActionValue) {
+                        out = static_cast<double>(ix);
+                        break;
+                    }
+                }
+                return true;
+            }
             default:
                 return false;
         }
@@ -1577,7 +1834,7 @@ namespace {
 
 // True when `value` is representable as a non-negative integer -- the
 // baseline domain check for SlotIx/Position/GestureIx/bank & scene indices
-// and catalog indices (brief finding 3: "integral (value == floor(value)),
+// and catalog indices ("integral (value == floor(value)),
 // within the field's domain ... at minimum non-negative").
 //
 // Also bounds `value` from above so every caller's later
@@ -1623,11 +1880,88 @@ int MidiConfigViewModel::UISystemMessageIndex(std::size_t controllerIx, MidiConf
     }
 
     const UISystemMessage message = UISystemMessageForAssociation(*association);
-    const auto& catalog = UISystemMessageCatalog();
-    for (std::size_t ix = 0; ix < catalog.size(); ++ix) {
-        if (catalog[ix].message == message) {
-            return static_cast<int>(ix);
+    const auto& catalog = MessageCatalog();
+    const UISystemMessageChoice* choice =
+        FindUISystemMessageChoice(message, catalog, association->appAction, association->appActionValue);
+    if (choice == nullptr) {
+        return -1;
+    }
+    return static_cast<int>(choice - catalog.data());
+}
+
+std::optional<std::string> MidiConfigViewModel::UncatalogedSystemMessageKindName(
+    std::size_t controllerIx, MidiConfigSection section, std::size_t rowIx) const {
+    if (section != MidiConfigSection::SystemMessages) {
+        return std::nullopt;
+    }
+    if (controllerIx >= instrument_.controllers.size()) {
+        return std::nullopt;
+    }
+    const SectionPresentation& presentation = PresentationFor(controllerIx, section);
+    if (rowIx >= presentation.rows.size() || presentation.rows[rowIx].kind != RowKind::Individual) {
+        return std::nullopt;
+    }
+    const auto* association =
+        std::get_if<MidiControllerSystemMessageAssociation>(&presentation.rows[rowIx].data);
+    if (association == nullptr) {
+        return std::nullopt;
+    }
+
+    const UISystemMessage message = UISystemMessageForAssociation(*association);
+    if (FindUISystemMessageChoice(message, MessageCatalog(), association->appAction,
+                                  association->appActionValue) != nullptr) {
+        return std::nullopt;
+    }
+    const UISystemMessageChoice* libraryChoice = FindUISystemMessageChoice(
+        message, UISystemMessageCatalog(), association->appAction, association->appActionValue);
+    if (libraryChoice == nullptr) {
+        return std::nullopt;
+    }
+    return libraryChoice->label;
+}
+
+int MidiConfigViewModel::ShiftChoiceIndex(std::size_t controllerIx, MidiConfigSection section,
+                                          std::size_t rowIx) const {
+    if (section != MidiConfigSection::SystemMessages) {
+        return -1;
+    }
+    if (controllerIx >= instrument_.controllers.size()) {
+        return -1;
+    }
+    const SectionPresentation& presentation = PresentationFor(controllerIx, section);
+    if (rowIx >= presentation.rows.size() || presentation.rows[rowIx].kind != RowKind::Individual) {
+        return -1;
+    }
+    const auto* association =
+        std::get_if<MidiControllerSystemMessageAssociation>(&presentation.rows[rowIx].data);
+    if (association == nullptr) {
+        return -1;
+    }
+    if (!association->shiftedPress.has_value()) {
+        return 0;
+    }
+
+    // Mirrors UISystemMessageForAssociation's own press->kind mapping,
+    // applied to the shifted press instead of the row's ordinary one.
+    MidiControllerSystemMessageAssociation shiftedAsAssociation;
+    shiftedAsAssociation.press = *association->shiftedPress;
+    const UISystemMessage message = UISystemMessageForAssociation(shiftedAsAssociation);
+    const auto& catalog = ShiftCatalog();
+    // Index 0 is the "(none)" placeholder, not a real catalog choice -- its
+    // own `message` happens to be Clock, which also appears legitimately
+    // later in the catalog, so the search starts at 1 to never mistake a
+    // genuine Clock shift for "no shift."
+    for (std::size_t ix = 1; ix < catalog.size(); ++ix) {
+        const UISystemMessageChoice& choice = catalog[ix];
+        if (choice.message != message) {
+            continue;
         }
+        if (message == UISystemMessage::AppAction &&
+            (choice.appAction != association->shiftedAppAction ||
+             choice.appActionValue != association->shiftedAppActionValue)) {
+            continue;
+        }
+        return static_cast<int>(ix);
     }
     return -1;
 }
@@ -1657,8 +1991,8 @@ namespace {
 // validating domain per-field the same way the individual-row cases below
 // do (Channel 0-15, coordinates integral, message-type/bool toggle indices
 // in range). Does NOT re-validate the whole expansion (ApplyMappingEdit's
-// Block case does that separately via ExpandSystemBlock, sru-10's
-// "all-or-nothing").
+// Block case does that separately via ExpandSystemBlock, an
+// all-or-nothing validation).
 bool ApplyEncoderBlockField(EncoderBlock& block, Field field, double value, std::string& validationError) {
     switch (field) {
         case Field::AddressType:
@@ -1928,10 +2262,29 @@ bool HasDuplicateEncoderAddress(const std::vector<EncoderMidiMapping>& mappings)
     return false;
 }
 
-bool HasDuplicateAnalogAddress(const std::vector<AnalogMidiMapping>& mappings) {
-    for (std::size_t ix = 0; ix < mappings.size(); ++ix) {
-        for (std::size_t jx = ix + 1; jx < mappings.size(); ++jx) {
-            if (mappings[ix].control == mappings[jx].control) {
+// Gestures and app actions share one address space per analog input (both
+// key off (channel, cc) on the same physical control), so a duplicate check
+// limited to one vector would miss a gesture/app-action collision -- checked
+// pairwise within each vector, then across the two.
+bool HasDuplicateAnalogAddress(const std::vector<AnalogMidiMapping>& gestures,
+                               const std::vector<AnalogAppActionMapping>& appActions) {
+    for (std::size_t ix = 0; ix < gestures.size(); ++ix) {
+        for (std::size_t jx = ix + 1; jx < gestures.size(); ++jx) {
+            if (gestures[ix].control == gestures[jx].control) {
+                return true;
+            }
+        }
+    }
+    for (std::size_t ix = 0; ix < appActions.size(); ++ix) {
+        for (std::size_t jx = ix + 1; jx < appActions.size(); ++jx) {
+            if (appActions[ix].control == appActions[jx].control) {
+                return true;
+            }
+        }
+    }
+    for (const AnalogMidiMapping& gesture : gestures) {
+        for (const AnalogAppActionMapping& appAction : appActions) {
+            if (gesture.control == appAction.control) {
                 return true;
             }
         }
@@ -1939,11 +2292,11 @@ bool HasDuplicateAnalogAddress(const std::vector<AnalogMidiMapping>& mappings) {
     return false;
 }
 
-// One association's address tuple per the kind's schema (D1) -- the same
+// One association's address tuple per the kind's schema -- the same
 // fields SystemAddressSchema(kind) names, flattened to a comparable form.
 // Twister's address is its `control` (channel 3, cc 8-13) same as generic;
 // distinguishing twister isn't needed here since MfTwister never blocks
-// (D4) and AddSingle is the only twister caller, which already refuses via
+// and AddSingle is the only twister caller, which already refuses via
 // NextFreeTwisterButton exhaustion before reaching this check.
 bool SameSystemAddress(const MidiControllerSystemMessageAssociation& a,
                        const MidiControllerSystemMessageAssociation& b, MidiProfileKind kind) {
@@ -1968,6 +2321,33 @@ bool HasDuplicateSystemAddress(const std::vector<MidiControllerSystemMessageAsso
         }
     }
     return false;
+}
+
+// The slot's gesture references at or above `count`: a Gestures row's
+// gestureIx, and a System row whose press is a SetGestureSelect,
+// ToggleGestureSelect or SetGestureValue message carrying a gesture index
+// there. Used to refuse an edit that raises this count once a gesture count
+// is set (ApplyMappingEdit/AddSingle/AddBlock below), so a row can never
+// name a gesture the app does not have.
+std::size_t CountGestureReferencesAtOrAbove(const MidiControllerSlot& slot, std::size_t count) {
+    std::size_t total = 0;
+    if (slot.config.analogInput.has_value()) {
+        for (const AnalogMidiMapping& gesture : slot.config.analogInput->gestures) {
+            if (gesture.gestureIx >= count) {
+                ++total;
+            }
+        }
+    }
+    for (const MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
+        const MessageIn& press = association.press;
+        const bool isGestureMessage = press.type == MessageIn::Type::SetGestureSelect ||
+                                      press.type == MessageIn::Type::ToggleGestureSelect ||
+                                      press.type == MessageIn::Type::SetGestureValue;
+        if (isGestureMessage && press.gestureIx >= count) {
+            ++total;
+        }
+    }
+    return total;
 }
 
 bool FlushSectionPresentationToSlot(const SectionPresentation& presentation, MidiControllerSlot& slot,
@@ -2024,12 +2404,24 @@ bool FlushSectionPresentationToSlot(const SectionPresentation& presentation, Mid
             AnalogMidiInConfig next = slot.config.analogInput.value_or(AnalogMidiInConfig{});
             next.gestures.clear();
             next.sceneBlend = std::nullopt;
+            next.appActions.clear();
             for (const PresentationRow& row : presentation.rows) {
                 if (row.kind == RowKind::ConfigLevel) {
                     if (const auto* sceneBlend = std::get_if<AnalogSceneBlendRow>(&row.data)) {
                         next.sceneBlend = sceneBlend->sceneBlend;
                     }
                 } else if (row.kind == RowKind::Individual) {
+                    if (row.group == RowGroup::AnalogAppAction) {
+                        const auto* appAction = std::get_if<AnalogAppActionMapping>(&row.data);
+                        if (appAction == nullptr) {
+                            if (reason != nullptr) {
+                                *reason = "analog app-action row has no mapping data";
+                            }
+                            return false;
+                        }
+                        next.appActions.push_back(*appAction);
+                        continue;
+                    }
                     const auto* mapping = std::get_if<AnalogMidiMapping>(&row.data);
                     if (mapping == nullptr) {
                         if (reason != nullptr) {
@@ -2051,7 +2443,7 @@ bool FlushSectionPresentationToSlot(const SectionPresentation& presentation, Mid
                     return false;
                 }
             }
-            if (HasDuplicateAnalogAddress(next.gestures)) {
+            if (HasDuplicateAnalogAddress(next.gestures, next.appActions)) {
                 if (reason != nullptr) {
                     *reason = "section would create a duplicate (channel, cc) address";
                 }
@@ -2295,6 +2687,45 @@ bool MidiConfigViewModel::ApplyMappingEdit(std::size_t controllerIx, MidiConfigS
                 default:
                     break;
             }
+        } else if (auto* mapping = std::get_if<AnalogAppActionMapping>(&presentationRow.data)) {
+            switch (field) {
+                case Field::Channel:
+                    if (!IsIntegerInRange(value, 0.0, 15.0)) {
+                        validationError = "channel must be an integer 0-15";
+                        break;
+                    }
+                    mapping->control.channel = static_cast<std::uint8_t>(value);
+                    fieldValid = true;
+                    break;
+                case Field::Cc:
+                    if (!IsIntegerInRange(value, 0.0, 127.0)) {
+                        validationError = "cc must be an integer 0-127";
+                        break;
+                    }
+                    mapping->control.cc = static_cast<std::uint8_t>(value);
+                    fieldValid = true;
+                    break;
+                case Field::AppAction: {
+                    if (!IsNonNegativeInteger(value)) {
+                        validationError = "app action must be a non-negative integer catalog index";
+                        break;
+                    }
+                    const auto& catalog = AnalogActionCatalog();
+                    const auto choiceIx = static_cast<std::size_t>(value);
+                    if (choiceIx >= catalog.size()) {
+                        validationError = "app action index out of range";
+                        break;
+                    }
+                    const UISystemMessageChoice& choice = catalog[choiceIx];
+                    mapping->appAction = choice.appAction;
+                    mapping->appActionValue = choice.appActionValue;
+                    mapping->appActionIx = choice.appActionIx;
+                    fieldValid = true;
+                    break;
+                }
+                default:
+                    break;
+            }
         } else if (auto* association = std::get_if<MidiControllerSystemMessageAssociation>(&presentationRow.data)) {
             switch (field) {
                 case Field::AddressType:
@@ -2401,13 +2832,23 @@ bool MidiConfigViewModel::ApplyMappingEdit(std::size_t controllerIx, MidiConfigS
                         validationError = "message kind must be a non-negative integer catalog index";
                         break;
                     }
-                    const auto& catalog = UISystemMessageCatalog();
+                    const auto& catalog = MessageCatalog();
                     const auto choiceIx = static_cast<std::size_t>(value);
                     if (choiceIx >= catalog.size()) {
                         validationError = "message kind index out of range";
                         break;
                     }
-                    ApplyUISystemMessage(*association, catalog[choiceIx].message);
+                    const UISystemMessageChoice& choice = catalog[choiceIx];
+                    ApplyUISystemMessage(*association, choice.message);
+                    if (choice.message == UISystemMessage::AppAction) {
+                        association->press.appActionIx = choice.appActionIx;
+                        association->feedback = association->press;
+                        association->appAction = choice.appAction;
+                        association->appActionValue = choice.appActionValue;
+                    } else {
+                        association->appAction.clear();
+                        association->appActionValue.clear();
+                    }
                     fieldValid = true;
                     break;
                 }
@@ -2420,6 +2861,36 @@ bool MidiConfigViewModel::ApplyMappingEdit(std::size_t controllerIx, MidiConfigS
                     if (!SetUISystemMessageArg(*association, arg)) {
                         validationError = "message has no integer argument";
                         break;
+                    }
+                    fieldValid = true;
+                    break;
+                }
+                case Field::ShiftAction: {
+                    if (!IsNonNegativeInteger(value)) {
+                        validationError = "shift action must be a non-negative integer catalog index";
+                        break;
+                    }
+                    const auto& catalog = ShiftCatalog();
+                    const auto choiceIx = static_cast<std::size_t>(value);
+                    if (choiceIx >= catalog.size()) {
+                        validationError = "shift action index out of range";
+                        break;
+                    }
+                    if (choiceIx == 0) {
+                        association->shiftedPress.reset();
+                        association->shiftedAppAction.clear();
+                        association->shiftedAppActionValue.clear();
+                    } else {
+                        const UISystemMessageChoice& choice = catalog[choiceIx];
+                        association->shiftedPress = PressForUISystemMessage(choice.message, *association);
+                        if (choice.message == UISystemMessage::AppAction) {
+                            association->shiftedPress->appActionIx = choice.appActionIx;
+                            association->shiftedAppAction = choice.appAction;
+                            association->shiftedAppActionValue = choice.appActionValue;
+                        } else {
+                            association->shiftedAppAction.clear();
+                            association->shiftedAppActionValue.clear();
+                        }
                     }
                     fieldValid = true;
                     break;
@@ -2447,6 +2918,17 @@ bool MidiConfigViewModel::ApplyMappingEdit(std::size_t controllerIx, MidiConfigS
         return false;
     }
 
+    if (gestureCount_.has_value()) {
+        const std::size_t before = CountGestureReferencesAtOrAbove(instrument_.controllers[controllerIx], *gestureCount_);
+        const std::size_t after = CountGestureReferencesAtOrAbove(slot, *gestureCount_);
+        if (after > before) {
+            if (reason != nullptr) {
+                *reason = "gesture must be an integer 0-" + std::to_string(*gestureCount_ - 1);
+            }
+            return false;
+        }
+    }
+
     out = std::move(scratch);
     return true;
 }
@@ -2463,21 +2945,8 @@ bool MidiConfigViewModel::AddController(std::string name, MidiProfileKind kind, 
     MidiControllerSlot slot;
     slot.name = name;
     slot.kind = kind;
-    switch (kind) {
-        case MidiProfileKind::WrldBldr:
-            slot.config = WrldBldrDefaultProfileConfig();
-            break;
-        case MidiProfileKind::MfTwister:
-            slot.config = MfTwisterDefaultProfileConfig();
-            break;
-        case MidiProfileKind::Launchpad:
-            slot.config = LaunchpadDefaultProfileConfig();
-            break;
-        case MidiProfileKind::Generic:
-            slot.config = MidiControllerProfileConfig{};
-            break;
-    }
-    // sru-9: every commit path normalizes, including a freshly-seeded default
+    slot.config = DefaultProfileConfigForKind(kind);
+    // Every commit path normalizes, including a freshly-seeded default
     // profile (already canonical in practice for every factory today, but
     // this keeps the guarantee independent of that incidental fact).
     NormalizeMidiProfileConfig(slot.config, kind);
@@ -2534,12 +3003,6 @@ bool MidiConfigViewModel::DeleteController(std::size_t controllerIx, MidiInstrum
         }
         return false;
     }
-    if (instrument_.controllers[controllerIx].disposition != MidiControllerDisposition::Active) {
-        if (reason != nullptr) {
-            *reason = "only active controllers can be deleted";
-        }
-        return false;
-    }
 
     MidiInstrumentConfig scratch = instrument_;
     scratch.RemoveController(controllerIx);
@@ -2547,8 +3010,8 @@ bool MidiConfigViewModel::DeleteController(std::size_t controllerIx, MidiInstrum
     return true;
 }
 
-bool MidiConfigViewModel::BlacklistController(std::size_t controllerIx, MidiInstrumentConfig& out,
-                                              std::string* reason) const {
+bool MidiConfigViewModel::RestoreController(std::size_t controllerIx, MidiInstrumentConfig& out,
+                                            std::string* reason) const {
     if (controllerIx >= instrument_.controllers.size()) {
         if (reason != nullptr) {
             *reason = "controller does not exist";
@@ -2556,32 +3019,24 @@ bool MidiConfigViewModel::BlacklistController(std::size_t controllerIx, MidiInst
         return false;
     }
     const MidiControllerSlot& existing = instrument_.controllers[controllerIx];
-    if (!existing.input.IsConfigured() || !existing.output.IsConfigured()) {
+    const ControllerWizardDescriptor* descriptor = existing.wizardId.has_value()
+        ? FindControllerWizardDescriptor(Layouts(), *existing.wizardId)
+        : nullptr;
+    if (descriptor == nullptr) {
         if (reason != nullptr) {
-            *reason = "blacklisting requires both input and output endpoint references";
-        }
-        return false;
-    }
-    const bool resolved = existing.wizardId.has_value() &&
-        std::any_of(ControllerWizardRegistry().begin(), ControllerWizardRegistry().end(),
-                    [&](const ControllerWizardDescriptor& descriptor) {
-                        return descriptor.id == *existing.wizardId;
-                    });
-    if (existing.disposition != MidiControllerDisposition::Active || !resolved) {
-        if (reason != nullptr) {
-            *reason = "only registry-supported active controllers can be blacklisted";
+            *reason = "restoring requires a resolved preset";
         }
         return false;
     }
 
     MidiInstrumentConfig scratch = instrument_;
-    MidiControllerSlot blacklisted = scratch.controllers[controllerIx];
-    blacklisted.disposition = MidiControllerDisposition::Blacklisted;
-    blacklisted.dormantConfig = std::move(blacklisted.config);
-    blacklisted.config = {};
-    if (!scratch.ReplaceController(controllerIx, std::move(blacklisted))) {
+    MidiControllerSlot restored = scratch.controllers[controllerIx];
+    if (!runtime_ui::ControllersLayout::InstallDescriptorProfile(Layouts(), *descriptor, restored, reason)) {
+        return false;
+    }
+    if (!scratch.ReplaceController(controllerIx, std::move(restored))) {
         if (reason != nullptr) {
-            *reason = "controller could not be blacklisted";
+            *reason = "controller could not be restored";
         }
         return false;
     }
@@ -2589,23 +3044,65 @@ bool MidiConfigViewModel::BlacklistController(std::size_t controllerIx, MidiInst
     return true;
 }
 
-bool MidiConfigViewModel::RemoveFromBlacklist(std::size_t controllerIx, MidiInstrumentConfig& out,
-                                              std::string* reason) const {
+LaunchpadController MidiConfigViewModel::LaunchpadModel(std::size_t controllerIx) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        return LaunchpadController::LaunchpadX;
+    }
+    return instrument_.controllers[controllerIx].config.launchpadModel;
+}
+
+bool MidiConfigViewModel::SetLaunchpadModel(std::size_t controllerIx, LaunchpadController model,
+                                            MidiInstrumentConfig& out, std::string* reason) const {
     if (controllerIx >= instrument_.controllers.size()) {
         if (reason != nullptr) {
             *reason = "controller does not exist";
         }
         return false;
     }
-    if (instrument_.controllers[controllerIx].disposition != MidiControllerDisposition::Blacklisted) {
+    const MidiControllerSlot& existing = instrument_.controllers[controllerIx];
+    if (existing.kind != MidiProfileKind::Launchpad) {
         if (reason != nullptr) {
-            *reason = "only blacklisted controllers can be removed from blacklist";
+            *reason = "only a Launchpad controller has a model";
+        }
+        return false;
+    }
+    if (existing.config.launchpadModel == model) {
+        if (reason != nullptr) {
+            *reason = "model is unchanged";
         }
         return false;
     }
 
+    // Every position is checked against the chosen model's grid before any is
+    // written, so a model with less room than the row uses leaves the row
+    // exactly as it was rather than dropping the pads that do not fit.
+    for (const MidiControllerSystemMessageAssociation& association : existing.config.systemMessages) {
+        if (!association.launchpadPosition.has_value()) {
+            continue;
+        }
+        const LaunchpadGridPosition& position = *association.launchpadPosition;
+        if (!LaunchpadShapeSupports(model, position.x, position.y)) {
+            if (reason != nullptr) {
+                std::ostringstream oss;
+                oss << "pad (" << position.x << "," << position.y << ") is outside "
+                    << LaunchpadControllerDisplayName(model) << "'s grid";
+                *reason = oss.str();
+            }
+            return false;
+        }
+    }
+
     MidiInstrumentConfig scratch = instrument_;
-    scratch.RemoveController(controllerIx);
+    MidiControllerSlot& slot = scratch.controllers[controllerIx];
+    slot.config.launchpadModel = model;
+    for (MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
+        if (association.launchpadPosition.has_value()) {
+            association.launchpadPosition->controller = model;
+        }
+    }
+    if (!SlotValidForKind(slot, reason)) {
+        return false;
+    }
     out = std::move(scratch);
     return true;
 }
@@ -2622,6 +3119,96 @@ bool MidiConfigViewModel::SetEndpointRef(std::size_t controllerIx, bool output, 
     } else {
         slot.input = std::move(ref);
     }
+    out = std::move(scratch);
+    return true;
+}
+
+std::size_t MidiConfigViewModel::ConnectMessageCount(std::size_t controllerIx) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        return 0;
+    }
+    return instrument_.controllers[controllerIx].config.openSysEx.size();
+}
+
+std::string MidiConfigViewModel::ConnectMessageHex(std::size_t controllerIx, std::size_t messageIx) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        return {};
+    }
+    const std::vector<std::vector<std::uint8_t>>& messages =
+        instrument_.controllers[controllerIx].config.openSysEx;
+    if (messageIx >= messages.size()) {
+        return {};
+    }
+    return FormatSysExHex(messages[messageIx]);
+}
+
+bool MidiConfigViewModel::AddConnectMessage(std::size_t controllerIx, MidiInstrumentConfig& out,
+                                            std::string* reason) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        if (reason != nullptr) {
+            *reason = "controller does not exist";
+        }
+        return false;
+    }
+    MidiInstrumentConfig scratch = instrument_;
+    scratch.controllers[controllerIx].config.openSysEx.push_back({0xF0, 0xF7});
+    out = std::move(scratch);
+    return true;
+}
+
+bool MidiConfigViewModel::SetConnectMessage(std::size_t controllerIx, std::size_t messageIx,
+                                            const std::string& hexText, MidiInstrumentConfig& out,
+                                            std::string* reason) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        if (reason != nullptr) {
+            *reason = "controller does not exist";
+        }
+        return false;
+    }
+    const std::vector<std::vector<std::uint8_t>>& existing =
+        instrument_.controllers[controllerIx].config.openSysEx;
+    if (messageIx >= existing.size()) {
+        if (reason != nullptr) {
+            *reason = "connect message does not exist";
+        }
+        return false;
+    }
+    std::vector<std::uint8_t> parsed;
+    if (!ParseSysExHex(hexText, parsed)) {
+        if (reason != nullptr) {
+            *reason = "connect message must be hex byte pairs, e.g. F0 00 7F F7";
+        }
+        return false;
+    }
+    if (!IsValidSysExMessage(parsed)) {
+        if (reason != nullptr) {
+            *reason = "connect message must be one SysEx message: leading F0, trailing F7, data bytes 00-7F";
+        }
+        return false;
+    }
+    MidiInstrumentConfig scratch = instrument_;
+    scratch.controllers[controllerIx].config.openSysEx[messageIx] = std::move(parsed);
+    out = std::move(scratch);
+    return true;
+}
+
+bool MidiConfigViewModel::DeleteConnectMessage(std::size_t controllerIx, std::size_t messageIx,
+                                               MidiInstrumentConfig& out, std::string* reason) const {
+    if (controllerIx >= instrument_.controllers.size()) {
+        if (reason != nullptr) {
+            *reason = "controller does not exist";
+        }
+        return false;
+    }
+    MidiInstrumentConfig scratch = instrument_;
+    std::vector<std::vector<std::uint8_t>>& messages = scratch.controllers[controllerIx].config.openSysEx;
+    if (messageIx >= messages.size()) {
+        if (reason != nullptr) {
+            *reason = "connect message does not exist";
+        }
+        return false;
+    }
+    messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(messageIx));
     out = std::move(scratch);
     return true;
 }
@@ -2671,8 +3258,8 @@ bool MidiConfigViewModel::DeleteRow(std::size_t controllerIx, MidiConfigSection 
 
 namespace {
 
-// Lowest non-negative integer not present in `used` (sru-11's "+": "append
-// one config with next-free defaults").
+// Lowest non-negative integer not present in `used`. "+" appends one
+// config with next-free defaults.
 std::size_t LowestFree(const std::vector<bool>& used) {
     for (std::size_t ix = 0; ix < used.size(); ++ix) {
         if (!used[ix]) {
@@ -2717,6 +3304,25 @@ std::uint8_t NextFreeCc(const std::vector<EncoderMidiMapping>& mappings, std::ui
 std::uint8_t NextFreeCc(const std::vector<AnalogMidiMapping>& mappings, std::uint8_t channel) {
     std::vector<bool> used(128, false);
     for (const AnalogMidiMapping& mapping : mappings) {
+        if (mapping.control.channel == channel && mapping.control.cc < 128) {
+            used[mapping.control.cc] = true;
+        }
+    }
+    return static_cast<std::uint8_t>(std::min<std::size_t>(LowestFree(used), 127));
+}
+
+// Gestures and app actions share one address space (HasDuplicateAnalogAddress
+// above), so a new app-action row's default cc must dodge both, not just its
+// own kind's existing rows.
+std::uint8_t NextFreeCc(const std::vector<AnalogMidiMapping>& gestures,
+                        const std::vector<AnalogAppActionMapping>& appActions, std::uint8_t channel) {
+    std::vector<bool> used(128, false);
+    for (const AnalogMidiMapping& mapping : gestures) {
+        if (mapping.control.channel == channel && mapping.control.cc < 128) {
+            used[mapping.control.cc] = true;
+        }
+    }
+    for (const AnalogAppActionMapping& mapping : appActions) {
         if (mapping.control.channel == channel && mapping.control.cc < 128) {
             used[mapping.control.cc] = true;
         }
@@ -2774,7 +3380,7 @@ std::pair<std::uint8_t, std::uint8_t> NextFreeGenericAddress(
 }
 
 // Lowest-unused MfTwister side button 0..5 (the only shape twister
-// associations can occupy, D1) -- returns 6 (invalid, refused by the caller)
+// associations can occupy -- returns 6 (invalid, refused by the caller)
 // if all 6 are taken.
 std::size_t NextFreeTwisterButton(const std::vector<MidiControllerSystemMessageAssociation>& associations) {
     std::vector<bool> used(6, false);
@@ -2865,23 +3471,6 @@ std::optional<std::pair<int, int>> NextFreeWrldBldrGridPair(
     return std::nullopt;
 }
 
-// The slot's current Launchpad variant, read from the first launchpad
-// association's controller (default LaunchpadX when the slot has no
-// launchpad associations yet) -- the seed-site counterpart to
-// MidiConfigViewModel::LaunchpadVariantIndex() (same "first association
-// wins, default 0/LaunchpadX otherwise" rule), used by AddSingle/AddBlock's
-// launchpad branches below so a new row/block added to an already-
-// retargeted (e.g. Pro MK3) slot is seeded with THAT variant rather than a
-// hardcoded LaunchpadX (label-launchpad-brief.md Change 2).
-LaunchpadController CurrentLaunchpadVariant(const std::vector<MidiControllerSystemMessageAssociation>& associations) {
-    for (const MidiControllerSystemMessageAssociation& association : associations) {
-        if (association.launchpadPosition.has_value()) {
-            return association.launchpadPosition->controller;
-        }
-    }
-    return LaunchpadController::LaunchpadX;
-}
-
 // Lowest-unused Launchpad (x,y) within the given controller's shape,
 // row-major scan of a generous bounding box (Launchpad coordinates can be
 // -1..9 per LaunchpadShapeSupports).
@@ -2941,100 +3530,6 @@ std::optional<LaunchpadGridPosition> NextFreeLaunchpadGridPair(
     return std::nullopt;
 }
 
-std::optional<LaunchpadController> CurrentLaunchpadVariant(const SectionPresentation& presentation) {
-    for (const PresentationRow& row : presentation.rows) {
-        if (const auto* association = std::get_if<MidiControllerSystemMessageAssociation>(&row.data)) {
-            if (association->launchpadPosition.has_value()) {
-                return association->launchpadPosition->controller;
-            }
-        }
-        if (const auto* block = std::get_if<SystemBlock>(&row.block)) {
-            if (block->kind == MidiProfileKind::Launchpad) {
-                return block->launchpadController;
-            }
-        }
-        if (const auto* button = std::get_if<GridButton>(&row.data)) {
-            if (button->kind == MidiProfileKind::Launchpad) {
-                return button->launchpadController;
-            }
-        }
-        if (const auto* block = std::get_if<GridBlock>(&row.block)) {
-            if (block->kind == MidiProfileKind::Launchpad) {
-                return block->launchpadController;
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-bool RewritePresentationLaunchpadVariant(SectionPresentation& presentation, LaunchpadController newController,
-                                         std::string* reason) {
-    SectionPresentation next = presentation;
-    for (PresentationRow& row : next.rows) {
-        if (auto* association = std::get_if<MidiControllerSystemMessageAssociation>(&row.data)) {
-            if (!association->launchpadPosition.has_value()) {
-                continue;
-            }
-            LaunchpadGridPosition position = *association->launchpadPosition;
-            if (!LaunchpadShapeSupports(newController, position.x, position.y)) {
-                if (reason != nullptr) {
-                    std::ostringstream oss;
-                    oss << "position (" << position.x << "," << position.y
-                        << ") is not valid on this Launchpad variant";
-                    *reason = oss.str();
-                }
-                return false;
-            }
-            position.controller = newController;
-            association->launchpadPosition = position;
-            continue;
-        }
-
-        if (auto* block = std::get_if<SystemBlock>(&row.block)) {
-            if (block->kind != MidiProfileKind::Launchpad) {
-                continue;
-            }
-            SystemBlock candidate = *block;
-            candidate.launchpadController = newController;
-            std::vector<MidiControllerSystemMessageAssociation> expansion;
-            if (!ExpandSystemBlock(candidate, expansion, reason)) {
-                return false;
-            }
-            *block = candidate;
-            continue;
-        }
-
-        if (auto* button = std::get_if<GridButton>(&row.data)) {
-            if (button->kind != MidiProfileKind::Launchpad) {
-                continue;
-            }
-            GridButton candidate = *button;
-            candidate.launchpadController = newController;
-            GridMappingExpansion expansion;
-            if (!ExpandGridButton(candidate, expansion, reason)) {
-                return false;
-            }
-            *button = candidate;
-            continue;
-        }
-
-        if (auto* block = std::get_if<GridBlock>(&row.block)) {
-            if (block->kind != MidiProfileKind::Launchpad) {
-                continue;
-            }
-            GridBlock candidate = *block;
-            candidate.launchpadController = newController;
-            GridMappingExpansion expansion;
-            if (!ExpandGridBlock(candidate, expansion, reason)) {
-                return false;
-            }
-            *block = candidate;
-        }
-    }
-    presentation = std::move(next);
-    return true;
-}
-
 }  // namespace
 
 bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection section,
@@ -3089,6 +3584,31 @@ bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection 
         rowToAppend.kind = RowKind::Individual;
         rowToAppend.group = group;
         rowToAppend.data = mapping;
+    } else if (section == MidiConfigSection::Analogs && group == RowGroup::AnalogAppAction) {
+        if (AnalogActionCatalog().empty()) {
+            if (reason != nullptr) {
+                *reason = "no analog app actions in this app's catalog";
+            }
+            return false;
+        }
+        if (!visibleSlot.config.analogInput.has_value()) {
+            visibleSlot.config.analogInput = AnalogMidiInConfig{};
+        }
+        const std::vector<AnalogMidiMapping>& gestures = visibleSlot.config.analogInput->gestures;
+        const std::vector<AnalogAppActionMapping>& appActions = visibleSlot.config.analogInput->appActions;
+        const std::uint8_t channel = !gestures.empty()      ? gestures.front().control.channel
+                                     : !appActions.empty() ? appActions.front().control.channel
+                                                            : std::uint8_t{0};
+        const UISystemMessageChoice& choice = AnalogActionCatalog().front();
+        AnalogAppActionMapping mapping;
+        mapping.control.channel = channel;
+        mapping.control.cc = NextFreeCc(gestures, appActions, channel);
+        mapping.appAction = choice.appAction;
+        mapping.appActionValue = choice.appActionValue;
+        mapping.appActionIx = choice.appActionIx;
+        rowToAppend.kind = RowKind::Individual;
+        rowToAppend.group = group;
+        rowToAppend.data = mapping;
     } else if (section == MidiConfigSection::SystemMessages && group == RowGroup::Grid) {
         GridButton button;
         button.kind = visibleSlot.kind;
@@ -3111,7 +3631,7 @@ bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection 
             button.x = position->first;
             button.y = position->second;
         } else if (visibleSlot.kind == MidiProfileKind::Launchpad) {
-            const LaunchpadController controller = CurrentLaunchpadVariant(visibleSlot.config.systemMessages);
+            const LaunchpadController controller = visibleSlot.config.launchpadModel;
             const auto position = NextFreeLaunchpadGridPair(
                 visibleSlot.config.systemMessages, visibleSlot.config.pressureInput, controller,
                 /*pair=*/false);
@@ -3138,10 +3658,15 @@ bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection 
         rowToAppend.group = group;
         rowToAppend.data = button;
     } else if (section == MidiConfigSection::SystemMessages && group == RowGroup::System) {
-        const std::size_t sceneIx = NextFreeSystemArg(visibleSlot.config.systemMessages, BlockableMessage::SceneSelect);
         MidiControllerSystemMessageAssociation association;
-        association.press = MessageIn::SceneSelect(0, sceneIx);
-        association.feedback = association.press;
+        if (FindUISystemMessageChoice(UISystemMessage::SceneSelect, MessageCatalog()) != nullptr) {
+            const std::size_t sceneIx =
+                NextFreeSystemArg(visibleSlot.config.systemMessages, BlockableMessage::SceneSelect);
+            association.press = MessageIn::SceneSelect(0, sceneIx);
+            association.feedback = association.press;
+        } else {
+            association = MakeUISystemMessageAssociation(MessageCatalog().front());
+        }
         association.outputFeedback = true;
 
         switch (visibleSlot.kind) {
@@ -3166,7 +3691,7 @@ bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection 
             }
             case MidiProfileKind::Launchpad: {
                 const auto position = NextFreeLaunchpadPosition(
-                    visibleSlot.config.systemMessages, CurrentLaunchpadVariant(visibleSlot.config.systemMessages));
+                    visibleSlot.config.systemMessages, visibleSlot.config.launchpadModel);
                 if (!position.has_value()) {
                     if (reason != nullptr) {
                         *reason = "no free launchpad grid position for a new system row";
@@ -3215,6 +3740,19 @@ bool MidiConfigViewModel::AddSingle(std::size_t controllerIx, MidiConfigSection 
         presentation = rollback;
         return false;
     }
+
+    if (gestureCount_.has_value()) {
+        const std::size_t before = CountGestureReferencesAtOrAbove(instrument_.controllers[controllerIx], *gestureCount_);
+        const std::size_t after = CountGestureReferencesAtOrAbove(slot, *gestureCount_);
+        if (after > before) {
+            if (reason != nullptr) {
+                *reason = "gesture must be an integer 0-" + std::to_string(*gestureCount_ - 1);
+            }
+            presentation = rollback;
+            return false;
+        }
+    }
+
     out = std::move(scratch);
     return true;
 }
@@ -3247,9 +3785,9 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
         return false;
     }
 
-    // Default block width (sru-11: "a small default run" -- see this
-    // method's header doc comment); large enough to demonstrate a block (>=2
-    // per D3/D4) without presuming a huge free range exists.
+    // Default block width (a small default run -- see this
+    // method's header doc comment); large enough to demonstrate a block (>=2)
+    // without presuming a huge free range exists.
     constexpr std::size_t kDefaultBlockWidth = 2;
 
     PresentationRow rowToAppend;
@@ -3318,7 +3856,7 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
             block.startX = position->first;
             block.startY = position->second;
         } else if (visibleSlot.kind == MidiProfileKind::Launchpad) {
-            const LaunchpadController controller = CurrentLaunchpadVariant(visibleSlot.config.systemMessages);
+            const LaunchpadController controller = visibleSlot.config.launchpadModel;
             const auto position = NextFreeLaunchpadGridPair(
                 visibleSlot.config.systemMessages, visibleSlot.config.pressureInput, controller,
                 /*pair=*/true);
@@ -3372,7 +3910,7 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
             block.endY = position->second + 1;
         } else if (visibleSlot.kind == MidiProfileKind::Launchpad) {
             const auto position = NextFreeLaunchpadPosition(
-                visibleSlot.config.systemMessages, CurrentLaunchpadVariant(visibleSlot.config.systemMessages));
+                visibleSlot.config.systemMessages, visibleSlot.config.launchpadModel);
             if (!position.has_value()) {
                 if (reason != nullptr) {
                     *reason = "no free launchpad grid position for a new block";
@@ -3419,12 +3957,25 @@ bool MidiConfigViewModel::AddBlock(std::size_t controllerIx, MidiConfigSection s
         presentation = rollback;
         return false;
     }
+
+    if (gestureCount_.has_value()) {
+        const std::size_t before = CountGestureReferencesAtOrAbove(instrument_.controllers[controllerIx], *gestureCount_);
+        const std::size_t after = CountGestureReferencesAtOrAbove(slot, *gestureCount_);
+        if (after > before) {
+            if (reason != nullptr) {
+                *reason = "gesture must be an integer 0-" + std::to_string(*gestureCount_ - 1);
+            }
+            presentation = rollback;
+            return false;
+        }
+    }
+
     out = std::move(scratch);
     return true;
 }
 
-// Reviewer finding 2 (D6): the renderer's "+" gating used to reimplement
-// this dispatch itself (SectionBody::AddableGroup in ControllersPage.hpp);
+// The renderer's "+" gating used to reimplement
+// this dispatch itself (SectionBody::AddableGroup in ControllersPageUI.hpp);
 // that page-local copy could silently drift from AddSingle's actual switch
 // above. This is the single source of truth both now share -- kept
 // literally adjacent to AddSingle/AddBlock so a future group added to one
@@ -3442,6 +3993,11 @@ bool MidiConfigViewModel::GroupSupportsAdd(std::size_t controllerIx, MidiConfigS
             return section == MidiConfigSection::Encoders;
         case RowGroup::AnalogGesture:
             return section == MidiConfigSection::Analogs;
+        case RowGroup::AnalogAppAction:
+            // An empty catalog (no analog-range app actions) leaves this
+            // group with no legal target, so no add affordance for it --
+            // matches AddSingle's own refusal for the same case.
+            return section == MidiConfigSection::Analogs && !AnalogActionCatalog().empty();
         case RowGroup::System:
             return section == MidiConfigSection::SystemMessages;
         case RowGroup::Grid:
@@ -3456,11 +4012,11 @@ bool MidiConfigViewModel::GroupSupportsAdd(std::size_t controllerIx, MidiConfigS
     return false;
 }
 
-// Reviewer finding 2 (D6): the renderer's "+B" gating used to reimplement
+// The renderer's "+B" gating used to reimplement
 // this dispatch itself (SectionBody::GroupSupportsBlocks in
-// ControllersPage.hpp, including the twister no-block special case); this
+// ControllersPageUI.hpp, including the twister no-block special case); this
 // is now the single source of truth, mirroring AddBlock's own dispatch
-// above (including its MfTwister refusal, D4 point 3) so the two can never
+// above (including its MfTwister refusal) so the two can never
 // drift apart.
 bool MidiConfigViewModel::GroupSupportsBlocks(std::size_t controllerIx, MidiConfigSection section,
                                               MidiMappingRowVM::RowGroup group) const {
@@ -3468,6 +4024,12 @@ bool MidiConfigViewModel::GroupSupportsBlocks(std::size_t controllerIx, MidiConf
         return false;
     }
     using RowGroup = MidiMappingRowVM::RowGroup;
+    if (group == RowGroup::AnalogAppAction) {
+        // Individual only: a gesture row can span a block of
+        // consecutive addresses, but an app-action row's target is a single
+        // catalog choice with no "block of choices" concept to expand into.
+        return false;
+    }
     if (section == MidiConfigSection::SystemMessages && group == RowGroup::System) {
         return instrument_.controllers[controllerIx].kind != MidiProfileKind::MfTwister;
     }
@@ -3483,14 +4045,15 @@ std::vector<MidiMappingRowVM::RowGroup> MidiConfigViewModel::AddableGroups(std::
     // InsertionIndexForGroup/SectionRows' own section-display order, per
     // this method's header doc comment) -- walking the enum in that order
     // and filtering through GroupSupportsAdd (the single dispatch source of
-    // truth AddSingle/AddBlock themselves share, reviewer finding 2) is the
+    // truth AddSingle/AddBlock themselves share) is the
     // only way to build this list, so it can never drift from what
     // GroupSupportsAdd itself would say for any individual group.
     static constexpr MidiMappingRowVM::RowGroup kCanonicalOrder[] = {
         MidiMappingRowVM::RowGroup::EncoderTurn,      MidiMappingRowVM::RowGroup::EncoderPush,
         MidiMappingRowVM::RowGroup::EncoderMode,      MidiMappingRowVM::RowGroup::EncoderStep,
-        MidiMappingRowVM::RowGroup::AnalogGesture,    MidiMappingRowVM::RowGroup::AnalogSceneBlend,
-        MidiMappingRowVM::RowGroup::System,           MidiMappingRowVM::RowGroup::Grid,
+        MidiMappingRowVM::RowGroup::AnalogGesture,    MidiMappingRowVM::RowGroup::AnalogAppAction,
+        MidiMappingRowVM::RowGroup::AnalogSceneBlend, MidiMappingRowVM::RowGroup::System,
+        MidiMappingRowVM::RowGroup::Grid,
     };
     std::vector<MidiMappingRowVM::RowGroup> groups;
     for (const MidiMappingRowVM::RowGroup group : kCanonicalOrder) {
@@ -3522,6 +4085,9 @@ std::vector<MidiMappingRowVM::Field> MidiConfigViewModel::GroupColumnFields(std:
     if (section == MidiConfigSection::Analogs && group == RowGroup::AnalogGesture) {
         return {Field::Channel, Field::Cc, Field::GestureIx};
     }
+    if (section == MidiConfigSection::Analogs && group == RowGroup::AnalogAppAction) {
+        return {Field::Channel, Field::Cc, Field::AppAction};
+    }
     if (section == MidiConfigSection::SystemMessages && group == RowGroup::System) {
         MidiControllerSystemMessageAssociation association;
         association.press = MessageIn::SceneSelect(0, 0);
@@ -3534,109 +4100,6 @@ std::vector<MidiMappingRowVM::Field> MidiConfigViewModel::GroupColumnFields(std:
         return GridButtonEditableFields(button);
     }
     return {};
-}
-
-int MidiConfigViewModel::LaunchpadVariantIndex(std::size_t controllerIx) const {
-    if (controllerIx >= instrument_.controllers.size()) {
-        return -1;
-    }
-    const MidiControllerSlot& slot = instrument_.controllers[controllerIx];
-    if (slot.kind != MidiProfileKind::Launchpad) {
-        return -1;
-    }
-    const PresentationKey key{slot.name, MidiConfigSection::SystemMessages};
-    const auto presentationIt = presentations_.find(key);
-    if (presentationIt != presentations_.end()) {
-        const std::optional<LaunchpadController> openVariant = CurrentLaunchpadVariant(presentationIt->second);
-        if (openVariant.has_value()) {
-            return static_cast<int>(*openVariant);
-        }
-    }
-    for (const MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
-        if (association.launchpadPosition.has_value()) {
-            return static_cast<int>(association.launchpadPosition->controller);
-        }
-    }
-    // No launchpad associations at all (an empty system section) -- default
-    // to index 0 (LaunchpadX), per this method's header doc comment.
-    return 0;
-}
-
-bool MidiConfigViewModel::SetLaunchpadVariant(std::size_t controllerIx, int variantIndex, MidiInstrumentConfig& out,
-                                              std::string* reason) const {
-    if (controllerIx >= instrument_.controllers.size()) {
-        if (reason != nullptr) {
-            *reason = "controller index out of range";
-        }
-        return false;
-    }
-    const MidiControllerSlot& current = instrument_.controllers[controllerIx];
-    if (current.kind != MidiProfileKind::Launchpad) {
-        if (reason != nullptr) {
-            *reason = "this controller is not a Launchpad";
-        }
-        return false;
-    }
-    if (variantIndex < 0 || static_cast<std::size_t>(variantIndex) >= LaunchpadVariantCatalog().size()) {
-        if (reason != nullptr) {
-            *reason = "variant index out of range";
-        }
-        return false;
-    }
-    const LaunchpadController newController = static_cast<LaunchpadController>(variantIndex);
-
-    MidiInstrumentConfig scratch = instrument_;
-    MidiControllerSlot& slot = scratch.controllers[controllerIx];
-    const PresentationKey key{current.name, MidiConfigSection::SystemMessages};
-    const auto presentationIt = presentations_.find(key);
-    if (presentationIt != presentations_.end()) {
-        SectionPresentation& presentation = presentationIt->second;
-        const SectionPresentation rollback = presentation;
-        if (!RewritePresentationLaunchpadVariant(presentation, newController, reason)) {
-            return false;
-        }
-        if (!FlushSectionPresentationToSlot(presentation, slot, MidiConfigSection::SystemMessages, reason)) {
-            presentation = rollback;
-            return false;
-        }
-        out = std::move(scratch);
-        return true;
-    }
-
-    // All-or-nothing (sru-10 convention): validate EVERY existing position
-    // against the new variant's shape before writing anything, so a shrink
-    // that would drop an edge button is refused wholesale rather than
-    // partially applied.
-    for (const MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
-        if (!association.launchpadPosition.has_value()) {
-            continue;
-        }
-        const LaunchpadGridPosition& position = *association.launchpadPosition;
-        if (!LaunchpadShapeSupports(newController, position.x, position.y)) {
-            if (reason != nullptr) {
-                std::ostringstream oss;
-                oss << "position (" << position.x << "," << position.y << ") is not valid on "
-                    << LaunchpadVariantCatalog()[static_cast<std::size_t>(variantIndex)];
-                *reason = oss.str();
-            }
-            return false;
-        }
-    }
-
-    for (MidiControllerSystemMessageAssociation& association : slot.config.systemMessages) {
-        if (!association.launchpadPosition.has_value()) {
-            continue;
-        }
-        association.launchpadPosition->controller = newController;
-    }
-
-    NormalizeMidiProfileConfig(slot.config, slot.kind);
-    if (!SlotValidForKind(slot, reason)) {
-        return false;
-    }
-
-    out = std::move(scratch);
-    return true;
 }
 
 } // namespace synth
