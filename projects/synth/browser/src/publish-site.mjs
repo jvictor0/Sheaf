@@ -20,6 +20,11 @@ export const browserRuntimeModules = Object.freeze([
   "midi.js",
   "package-loader.js",
   "persistence.js",
+  // Sorts before protocol.js and is imported by it: the versions live in a
+  // module Node can load from source, so a .js needs nothing built first. The extension is load-bearing: the site
+// packager copies dist/src/*.js into the browser runtime and drops .mjs as
+// Node-only tooling, so a module the browser fetches cannot be one.
+  "protocol-versions.js",
   "protocol.js",
   "ui.js",
   "worker.js",
