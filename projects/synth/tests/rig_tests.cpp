@@ -1073,12 +1073,67 @@ TEST_CASE(rig_reset_midi_output_processors_is_scoped_to_one_controller) {
     sink0.received.clear();
     sink1.received.clear();
 
-    // Steady state: shiftHeld hasn't changed, so an ordinary tick's output
-    // pass must not resend (both caches already reflect the current state).
+    // Steady state, ui-state-before-audio-corrected (openspec/changes/
+    // ui-state-before-audio): every uiState_-backed association's LIVE value
+    // hasn't changed since the priming round, but the priming round's own
+    // output pass ran BEFORE that same tick's message-thread claim/populate
+    // step -- MessageThreadTick runs the midi output processors' Process()
+    // pass first, as one of its "existing duties", and only attempts the
+    // ui-state-before-audio claim/populate AFTER that (Engine.hpp,
+    // MessageThreadTick, design "Mechanism"). So the priming round's
+    // Process() observed every uiState_-backed value still at its
+    // never-populated default (resetHeld false, both controllers' encoder
+    // echo 0), and only that priming tick's trailing claim first published
+    // the real content. This next tick's output pass is therefore the first
+    // to observe the caught-up state, so TWO independent, deterministic
+    // catch-ups occur here, traced empirically (git-stash bisect + direct
+    // content inspection):
+    //   1. BOTH controllers' encoder-echo association (channel 0 CC 0,
+    //      mirroring each controller's own turn-input address; see
+    //      TwoControllerRigApp::Init) resends once, symmetrically, because
+    //      Alpha/Beta's untouched default (0.25 -> byte 32) only just became
+    //      visible -- unrelated to controller 0's press, present on sink0
+    //      AND sink1 alike.
+    //   2. Controller 0's system-CC association ADDITIONALLY resends once
+    //      because resetHeld itself went false->true. THIS is the part
+    //      actually scoped to one controller: controller 1 watches
+    //      ToggleGestureSelect, which never fires in this instrument (see
+    //      TwoControllerInstrument()'s doc comment) and has no dependency on
+    //      resetHeld at all, so sink1 carries no reset-related content in
+    //      either round.
+    // Before this change, only ProcessBlock's 50-block-throttled publish
+    // ever populated uiState_, and this test's total block count (3) never
+    // reached it, so uiState_ stayed frozen at its pre-press default the
+    // whole test and neither catch-up existed -- the old "both sinks empty"
+    // assertion here passed only by comparing that frozen stale value to
+    // itself, not by exercising real steady-state (no-op) behavior. Do NOT
+    // restore an empty-sink assertion here: these one-tick catch-up resends
+    // after the publisher claim first activates are correct, intended
+    // behavior.
     rig.RunBlocks(1);
     sender->FlushForTests(std::chrono::milliseconds(500));
-    REQUIRE_TRUE(sink0.received.empty());
-    REQUIRE_TRUE(sink1.received.empty());
+
+    REQUIRE_TRUE(sink0.received.size() == 2);
+    bool sawEncoderEcho = false;
+    bool sawResetToggle = false;
+    for (const synth::BasicMidi& midi : sink0.received) {
+        REQUIRE_TRUE(midi.IsCC());
+        const bool encoderEcho = midi.Channel() == 0 && midi.GetCC() == 0 && midi.GetValue() == 32;
+        const bool resetToggle = midi.Channel() == 4 && midi.GetCC() == 10 && midi.GetValue() == 127;
+        REQUIRE_TRUE(encoderEcho || resetToggle);
+        sawEncoderEcho = sawEncoderEcho || encoderEcho;
+        sawResetToggle = sawResetToggle || resetToggle;
+    }
+    REQUIRE_TRUE(sawEncoderEcho);  // Alpha's default-value echo, unrelated to the reset press
+    REQUIRE_TRUE(sawResetToggle);  // resetHeld caught up to "on" -- scoped to controller 0
+
+    REQUIRE_TRUE(sink1.received.size() == 1);
+    REQUIRE_TRUE(sink1.received[0].IsCC());
+    REQUIRE_TRUE(sink1.received[0].Channel() == 0);
+    REQUIRE_TRUE(sink1.received[0].GetCC() == 0);
+    REQUIRE_TRUE(sink1.received[0].GetValue() == 32);  // Beta's own encoder-echo catch-up, unrelated to reset
+    sink0.received.clear();
+    sink1.received.clear();
 
     // Force controller 1's cache to clear; controller 0's cache stays warm.
     rig.Engine().ResetMidiOutputProcessors(1);

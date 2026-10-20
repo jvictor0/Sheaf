@@ -527,7 +527,7 @@ TEST_CASE(miniapp_ratio_grid_declares_independent_set_only_rows_and_feedback) {
     const synth::Color row0Unselected = colorAt(0, 1);
     const synth::Color row1Selected = colorAt(6, 1);
     const synth::Color row1Unselected = colorAt(6, 0);
-    for (const auto [full, dim] : {std::pair{row0Selected, row0Unselected},
+    for (const auto& [full, dim] : {std::pair{row0Selected, row0Unselected},
                                    std::pair{row1Selected, row1Unselected},
                                    std::pair{initialUnityFull, colorAt(3, 0)},
                                    std::pair{initialUnityFullOtherRow, colorAt(3, 1)}}) {

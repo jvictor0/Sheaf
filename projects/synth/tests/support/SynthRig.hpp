@@ -183,11 +183,6 @@ public:
         engine_.UiBus().Push(synth::MessageIn::Stop(timestamp));
     }
 
-    void ExternalStartAt(std::size_t controllerSlot, std::uint64_t timestamp) {
-        engine_.MidiBus().Push(synth::MessageIn::Start(
-            timestamp, synth::MessageIn::Origin::ExternalMidi, controllerSlot));
-    }
-
     void ExternalContinueAt(std::size_t controllerSlot, std::uint64_t timestamp) {
         engine_.MidiBus().Push(synth::MessageIn::Continue(
             timestamp, synth::MessageIn::Origin::ExternalMidi, controllerSlot));
@@ -312,16 +307,12 @@ public:
     std::optional<synth::ClockTimePoint> ClockTimeAtSample(double sample) const {
         return engine_.Clock().TimeAtSample(sample);
     }
-    std::optional<synth::ClockTimePoint> ClockTimeAtTimestamp(std::uint64_t timestamp) const {
-        return engine_.Clock().TimeAtTimestamp(timestamp);
-    }
     std::span<const synth::ScheduledMidiEvent> ScheduledMidiEvents() const {
         return scheduledMidiSink_.Events();
     }
     std::uint64_t DroppedScheduledMidiEventCount() const {
         return scheduledMidiSink_.DroppedCount();
     }
-    void ClearScheduledMidiEvents() { scheduledMidiSink_.Clear(); }
 
     // Test-support: install a full MIDI instrument (any number of controller
     // slots) as the engine's live instrument and rebuild the MIDI processors
