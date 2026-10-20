@@ -1,5 +1,6 @@
 #include "FakeAudioDeviceType.hpp"
 #include "JuceRuntimeMainServices.hpp"
+#include "LauncherWindow.hpp"
 #include "MiniApp.hpp"
 #include "MiniAppUiModel.hpp"
 #include "HostDataPaths.hpp"
@@ -110,13 +111,63 @@ struct WideDrawApp final {
     WideDrawSurface surface;
 };
 
+// Fix round 1, finding 1 (sprs-13, Task 8 review): a production-wiring
+// fixture. Unlike WideDrawSurface above, this surface also implements
+// ui::ExtentAwareSurface, so it observes whether MainPane::resized() ever
+// reaches RuntimeMainComponent::SetContentExtent() when a real JUCE window
+// is resized -- the exact gap the finding identified (SetContentExtent()
+// existed and was unit-tested, but nothing in the shipped app called it).
+struct WiringExtentAwareSurface final : synth::ui::Surface, synth::ui::ExtentAwareSurface {
+    synth::ui::NodeTree BuildTree() override {
+        synth::ui::Node root;
+        root.id = "wiring.extent.root";
+        root.kind = synth::ui::NodeKind::Root;
+        root.bounds = extent;
+        return synth::ui::NodeTree{{std::move(root)}};
+    }
+
+    void SetActionHandler(ActionHandler handler) override { actionHandler = std::move(handler); }
+    void DispatchAction(const synth::ui::Action&) override {}
+
+    void SetContentExtent(synth::ui::Bounds newExtent) override {
+        ++extentOffers;
+        extent = newExtent;
+    }
+
+    int extentOffers = 0;
+    synth::ui::Bounds extent{0.0f, 0.0f, 640.0f, 480.0f};
+    ActionHandler actionHandler;
+};
+
+struct WiringExtentAwareApp final {
+    static synth::RuntimeConfig Config() {
+        synth::RuntimeConfig config;
+        config.appName = "WiringExtentAwareTest";
+        config.numAudioInputs = 0;
+        config.numAudioOutputs = 0;
+        config.uiWidth = 640;
+        config.uiHeight = 480;
+        config.uiFrameHz = 30;
+        return config;
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+    synth::ui::Surface& PortableSurface() { return surface; }
+
+    WiringExtentAwareSurface surface;
+};
+
 // --- JUCE audio input negotiation (sar-31, sar-6, sru-3) -------------------
 //
 // Every scenario below drives a synth_juce::FakeAudioDeviceType instead of the
 // developer's real hardware (see FakeAudioDeviceType.hpp for why that is
-// hermetic), so a test can hand the runtime device blocks no real driver would
-// produce on demand: more channels than the app requested, fewer than the app
-// requested, and a null pointer inside the counted prefix.
+// hermetic). A device channel count narrower than the application requested
+// is staged the way real hardware reports it: by giving the fake device
+// fewer channels than the app asks for, so open() negotiates the shortfall.
+// The one shape no real driver callback lets a test produce on demand -- a
+// null pointer inside the counted prefix -- is still staged directly through
+// RunBlock().
 
 struct EmptySurface final : synth::ui::Surface {
     synth::ui::NodeTree BuildTree() override {
@@ -318,8 +369,7 @@ public:
     void RunBlock(DeviceBlockBuffers& buffers) {
         synth_juce::FakeAudioDevice* device = deviceType_->CurrentDevice();
         Require(device != nullptr, "fake device is open before a block is delivered");
-        device->RunBlock(buffers.Inputs(), buffers.NumInputChannels(), buffers.Outputs(),
-                         buffers.NumOutputChannels(), buffers.NumFrames());
+        device->RunBlock(buffers.Inputs(), buffers.Outputs(), buffers.NumFrames());
         runtime_.PublishPendingInputStatus();
     }
 
@@ -376,10 +426,15 @@ void CheckZeroInputApplication(const std::filesystem::path& parent) {
     Require(host.Status().find("Input requested") == std::string::npos,
             "zero-input application publishes no requested/active input diagnostic");
 
-    // The device offers two input channels anyway: none of them may reach the
-    // application's block.
+    // The device has two input channels available -- opening it anyway (a
+    // direct selection, bypassing the hidden combo) must not leak any of them
+    // into the zero-input application's block: the application's own request
+    // of zero is the ceiling regardless of what the device offers.
+    host.Get().ApplyAudioDeviceInputSelection("Fake In A");
+    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName == "Fake In A",
+            "the device with input channels available is actually open");
+
     DeviceBlockSpec spec;
-    spec.inputChannels = {1.0f, 2.0f};
     DeviceBlockBuffers buffers(spec);
     host.RunBlock(buffers);
 
@@ -400,16 +455,22 @@ void CheckShortfallRequest(const std::filesystem::path& parent) {
     FakeDeviceRuntime<InputProbeApp<17>> host(FreshRoot(parent, "seventeen-input"), 4, 2);
     host.Start();
 
-    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName == "Fake In A",
-            "input-capable application opens the default input device");
+    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName.isEmpty(),
+            "input-capable application opens no input device at startup");
     Require(host.ShowsInputCombo(), "input-capable application shows the input selector");
-    Require(host.Status() == "Input requested 17 / active 4",
-            "startup publishes the negotiated requested/active input diagnostic");
+    Require(host.Status() == "Input requested 17 / active 0",
+            "startup publishes the requested/active input diagnostic with no device open");
     // MainPane and its Audio page are constructed after Start() returns, so a
     // status sink installed later must be handed the current diagnostic rather
     // than waiting for the next active-count change.
-    Require(host.StatusAfterFreshHook() == "Input requested 17 / active 4",
+    Require(host.StatusAfterFreshHook() == "Input requested 17 / active 0",
             "a status sink installed after startup receives the current input diagnostic");
+
+    // Opening the 4-channel device negotiates the shortfall at open, not at
+    // callback time: the device has fewer channels than the 17 requested.
+    host.Get().ApplyAudioDeviceInputSelection("Fake In A");
+    Require(host.Status() == "Input requested 17 / active 4 - Audio In: Fake In A",
+            "a device narrower than the request negotiates its actual channel count on selection");
 
     DeviceBlockSpec spec;
     spec.inputChannels = {10.0f, 20.0f, 30.0f, 40.0f};
@@ -427,54 +488,42 @@ void CheckShortfallRequest(const std::filesystem::path& parent) {
             "safe access returns device samples below the active count and silence above it");
     Require(observed.firstFrameOrSilence[16] == 0.0f,
             "the last requested channel reads as silence when the device does not supply it");
-    Require(host.Status() == "Input requested 17 / active 4",
+    Require(host.Status() == "Input requested 17 / active 4 - Audio In: Fake In A",
             "a matching callback shape leaves the diagnostic unchanged");
     Require(observed.outputChannel0Frame0 == kOutputMarker,
             "an input shortfall does not stop output");
 }
 
-// A device that delivers more channels than requested is clamped to the
-// requested prefix, and one that delivers fewer republishes the diagnostic
-// without stopping output (sar-6, sar-31).
+// A device with fewer input channels available than the application
+// requested -- a mono microphone answering a stereo request -- negotiates the
+// shortfall at open, and the application observes only the channels the
+// device actually delivers, with output unaffected (sar-6, sar-31).
 void CheckCallbackShapeNegotiation(const std::filesystem::path& parent) {
-    FakeDeviceRuntime<InputProbeApp<2>> host(FreshRoot(parent, "two-input"), 2, 2);
+    FakeDeviceRuntime<InputProbeApp<2>> host(FreshRoot(parent, "narrower-input"), 1, 2);
     host.Start();
-    Require(host.Status() == "Input requested 2 / active 2",
-            "a fully satisfied request publishes matching requested/active counts");
+    Require(host.Status() == "Input requested 2 / active 0",
+            "no input device is open yet, so startup reports a zero active count");
 
-    DeviceBlockSpec wide;
-    wide.inputChannels = {1.0f, 2.0f, 3.0f, 4.0f};
-    DeviceBlockBuffers wideBuffers(wide);
-    host.RunBlock(wideBuffers);
-    {
-        const ObservedInput& observed = host.Observed();
-        Require(observed.numInputChannels == 2,
-                "a device callback wider than the request is clamped to the requested prefix");
-        Require(observed.activeChannelCount == 2 && observed.requestedChannelCount == 2,
-                "the clamped view exposes only the requested prefix");
-        Require(observed.firstFrameOrSilence[0] == 1.0f && observed.firstFrameOrSilence[1] == 2.0f,
-                "the clamped prefix keeps the device's leading channels");
-        Require(host.Status() == "Input requested 2 / active 2",
-                "extra device channels do not change the published active count");
-    }
+    host.Get().ApplyAudioDeviceInputSelection("Fake In A");
+    Require(host.Status() == "Input requested 2 / active 1 - Audio In: Fake In A",
+            "a device narrower than the request negotiates its actual channel count on selection");
 
-    DeviceBlockSpec narrow;
-    narrow.inputChannels = {7.0f};
-    DeviceBlockBuffers narrowBuffers(narrow);
-    host.RunBlock(narrowBuffers);
-    {
-        const ObservedInput& observed = host.Observed();
-        Require(observed.numInputChannels == 1, "a narrower device callback reports its actual count");
-        Require(observed.hasActiveChannel[0] && !observed.hasActiveChannel[1],
-                "the missing channel is inactive rather than fabricated");
-        Require(observed.firstFrameOrSilence[0] == 7.0f && observed.firstFrameOrSilence[1] == 0.0f,
-                "safe access returns silence for the missing channel");
-        Require(host.Status() == "Input requested 2 / active 1",
-                "a callback shape change republishes the requested/active diagnostic");
-        Require(observed.outputChannel0Frame0 == kOutputMarker &&
-                    observed.outputChannel1Frame0 == kOutputMarker + 1.0f,
-                "a callback shape change does not stop output");
-    }
+    DeviceBlockSpec spec;
+    spec.inputChannels = {7.0f};
+    DeviceBlockBuffers buffers(spec);
+    host.RunBlock(buffers);
+
+    const ObservedInput& observed = host.Observed();
+    Require(observed.numInputChannels == 1, "a narrower device reports its actual negotiated count");
+    Require(observed.hasActiveChannel[0] && !observed.hasActiveChannel[1],
+            "the missing channel is inactive rather than fabricated");
+    Require(observed.firstFrameOrSilence[0] == 7.0f && observed.firstFrameOrSilence[1] == 0.0f,
+            "safe access returns silence for the missing channel");
+    Require(host.Status() == "Input requested 2 / active 1 - Audio In: Fake In A",
+            "the negotiated shape leaves the diagnostic unchanged across a delivered block");
+    Require(observed.outputChannel0Frame0 == kOutputMarker &&
+                observed.outputChannel1Frame0 == kOutputMarker + 1.0f,
+            "a narrower input device does not stop output");
 }
 
 // A null pointer inside the counted range keeps its logical channel position
@@ -482,6 +531,7 @@ void CheckCallbackShapeNegotiation(const std::filesystem::path& parent) {
 void CheckCountedNullChannel(const std::filesystem::path& parent) {
     FakeDeviceRuntime<InputProbeApp<3>> host(FreshRoot(parent, "null-channel"), 3, 2);
     host.Start();
+    host.Get().ApplyAudioDeviceInputSelection("Fake In A");
 
     DeviceBlockSpec spec;
     spec.inputChannels = {5.0f, std::nullopt, 9.0f};
@@ -521,11 +571,11 @@ void CheckMissingPersistedInputDevice(const std::filesystem::path& parent) {
         host.Get().DeviceManager().getAudioDeviceSetup();
     Require(setup.outputDeviceName == "Fake Out B",
             "a missing input device leaves the persisted output device selected");
-    Require(setup.inputDeviceName == "Fake In A",
-            "a missing input device leaves the already-open input device alone");
+    Require(setup.inputDeviceName.isEmpty(),
+            "a missing persisted input device opens no input device at all");
     Require(host.Get().DeviceManager().getCurrentAudioDevice() != nullptr,
             "a missing input device leaves the audio device open");
-    Require(host.Status() == "Input requested 2 / active 2 - audio input device not found: Ghost In",
+    Require(host.Status() == "Input requested 2 / active 0 - audio input device not found: Ghost In",
             "the missing-device diagnostic is appended to the stable input status");
 
     DeviceBlockSpec spec;
@@ -534,6 +584,54 @@ void CheckMissingPersistedInputDevice(const std::filesystem::path& parent) {
     host.RunBlock(buffers);
     Require(host.Observed().outputChannel0Frame0 == kOutputMarker,
             "output keeps running after a missing input device");
+}
+
+// External-input-routed signal: with no input device open at startup, the
+// signal is not routed; a live user selection routes it with a
+// message-thread callback, and deselecting back to no input un-routes it
+// with another callback -- no app restart either way.
+void CheckInputRoutedSignal(const std::filesystem::path& parent) {
+    FakeDeviceRuntime<InputProbeApp<2>> host(FreshRoot(parent, "input-routed-signal"), 2, 2);
+    host.Start();
+
+    synth::AppContext& context = host.Get().GetEngine().Context();
+    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName.isEmpty(),
+            "no input device is open at startup");
+    Require(!context.InputRouted(),
+            "with no input device open, the routed signal is not routed");
+
+    std::vector<bool> notifications;
+    std::vector<synth::ThreadId> notificationThreads;
+    context.SetInputRoutedChangedCallback([&](bool routed) {
+        notifications.push_back(routed);
+        notificationThreads.push_back(synth::GetCurrentThreadId());
+    });
+
+    host.Get().ApplyAudioDeviceInputSelection("Fake In B");
+    Require(context.InputRouted(), "selecting a named input device routes the signal");
+    Require(notifications.size() == 1 && notifications[0] == true,
+            "the change callback fires exactly once on the selecting edge");
+    Require(notificationThreads[0] == synth::ThreadId::Message,
+            "the change callback runs on the message thread");
+
+    host.Get().ApplyAudioDeviceInputSelection("");
+    Require(!context.InputRouted(), "deselecting back to System Default un-routes the signal");
+    Require(notifications.size() == 2 && notifications[1] == false,
+            "the change callback fires exactly once on the deselecting edge");
+    Require(notificationThreads[1] == synth::ThreadId::Message,
+            "the deselecting callback also runs on the message thread");
+
+    // A block delivered while routed is unaffected -- the signal augments,
+    // never replaces, the existing input negotiation path, and does not
+    // itself change on every block.
+    host.Get().ApplyAudioDeviceInputSelection("Fake In B");
+    notifications.clear();
+    DeviceBlockSpec spec;
+    spec.inputChannels = {1.0f, 2.0f};
+    DeviceBlockBuffers buffers(spec);
+    host.RunBlock(buffers);
+    Require(context.InputRouted(), "the signal stays routed across a delivered block");
+    Require(notifications.empty(), "delivering a block does not itself change the signal");
 }
 
 // A device switch stops, re-prepares, and restarts before any further callback,
@@ -548,8 +646,8 @@ void CheckDeviceSwitchLifecycle(const std::filesystem::path& parent) {
     host.Get().ApplyAudioDeviceSelection("Fake Out B");
 
     const std::vector<std::string> expectedOutputSwitch{
-        "Fake Out A+Fake In A:stop", "Fake Out A+Fake In A:destroy",
-        "Fake Out B+Fake In A:open", "Fake Out B+Fake In A:start"};
+        "Fake Out A+(none):stop", "Fake Out A+(none):destroy",
+        "Fake Out B+(none):open", "Fake Out B+(none):start"};
     Require(host.DeviceType().Lifecycle() == expectedOutputSwitch,
             "an output device switch stops and destroys the old device before starting the new one");
     Require(host.Observed().prepareCount == preparesBeforeOutputSwitch + 1,
@@ -564,7 +662,7 @@ void CheckDeviceSwitchLifecycle(const std::filesystem::path& parent) {
     host.Get().ApplyAudioDeviceInputSelection("Fake In B");
 
     const std::vector<std::string> expectedInputSwitch{
-        "Fake Out B+Fake In A:stop", "Fake Out B+Fake In A:destroy",
+        "Fake Out B+(none):stop", "Fake Out B+(none):destroy",
         "Fake Out B+Fake In B:open", "Fake Out B+Fake In B:start"};
     Require(host.DeviceType().Lifecycle() == expectedInputSwitch,
             "an input device switch stops and destroys the old device before starting the new one");
@@ -598,10 +696,10 @@ void CheckDeviceSwitchLifecycle(const std::filesystem::path& parent) {
             "a device switch leaves the delegated frame count and output shape unchanged");
 }
 
-// Portable "System Default" input is an empty host-neutral name, but an empty
-// AudioDeviceSetup::inputDeviceName is how JUCE says "no input device at all".
-// The host must resolve a concrete native default for the setup while the
-// persisted name stays empty (sru-3, sar-30).
+// Portable "System Default" input is an empty host-neutral name, and an empty
+// AudioDeviceSetup::inputDeviceName is how JUCE says "no input device at
+// all" -- which is exactly what System Default input now means: no device
+// opens, no capture happens, and the routed signal follows.
 void CheckSystemDefaultInputSelection(const std::filesystem::path& parent) {
     FakeDeviceRuntime<InputProbeApp<2>> host(FreshRoot(parent, "system-default-input"), 2, 2);
     host.Start();
@@ -613,21 +711,12 @@ void CheckSystemDefaultInputSelection(const std::filesystem::path& parent) {
     host.Get().ApplyAudioDeviceInputSelection("");
     Require(host.Get().GetEngine().AudioDeviceSnapshot().inputDeviceName.empty(),
             "System Default input persists the empty host-neutral name");
-    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName == "Fake In A",
-            "System Default input resolves to the concrete native default input device");
-    Require(host.Status() == "Input requested 2 / active 2 - Audio In: System Default",
-            "System Default input keeps a nonzero active count");
-
-    DeviceBlockSpec spec;
-    spec.inputChannels = {11.0f, 12.0f};
-    DeviceBlockBuffers buffers(spec);
-    host.RunBlock(buffers);
-
-    const ObservedInput& observed = host.Observed();
-    Require(observed.numInputChannels == 2 && observed.activeChannelCount == 2,
-            "System Default input keeps capture active");
-    Require(observed.firstFrameOrSilence[0] == 11.0f && observed.firstFrameOrSilence[1] == 12.0f,
-            "System Default input still delivers device samples");
+    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName.isEmpty(),
+            "System Default input opens no input device at all");
+    Require(host.Status() == "Input requested 2 / active 0 - Audio In: System Default",
+            "System Default input reports a zero active count");
+    Require(!host.Get().GetEngine().Context().InputRouted(),
+            "System Default input is not routed");
 }
 
 // A device that is enumerated but fails to open (already in use, permission
@@ -638,8 +727,8 @@ void CheckInputDeviceOpenFailure(const std::filesystem::path& parent) {
     FakeDeviceRuntime<InputProbeApp<2>> host(FreshRoot(parent, "input-open-failure"), 2, 2);
     host.DeviceType().FailOpenForInputDevice("Fake In B");
     host.Start();
-    Require(host.Status() == "Input requested 2 / active 2",
-            "startup succeeds on the working default input device");
+    Require(host.Status() == "Input requested 2 / active 0",
+            "startup opens no input device, so the failing device is never attempted");
 
     const std::string expectedStatus =
         "Input requested 2 / active 0 - Fake input device open failed: Fake In B";
@@ -693,6 +782,57 @@ void CheckNegativeInputRequestRejected(const std::filesystem::path& parent) {
             "a negative input request opens no audio device");
 }
 
+// The host does not open an input device merely because the application
+// requested input channels -- only an explicit device selection does. With
+// no selection made, startup opens no input device and reports a zero
+// active count.
+void CheckNoInputDeviceOpensWithoutSelection(const std::filesystem::path& parent) {
+    FakeDeviceRuntime<InputProbeApp<2>> host(FreshRoot(parent, "no-selection-no-input"), 2, 2);
+    host.Start();
+
+    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName.isEmpty(),
+            "an input-capable application opens no input device at startup");
+    Require(host.Get().DeviceManager().getCurrentAudioDevice() != nullptr,
+            "output still opens with no input device selected");
+    Require(host.Status() == "Input requested 2 / active 0",
+            "startup reports a zero active input count with no device open");
+}
+
+// The positive control for the scenario above: an operator selection
+// actually opens the named input device and negotiates the requested input
+// channels, proving that a zero active count elsewhere in this suite means
+// no device was open rather than a harness that can never open one.
+void CheckSelectedInputDeviceDeliversChannels(const std::filesystem::path& parent) {
+    FakeDeviceRuntime<InputProbeApp<2>> host(FreshRoot(parent, "selection-opens-input"), 2, 2);
+    host.Start();
+
+    host.Get().ApplyAudioDeviceInputSelection("Fake In B");
+
+    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName == "Fake In B",
+            "selecting a named input device opens it");
+    Require(host.Status() == "Input requested 2 / active 2 - Audio In: Fake In B",
+            "the selected input device negotiates the requested channel count");
+}
+
+// Deselecting back to no input closes the input device and un-routes the
+// external-input-routed signal.
+void CheckDeselectingInputClosesDeviceAndUnroutes(const std::filesystem::path& parent) {
+    FakeDeviceRuntime<InputProbeApp<2>> host(FreshRoot(parent, "deselect-closes-input"), 2, 2);
+    host.Start();
+    host.Get().ApplyAudioDeviceInputSelection("Fake In B");
+    Require(host.Get().GetEngine().Context().InputRouted(),
+            "a named input selection routes the signal before it is deselected");
+
+    host.Get().ApplyAudioDeviceInputSelection("");
+
+    Require(host.Get().DeviceManager().getAudioDeviceSetup().inputDeviceName.isEmpty(),
+            "deselecting input closes the input device");
+    Require(host.Status() == "Input requested 2 / active 0 - Audio In: System Default",
+            "deselecting input returns the active count to zero");
+    Require(!host.Get().GetEngine().Context().InputRouted(),
+            "deselecting input returns the routed signal to not-routed");
+}
+
 void CheckJuceAudioInputNegotiation() {
     const std::filesystem::path parent =
         std::filesystem::temp_directory_path() / "sheaf-runtime-audio-input-test";
@@ -703,10 +843,14 @@ void CheckJuceAudioInputNegotiation() {
     CheckCallbackShapeNegotiation(parent);
     CheckCountedNullChannel(parent);
     CheckMissingPersistedInputDevice(parent);
+    CheckInputRoutedSignal(parent);
     CheckDeviceSwitchLifecycle(parent);
     CheckSystemDefaultInputSelection(parent);
     CheckInputDeviceOpenFailure(parent);
     CheckNegativeInputRequestRejected(parent);
+    CheckNoInputDeviceOpensWithoutSelection(parent);
+    CheckSelectedInputDeviceDeliversChannels(parent);
+    CheckDeselectingInputClosesDeviceAndUnroutes(parent);
 
     std::filesystem::remove_all(parent);
 }
@@ -757,6 +901,19 @@ int main() {
             "runtime shell content width adds the shared sidebar");
     Require(session.Component().getHeight() == config.uiHeight,
             "runtime shell content height preserves the app height");
+
+    {
+        // sprs-15: MainWindow::ShowContent(component) derives the window's
+        // size from the shell component's own (already-intrinsic) bounds
+        // rather than the app's raw config.uiWidth/uiHeight, so the window
+        // is wide enough to show the sidebar without resizing.
+        synth_runtime::MainWindow window("runtime shell session sizing test");
+        window.ShowContent(session.Component());
+        Require(window.getWidth() == config.uiWidth + 96,
+                "launch window width derives from the shell's intrinsic bounds, not raw config width");
+        Require(window.getHeight() == config.uiHeight,
+                "launch window height derives from the shell's intrinsic bounds, not raw config height");
+    }
 
     std::vector<synth_juce::PortableComponent*> renderers;
     CollectPortableComponents(session.Component(), renderers);
@@ -970,6 +1127,76 @@ int main() {
     juce::Component* wideDraw = wideRenderers.front()->FindByNodeId("wide.draw");
     Require(wideDraw != nullptr && wideDraw->getBounds().getRight() == 900,
             "full-width app draw reaches x 900 without clipping");
+
+    // Fix round 1, finding 1 (sprs-13, Task 8 review): production wiring.
+    // RuntimeMainComponent::SetContentExtent() existed and was
+    // unit/parity-tested (runtime_main_component_tests,
+    // browser_runtime_contract_tests) before this fix, but nothing in the
+    // shipped JUCE app ever called it, so a real window resize never reached
+    // an ExtentAwareSurface app. This constructs a real RuntimeShellSession
+    // (the same construction path SynthMiniapp uses) around
+    // WiringExtentAwareApp and drives an actual JUCE resize through the
+    // top-level shell component, then asserts -- through the app's own
+    // surface object, reached via Runtime::AppSurface() -- that the offered
+    // extent tracks it.
+    const std::filesystem::path wiringExtentRoot = root / "wiring-extent";
+    synth_runtime::RuntimeShellSession<WiringExtentAwareApp> wiringSession(
+        synth::RuntimeDataPaths::FromRoots(wiringExtentRoot,
+                                           wiringExtentRoot / "patches",
+                                           wiringExtentRoot / "logs",
+                                           wiringExtentRoot / "config"));
+    auto* wiringSurface =
+        dynamic_cast<WiringExtentAwareSurface*>(&wiringSession.GetRuntime().AppSurface());
+    Require(wiringSurface != nullptr, "wiring test app's extent-aware surface is reachable "
+                                      "through the runtime");
+    Require(wiringSurface->extentOffers >= 1,
+            "constructing the shell already offers the extent-aware surface its initial "
+            "content extent (via MainPane's constructor-time RefreshOnTick), matching "
+            "runtime_main_component_tests' unit coverage of the same hook");
+
+    // Fix round 2 (sprs-13 Task 8 re-review): RuntimeShellSession's
+    // constructor sizes the shell to MainPane::IntrinsicBounds() -- the
+    // composite footprint, config.uiWidth(640) + kSidebarWidth(96) = 736
+    // wide, 480 tall (Shell.hpp:86-87). That construction-time resize
+    // already ran through the fixed MainPane::resized(), so the extent
+    // offered to the app by now must already be the CONTENT area (736 - 96
+    // = 640, 480) -- exactly WiringExtentAwareApp's own declared
+    // config.uiWidth/uiHeight -- not the full 736-wide composite pane.
+    Require(wiringSurface->extent.width == 640.0f && wiringSurface->extent.height == 480.0f,
+            "the shell's construction-time resize already offers the app its sidebar-free "
+            "content extent (pane width minus Layout::kSidebarWidth), matching its own "
+            "declared config.uiWidth/uiHeight");
+
+    // RuntimeMainComponent::BuildTree() unconditionally re-offers whatever
+    // liveContentExtent_ it currently holds to an ExtentAwareSurface app on
+    // *every* call (RuntimeMainComponent.hpp:134-137), including the
+    // RefreshFromSurface() call resized() already made before this fix -- so
+    // extentOffers alone climbs regardless of whether MainPane wires the new
+    // JUCE bounds through. The value offered is the only thing that can
+    // distinguish "wired" from "not wired"; capture it before resizing and
+    // require it to actually change to the new size, not merely that another
+    // offer happened.
+    const synth::ui::Bounds extentBeforeResize = wiringSurface->extent;
+    wiringSession.Component().setSize(800, 600);
+    Require(wiringSurface->extent.width != extentBeforeResize.width ||
+                wiringSurface->extent.height != extentBeforeResize.height,
+            "resizing the shell's real JUCE top-level component changes the extent offered "
+            "to the app surface -- the production wiring gap finding 1 identified (before "
+            "the fix, MainPane::resized() never called RuntimeMainComponent::"
+            "SetContentExtent(), so the app kept resolving at its original extent regardless "
+            "of window size)");
+    // Fix round 2: the offered width is the pane's new width (800) MINUS
+    // the sidebar (96) = 704, not the raw 800 -- otherwise an extent-aware
+    // app would resolve at the full pane width and BuildTree() would place
+    // the sidebar at x 800, past the 800-wide pane's own right edge
+    // (RuntimeMainComponent.hpp:156, sidebar x == resolved app root width).
+    // Height is unaffected: the sidebar sits beside the content, not above
+    // or below it.
+    Require(wiringSurface->extent.width == 704.0f && wiringSurface->extent.height == 600.0f,
+            "the offered extent is MainPane's live JUCE bounds with the sidebar's width "
+            "subtracted (pane 800 wide - Layout::kSidebarWidth 96 = 704), matching the app "
+            "CONTENT area the composition actually places beside the sidebar, not the pane's "
+            "full composite footprint");
 
     {
         auto owner = synth_runtime::MakeRuntimeSessionOwner<synth_miniapp::MiniApp>(paths);

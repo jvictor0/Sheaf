@@ -81,7 +81,8 @@ test("builds every record through one argument-vector compiler policy and writes
       "_synth_browser_audio_input_channels",
       "_synth_browser_set_audio_input_source",
       "_synth_browser_clear_audio_input_source",
-      "_synth_browser_consume_audio_input_retry",
+      "_synth_browser_consume_pending_audio_request",
+      "_synth_browser_submit_audio_devices",
     ]) {
       assert.ok(args.some((arg) => arg.includes(inputExport)), `missing browser audio input export ${inputExport}`);
     }
