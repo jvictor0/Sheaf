@@ -39,9 +39,6 @@ async function assertNoContentSidebarOverlap(page: Page): Promise<void> {
 }
 
 const TWISTER_DISPLAY_NAME = "MIDI Fighter Twister";
-// The row shows the persisted hardware-kind identity; "MF Twister" is the
-// add-controller dropdown's label for the same kind.
-const TWISTER_KIND_LABEL = "twister";
 const TWISTER_WIZARD_DEFAULTS = [
   "Hold Reset",
   "Hold Random",
@@ -362,7 +359,7 @@ async function expectReconciledEndpoints(page: Page, index: number, ordinal: num
 async function assertActiveTwisterRecord(page: Page, index: number, name: string, ordinal: number, slot: string): Promise<void> {
   const row = controllerRow(page, index);
   await expect(row.locator(synthNode(`runtime.controllers.row.${index}.name`))).toHaveText(name);
-  await expect(row.locator(synthNode(`runtime.controllers.row.${index}.kind`))).toHaveText(TWISTER_KIND_LABEL);
+  await expect(row.locator(synthNode(`runtime.controllers.row.${index}.device`))).toHaveText(TWISTER_DISPLAY_NAME);
   await expectReconciledEndpoints(page, index, ordinal);
   // Reconfigure and Blacklist are offered only when the record's persisted
   // wizard id resolves in the registry, so their presence is how an installed
@@ -538,17 +535,23 @@ test("controller wizard actions are absent on a manually added record", async ({
   await installRealFakeApp(page);
 
   await page.locator(synthNode("runtime.sidebar.controllers")).click();
-  await page.locator(`${synthNode("runtime.controllers.add_name")} input`).fill("Hand Wired");
-  await page.locator(`${synthNode("runtime.controllers.add_kind")} select`).selectOption({ label: "MF Twister" });
+  await page.locator(`${synthNode("runtime.controllers.add_preset")} select`).selectOption({ label: "Custom" });
   await page.locator(synthNode("runtime.controllers.add_button")).click();
 
   const row = controllerRow(page, 0);
-  await expect(row.locator(synthNode("runtime.controllers.row.0.name"))).toHaveText("Hand Wired");
-  await expect(row.locator(synthNode("runtime.controllers.row.0.kind"))).toHaveText(TWISTER_KIND_LABEL);
-  await expect(row.locator(synthNode("runtime.controllers.row.0.rename"))).toBeVisible();
+  await expect(row.locator(synthNode("runtime.controllers.row.0.name"))).toHaveText("Custom");
+  // A Custom row adds through no preset and binds no endpoints, so it
+  // renders neither a preset device name nor a stored endpoint label -- the
+  // page's no-input placeholder is what it actually shows.
+  await expect(row.locator(synthNode("runtime.controllers.row.0.device"))).toHaveText("(none)");
   await expect(row.locator(synthNode("runtime.controllers.row.0.delete"))).toBeVisible();
+  // Rename lives in the row's expanded editor, rendered as a tree sibling of
+  // the row's own header container rather than nested under it, so this one
+  // is queried from the page, not scoped through `row`.
+  await page.locator(synthNode("runtime.controllers.row.0.disclosure")).click();
+  await expect(page.locator(synthNode("runtime.controllers.row.0.rename"))).toBeVisible();
   // A manual record carries no persisted wizard id, so the registry-gated
-  // lifecycle actions are not offered even though its kind is MF Twister.
+  // lifecycle actions are not offered even though its kind is Generic.
   await expect(row.locator(synthNode("runtime.controllers.row.0.reconfigure"))).toHaveCount(0);
   await expect(row.locator(synthNode("runtime.controllers.row.0.blacklist"))).toHaveCount(0);
 });

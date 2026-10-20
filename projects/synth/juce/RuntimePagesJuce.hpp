@@ -131,8 +131,12 @@ public:
         m_inputNames = inputNames;
 
         synth::runtime_ui::AudioPageSnapshot& snapshot = m_surface.Snapshot();
-        snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(m_outputNames);
-        snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(m_inputNames);
+        snapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+            m_outputNames,
+            {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+        snapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+            m_inputNames,
+            {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
         SyncSelection();
         RefreshStatus();
         m_renderer.RefreshFromSurface();
@@ -142,10 +146,10 @@ public:
     {
         const synth::AudioDeviceState state = m_runtime.GetEngine().AudioDeviceSnapshot();
         synth::runtime_ui::AudioPageSnapshot& snapshot = m_surface.Snapshot();
-        snapshot.selectedOutputId =
-            synth::runtime_ui::Layout::SelectedDeviceOptionId(state.outputDeviceName, snapshot.outputOptions);
-        snapshot.selectedInputId =
-            synth::runtime_ui::Layout::SelectedDeviceOptionId(state.inputDeviceName, snapshot.inputOptions);
+        snapshot.selectedOutputId = synth::runtime_ui::Layout::SelectedDeviceOptionId(
+            state.outputDeviceName, snapshot.outputOptions, synth::runtime_ui::kSystemDefaultOptionId);
+        snapshot.selectedInputId = synth::runtime_ui::Layout::SelectedDeviceOptionId(
+            state.inputDeviceName, snapshot.inputOptions, synth::runtime_ui::kNoInputOptionId);
     }
 
     void SetStatus(const juce::String& text)

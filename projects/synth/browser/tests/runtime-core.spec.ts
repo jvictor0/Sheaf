@@ -29,7 +29,7 @@ test("routes a portable action through the runtime worker facade without app HTM
     let nextHandle = 1;
     let audioStarted = false;
     const worker = new BrowserRuntimeWorker(async () => ({
-      abiVersion: 4,
+      abiVersion: 6,
       uiProtocolVersion: 2,
       runtimeConfigVersion: 1,
       create() { calls.push(["create"]); return nextHandle++; },
@@ -84,7 +84,7 @@ test("rejects browser input requests above the platform limit before native work
     const calls: string[] = [];
     let nativeStarted = false;
     const worker = new BrowserRuntimeWorker(async () => ({
-      abiVersion: 4,
+      abiVersion: 6,
       uiProtocolVersion: 2,
       runtimeConfigVersion: 1,
       create() { calls.push("create"); return 1; },
@@ -125,7 +125,7 @@ test("normalizes a distinct worker time origin into the document engine epoch", 
     const { BrowserRuntimeWorker } = await (new Function("return import('/dist/src/worker.js')")() as Promise<any>);
     const offsets: number[] = [];
     const worker = new BrowserRuntimeWorker(async () => ({
-      abiVersion: 4,
+      abiVersion: 6,
       uiProtocolVersion: 2,
       runtimeConfigVersion: 1,
       create: () => 3,
@@ -174,7 +174,7 @@ test("reads Emscripten browser contract versions without creating a runtime", as
     const { emscriptenRuntimeFacade } = await (new Function("return import('/dist/src/worker.js')")() as Promise<any>);
     const calls: string[] = [];
     const facade = emscriptenRuntimeFacade({
-      _synth_browser_abi_version() { calls.push("abiVersion"); return 4; },
+      _synth_browser_abi_version() { calls.push("abiVersion"); return 6; },
       _synth_browser_ui_protocol_version() { calls.push("uiProtocolVersion"); return 2; },
       _synth_browser_runtime_config_version() { calls.push("runtimeConfigVersion"); return 1; },
       _synth_browser_create() { calls.push("create"); return 1; },
@@ -183,7 +183,7 @@ test("reads Emscripten browser contract versions without creating a runtime", as
       _synth_browser_audio_input_channels() { calls.push("audioInputChannels"); return 4; },
       _synth_browser_set_audio_input_source() { calls.push("setAudioInputSource"); return 0; },
       _synth_browser_clear_audio_input_source() { calls.push("clearAudioInputSource"); return 0; },
-      _synth_browser_consume_audio_input_retry() { calls.push("consumeAudioInputRetry"); return 0; },
+      _synth_browser_consume_pending_audio_request() { calls.push("consumePendingAudioRequest"); return -1; },
     } as any);
     return {
       versions: {
@@ -195,7 +195,7 @@ test("reads Emscripten browser contract versions without creating a runtime", as
     };
   });
 
-  expect(result.versions).toEqual({ abiVersion: 4, uiProtocolVersion: 2, runtimeConfigVersion: 1 });
+  expect(result.versions).toEqual({ abiVersion: 6, uiProtocolVersion: 2, runtimeConfigVersion: 1 });
   expect(result.calls).toEqual(["abiVersion", "uiProtocolVersion", "runtimeConfigVersion"]);
 });
 
@@ -208,7 +208,7 @@ test("registers a supplied AudioContext module-locally and preserves direct hand
     const calls: unknown[][] = [];
     const context = { sampleRate: 48_000 };
     const facade = emscriptenRuntimeFacade({
-      _synth_browser_abi_version: () => 4,
+      _synth_browser_abi_version: () => 6,
       _synth_browser_ui_protocol_version: () => 2,
       _synth_browser_runtime_config_version: () => 1,
       emscriptenRegisterAudioObject(received: unknown) { calls.push(["register", received === context]); return 73; },
@@ -219,7 +219,7 @@ test("registers a supplied AudioContext module-locally and preserves direct hand
       _synth_browser_audio_input_channels: () => 0,
       _synth_browser_set_audio_input_source: () => 0,
       _synth_browser_clear_audio_input_source: () => 0,
-      _synth_browser_consume_audio_input_retry: () => 0,
+      _synth_browser_consume_pending_audio_request: () => -1,
     } as any);
     facade.startAudioWorklet(41);
     facade.startAudioWorklet(41, context);
@@ -241,8 +241,15 @@ test("registers a native AudioNode input source with a positive physical channel
     const { emscriptenRuntimeFacade } = await (new Function("return import('/dist/src/worker.js')")() as Promise<any>);
     const calls: unknown[][] = [];
     const audioNode = { channelCount: 4 };
+    // Only the new consume method needs real heap/malloc plumbing: it is the
+    // one facade method in this test that writes an out-param through the
+    // module's memory rather than returning a plain value.
+    const heap = new Uint8Array(64);
     const facade = emscriptenRuntimeFacade({
-      _synth_browser_abi_version: () => 4,
+      HEAPU8: heap,
+      _malloc: () => 0,
+      _free: () => {},
+      _synth_browser_abi_version: () => 6,
       _synth_browser_ui_protocol_version: () => 2,
       _synth_browser_runtime_config_version: () => 1,
       emscriptenRegisterAudioObject(received: unknown) { calls.push(["register", received === audioNode]); return 96; },
@@ -256,9 +263,13 @@ test("registers a native AudioNode input source with a positive physical channel
         calls.push(["clear", handle, statusCode]);
         return 0;
       },
-      _synth_browser_consume_audio_input_retry(handle: number) {
-        calls.push(["retry", handle]);
-        return 1;
+      _synth_browser_consume_pending_audio_request(handle: number, outControl: number) {
+        calls.push(["pendingAudioRequest", handle]);
+        // 1 = BrowserAudioDeviceKind::Output, chosen so a passing assertion on
+        // the facade's returned control proves it really read this write back
+        // rather than coincidentally matching an unwritten zero.
+        new DataView(heap.buffer).setUint32(outControl, 1, true);
+        return 2;
       },
     } as any);
     const inputChannels = facade.audioInputChannels(41);
@@ -293,13 +304,13 @@ test("registers a native AudioNode input source with a positive physical channel
     const handleAfterRepeat = facade.audioInputSourceHandle(audioNode);
     const otherNodeHandle = facade.audioInputSourceHandle({} as AudioNode);
     const clearResult = facade.clearAudioInputSource(41, 6);
-    const retry = facade.consumeAudioInputRetry(41);
+    const pendingAudioRequest = facade.consumePendingAudioRequest(41);
     return {
       inputChannels,
       setResult,
       repeatSetResult,
       clearResult,
-      retry,
+      pendingAudioRequest,
       handleBeforeRegistration,
       handleAfterRegistration,
       handleAfterRepeat,
@@ -317,7 +328,7 @@ test("registers a native AudioNode input source with a positive physical channel
     setResult: 0,
     repeatSetResult: 0,
     clearResult: 0,
-    retry: true,
+    pendingAudioRequest: { index: 2, control: 1 },
     rejectedZero: expect.stringMatching(/physical.*between 1 and 32/i),
     rejectedTooMany: expect.stringMatching(/physical.*between 1 and 32/i),
     rejectedBadStatus: expect.stringMatching(/status.*between 0 and 10/i),
@@ -334,7 +345,7 @@ test("registers a native AudioNode input source with a positive physical channel
       ["set", 41, 96, 4, 2],
       ["set", 41, 96, 4, 2],
       ["clear", 41, 6],
-      ["retry", 41],
+      ["pendingAudioRequest", 41],
     ],
   });
 });
@@ -349,7 +360,7 @@ test("rejects modules missing context registration, native startup, or audio inp
     for (const omitted of ["register", "start", "channels", "set", "clear", "retry"]) {
       try {
         emscriptenRuntimeFacade({
-          _synth_browser_abi_version: () => 4,
+          _synth_browser_abi_version: () => 6,
           _synth_browser_ui_protocol_version: () => 2,
           _synth_browser_runtime_config_version: () => 1,
           emscriptenRegisterAudioObject: omitted === "register" ? undefined : () => 1,
@@ -357,7 +368,7 @@ test("rejects modules missing context registration, native startup, or audio inp
           _synth_browser_audio_input_channels: omitted === "channels" ? undefined : () => 0,
           _synth_browser_set_audio_input_source: omitted === "set" ? undefined : () => 0,
           _synth_browser_clear_audio_input_source: omitted === "clear" ? undefined : () => 0,
-          _synth_browser_consume_audio_input_retry: omitted === "retry" ? undefined : () => 0,
+          _synth_browser_consume_pending_audio_request: omitted === "retry" ? undefined : () => 0,
         } as any);
       } catch (error) {
         failures.push((error as Error).message);
@@ -372,7 +383,7 @@ test("rejects modules missing context registration, native startup, or audio inp
     expect.stringMatching(/audio input channels/i),
     expect.stringMatching(/audio input source/i),
     expect.stringMatching(/audio input source clear/i),
-    expect.stringMatching(/audio input retry/i),
+    expect.stringMatching(/pending audio request/i),
   ]);
 });
 
@@ -385,7 +396,7 @@ test("rejects incompatible modules before creation or persistence setup", async 
     const fields = ["abiVersion", "uiProtocolVersion", "runtimeConfigVersion"];
     return await Promise.all(fields.map(async (field) => {
       const calls: string[] = [];
-      const supported = { abiVersion: 4, uiProtocolVersion: 2, runtimeConfigVersion: 1 };
+      const supported = { abiVersion: 6, uiProtocolVersion: 2, runtimeConfigVersion: 1 };
       const versions = { ...supported, [field]: supported[field as keyof typeof supported] === 2 ? 1 : 2 };
       const worker = new BrowserRuntimeWorker(
         async () => ({
@@ -430,7 +441,7 @@ test("main bootstrap composes runtime, UI, audio channels, and actions generical
       module: { entryUrl: "blob:test-app", locateFile: {}, mainScriptUrlOrBlob: "blob:test-app" },
       frameIntervalMs: 100000,
       runtimeModuleLoader: async () => ({
-        abiVersion: 4,
+        abiVersion: 6,
         uiProtocolVersion: 2,
         runtimeConfigVersion: 1,
         filesystem: {
@@ -528,7 +539,7 @@ test("direct runtime installation supersedes delayed launcher auto-boot across f
       category: "Instrument",
       buildId: "portable-app-build-1",
       browser: {
-        abiVersion: 4,
+        abiVersion: 6,
         uiProtocolVersion: 2,
         runtimeConfigVersion: 1,
         entry: "packages/portable-app/portable-app-build-1/app.js",
@@ -564,7 +575,7 @@ test("production bootstrap discovers catalogs without loading an application mod
         category: "Instrument",
         buildId: "portable-app-build-1",
         browser: {
-          abiVersion: 4,
+          abiVersion: 6,
           uiProtocolVersion: 2,
           runtimeConfigVersion: 1,
           entry: "packages/portable-app/portable-app-build-1/app.js",
