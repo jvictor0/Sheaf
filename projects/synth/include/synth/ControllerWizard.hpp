@@ -160,10 +160,26 @@ struct ControllerWizardDescriptor {
     std::function<std::unique_ptr<ControllerWizard>()> factory;
 };
 
-const std::vector<ControllerWizardDescriptor>& ControllerWizardRegistry();
+// The registry the Controllers page's add row and discovery draw from, and
+// that a row's stored wizard id resolves against: one descriptor per app
+// device default, then one library descriptor for each kind in the
+// catalog's libraryDeviceKinds that the catalog has no device default of --
+// so a device stays reachable as a starting point in every app whose
+// catalog lists that kind.
+std::vector<ControllerWizardDescriptor> MakeControllerWizardRegistry(const MidiAppCatalog& catalog);
 WizardDiscovery DiscoverControllerWizards(
     const MidiDeviceList&, const MidiInstrumentConfig&,
     const std::vector<ControllerWizardDescriptor>&);
-std::unique_ptr<ControllerWizard> MakeControllerWizard(std::string_view id);
+
+// The one lookup every caller that needs "does this stored wizard id name a
+// registry descriptor, and if so which" shares: MakeControllerWizard below,
+// MidiConfigViewModel's hasResolvedWizard/matchesWizardProfile/
+// BlacklistController/RestoreController, and the page's device label
+// (ControllerDeviceLabel). Returns nullptr for an id no descriptor carries.
+const ControllerWizardDescriptor* FindControllerWizardDescriptor(
+    const std::vector<ControllerWizardDescriptor>& registry, std::string_view id);
+
+std::unique_ptr<ControllerWizard> MakeControllerWizard(
+    const std::vector<ControllerWizardDescriptor>& registry, std::string_view id);
 
 }  // namespace synth

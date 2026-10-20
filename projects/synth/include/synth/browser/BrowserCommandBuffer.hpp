@@ -19,8 +19,8 @@ namespace synth_browser {
 
 inline constexpr std::array<std::byte, 4> kCommandBufferMagic = {
     std::byte{'S'}, std::byte{'B'}, std::byte{'C'}, std::byte{'B'}};
-// Version 2 (sru-46): node bounds are parent-relative, `Draw` geometry is
-// node-local, `Node::color`/`Node::textStyle` and the sru-55 container border
+// Version 2: node bounds are parent-relative, `Draw` geometry is
+// node-local, `Node::color`/`Node::textStyle` and the container border
 // fields cross the wire behind explicit presence bytes, and `Node::variant` is
 // gone. A hard break -- both ends check strict equality and there is no
 // version-1 fallback or negotiation. Every

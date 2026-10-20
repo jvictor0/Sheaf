@@ -28,9 +28,9 @@ This app does **not** provide patch load/save buttons or MIDI device
 selection UI. Those are owned by the runtime shell:
 
 - Patch commands (New/Save/Save As/Load/Revert), the current-patch-name
-  label, and the patch status label live on the File page
-  (`synth_runtime::FilePage`, `projects/synth/runtime/FilePage.hpp`), hosted
-  by the shell's `synth_runtime::MainPane`
+  label, and the patch status label live on the File page, built in
+  `include/synth/RuntimePages.hpp` and hosted by the shell's
+  `synth_runtime::MainPane`
   (`projects/synth/runtime/MainPane.hpp`).
 - Per-controller MIDI device combo boxes, status dots, and mapping editors are
   produced by the shared JUCE-free `ControllersPageSurface` and rendered by

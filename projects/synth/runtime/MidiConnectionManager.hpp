@@ -1,7 +1,7 @@
 #pragma once
 
 // synth_runtime::MidiConnectionManager — per-controller MIDI device lifecycle
-// owner (Plan 3 Task 2). Owns a vector of synth_juce::MidiInHandler/
+// owner. Owns a vector of synth_juce::MidiInHandler/
 // MidiOutputHandler parallel to the engine's instrument controller slots,
 // plus the MidiConnectionState mirror and the MidiDevicePoller that watches
 // for USB device list changes in the background. This is the runtime-side
@@ -9,7 +9,7 @@
 // (include/synth/MidiReconcile.hpp) to real JUCE device handlers and
 // synth::Engine<App>.
 //
-// Forwarding-processor swap safety (binding, see p3-globals.md): reopening
+// Forwarding-processor swap safety (binding): reopening
 // or rebuilding a controller's input device must never leave a MIDI callback
 // pointing at a destroyed processor chain. This class follows a
 // detach -> rebuild -> reattach discipline (OnMidiProcessorsWillRebuild +
@@ -21,7 +21,7 @@
 // handler's forwarding processor is detached (SetProcessor(nullptr)); no
 // code in this class dereferences a MidiInProcessor* outside that window.
 //
-// EditInstrument re-entrancy (binding, see p3-task-2-brief.md): Update*Ref
+// EditInstrument re-entrancy (binding): Update*Ref
 // actions in a reconcile plan write the matched device's identifier+name
 // back into the engine's live instrument via engine.EditInstrument, and
 // EditInstrument ALWAYS rebuilds MIDI processors and fires the
@@ -53,16 +53,17 @@
 // started_ is already true. See OnInstrumentRebuilt()'s doc comment for the
 // post-startup behavior once started_ is true.
 //
-// Sole owner of every device handler (binding, see p3-globals.md's
-// architecture paragraph): this manager is the sole owner of every
+// Sole owner of every device handler (binding): this manager is the sole
+// owner of every
 // controller slot's MidiInHandler/MidiOutputHandler, including slot 0 -- so
 // there is exactly one owner per physical device and no sink/open
-// contention. Task 4 of Plan 4 replaced the old single-slot MidiPanel UI
-// with ControllersPage.hpp, a genuinely per-controller UI; ControllersPage
-// does NOT call into this manager to open/close devices directly -- per
-// p4-globals.md's binding ("all page edits commit through
-// engine.EditInstrument + connectionManager_ reconcile -- never mutate
-// config or handlers directly from components"), a device combo selection on
+// contention. The old single-slot MidiPanel UI was replaced
+// with ControllersPageSurface (ControllersPageUI.hpp), a genuinely
+// per-controller UI; ControllersPageSurface
+// does NOT call into this manager to open/close devices directly -- every
+// page edit commits through
+// engine.EditInstrument + connectionManager_ reconcile rather than mutating
+// config or handlers directly from components, so a device combo selection on
 // that page writes the chosen (or cleared) MidiEndpointRef via
 // synth::MidiConfigViewModel::SetEndpointRef and commits it through
 // engine.EditInstrument; this manager's own rebuilt-callback handler
@@ -114,14 +115,14 @@ private:
     synth::MidiInProcessor* target_ = nullptr;
 };
 
-// The single JUCE device-enumeration helper (Task 3 brief): builds a
+// The single JUCE device-enumeration helper: builds a
 // synth::MidiDeviceList from juce::MidiInput::getAvailableDevices() +
 // juce::MidiOutput::getAvailableDevices(). This is the function the
 // message-thread authoritative re-enumeration (Reconcile(), called from
 // StartupReconcile()/OnTimerTick()/OnInstrumentRebuilt(), all of which run on
 // the message thread) always calls.
 //
-// Degraded-mode decision (Task 3 brief, p3-globals.md design D4): this
+// Degraded-mode decision: this
 // function must NOT be called off the message thread on macOS. JUCE's
 // CoreMidi backend (juce_CoreMidi_mac.mm, CoreMidiHelpers::findDevices(),
 // called by both MidiInput::getAvailableDevices() and
@@ -190,7 +191,7 @@ public:
         : engine_(engine), midiEpoch_(midiEpoch) {}
 
     ~MidiConnectionManager() {
-        // Shutdown ordering (binding, per p3-globals.md): stop/join the
+        // Shutdown ordering (binding): stop/join the
         // poller before closing devices, so no in-flight poll cycle races
         // handler teardown.
         poller_.Stop();
@@ -219,11 +220,11 @@ public:
     MidiConnectionManager(const MidiConnectionManager&) = delete;
     MidiConnectionManager& operator=(const MidiConnectionManager&) = delete;
 
-    // Startup order (sar-5, binding): call once after processors have been
+    // Startup order (binding): call once after processors have been
     // built, BEFORE starting the poller. Resizes
     // handler vectors to the current controller count (state_ starts out
-    // default-constructed, i.e. every entry status-unconfigured -- the
-    // "empty MidiConnectionState{}" the brief describes as `current`), then
+    // default-constructed, i.e. every entry status-unconfigured -- an
+    // empty `MidiConnectionState{}` as the reconcile plan's `current`), then
     // runs one synchronous reconcile pass against the actually-enumerated
     // device list. Because `current` (state_) starts all-Unconfigured, the
     // planner still opens every configured ref (PlanMidiReconciliation's
@@ -258,11 +259,11 @@ public:
     // snapshot for the actual reconcile -- see MidiDevicePoller's class doc
     // comment: the poller exists purely to wake us, not to be the source of
     // truth), then gates whether to run reconciliation planning/execution at
-    // all through synth::PlanMidiTickResponse (smi-4: "WHEN the device list
+    // all through synth::PlanMidiTickResponse ("WHEN the device list
     // is unchanged from the previous message-thread pass, THE message
     // thread SHALL NOT run reconciliation planning or plan execution").
     //
-    // Unchanged-list gate (smi-4, binding; supersedes the prior
+    // Unchanged-list gate (binding; supersedes the prior
     // always-reconcile design -- see PlanMidiTickResponse's own doc comment
     // for the full rationale and the pinned unit tests in
     // reconcile_executor_tests.cpp's tick_response_* cases): in degraded
@@ -313,17 +314,17 @@ public:
     // Wired to engine.SetMidiProcessorsRebuiltCallback (forwarded by the
     // host): resizes handler/state vectors to the (possibly changed)
     // controller count, reinstalls forwarding processors against the fresh
-    // chain, and runs one reconcile pass (sar-8: this is the same executor
+    // chain, and runs one reconcile pass (this is the same executor
     // path OnTimerTick uses). No-ops (beyond the resize) when a reconcile is
     // already in flight -- see the class doc comment's EditInstrument
     // re-entrancy paragraph.
     //
-    // started_ gate (Task 2 review, Important; Task 3 review, Important: the
+    // started_ gate: the
     // gate decision itself -- resize always, reconcile only once started --
-    // is now pinned by synth::PlanMidiRebuildResponse, a pure JUCE-free
+    // is pinned by synth::PlanMidiRebuildResponse, a pure JUCE-free
     // function unit-tested directly in reconcile_executor_tests.cpp
     // (rebuild_response_* cases), instead of living only as inline logic
-    // here that only a full JUCE runtime build would exercise). This
+    // here that only a full JUCE runtime build would exercise. This
     // callback is wired unconditionally in the host's constructor (see
     // Runtime.hpp), i.e. BEFORE Runtime::Start() ever calls
     // StartupReconcile(). Any pre-startup instrument rebuild must NOT itself
@@ -383,12 +384,12 @@ private:
     // there is no "prior" chain to race).
     //
     // The WHICH-indices-close / WHICH-indices-grow decision itself is
-    // delegated to synth::PlanMidiConnectionResize (Task 2 review, Minor:
-    // extracted into a pure, JUCE-free, independently unit-tested helper --
+    // delegated to synth::PlanMidiConnectionResize (extracted into a pure,
+    // JUCE-free, independently unit-tested helper --
     // see MidiReconcile.hpp's doc comment on that function and
     // reconcile_executor_tests.cpp's PlanMidiConnectionResize cases). This
     // method only executes the plan: for closingIx, ClearSinkSync (not
-    // SetSink(ix, nullptr) -- Task 2 review, Critical, see ClearSinkSync's
+    // SetSink(ix, nullptr) -- see ClearSinkSync's
     // doc comment) the output sink before Close()ing both handlers, since the
     // vector resize immediately below destroys them; for growingIx (after the
     // resize), construct fresh handlers.
@@ -495,9 +496,9 @@ private:
         state_ = synth::ExecuteReconcilePlan(plan, state_, ops);
         reconciling_ = false;
 
-        // Log-quiet (Task 3 review, Minor): skip the summary line only when
+        // Log-quiet: skip the summary line only when
         // the plan was empty AND the device list itself is unchanged since
-        // the last reconcile pass. Since smi-4's unchanged-list gate (see
+        // the last reconcile pass. Since the unchanged-list gate (see
         // OnTimerTick()'s doc comment and synth::PlanMidiTickResponse),
         // OnTimerTick() itself no longer calls Reconcile() at all on an
         // unchanged list, so this condition now mainly guards
@@ -556,8 +557,7 @@ private:
 
     // Writes the matched device's identifier+name back into the engine's
     // live instrument via EditInstrument -- this marks the patch dirty
-    // exactly like a UI edit (per p3-globals.md's message-thread-executor
-    // paragraph). EditInstrument rebuilds MIDI processors and fires the
+    // exactly like a UI edit, from the message thread. EditInstrument rebuilds MIDI processors and fires the
     // rebuilt callback synchronously; OnInstrumentRebuilt()'s reconciling_
     // guard (see the class doc comment) prevents that from recursing back
     // into a nested Reconcile() call.
@@ -619,7 +619,7 @@ private:
     bool reconciling_ = false;
 
     // Last message-thread-authoritative device list Reconcile() ran a plan
-    // against (Task 3 review, Minor: degraded-mode log noise). In degraded
+    // against, to avoid degraded-mode log noise. In degraded
     // mode (see detail::ForceDirtyEnumerate()'s doc comment) the poller sets
     // the dirty flag every ~5 s unconditionally, so OnTimerTick() calls
     // Reconcile() every tick even when nothing has actually changed on the
@@ -643,7 +643,7 @@ private:
     bool deviceListChanged_ = false;
 
     // True once StartupReconcile() has run its one synchronous startup
-    // reconcile pass (Task 2 review, Important). Before that,
+    // reconcile pass. Before that,
     // OnInstrumentRebuilt() (wired unconditionally in the host's
     // constructor, so it can fire before Runtime::Start() calls
     // StartupReconcile()) only resizes handler/state vectors and does NOT

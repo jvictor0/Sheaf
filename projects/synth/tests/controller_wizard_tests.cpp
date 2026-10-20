@@ -1,5 +1,7 @@
 #include "synth/ControllerWizard.hpp"
 
+#include "synth/MidiAppCatalog.hpp"
+
 #ifdef JUCE_MAJOR_VERSION
 #error "controller wizard contracts must not see JUCE headers"
 #endif
@@ -179,6 +181,28 @@ std::vector<synth::ControllerWizardDescriptor> TestTwisterRegistry() {
     return {Descriptor("com.sheaf.midi-fighter-twister", "MIDI Fighter Twister",
                        synth::MidiProfileKind::MfTwister, {"Midi Fighter Twister"},
                        {"Midi Fighter Twister"})};
+}
+
+// The real (non-stub) registry an app with no device defaults gets: the
+// library's own MfTwister, Launchpad and WRLD.Bldr descriptors, each with a
+// working factory.
+std::vector<synth::ControllerWizardDescriptor> EmptyCatalogLibraryRegistry() {
+    return synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{});
+}
+
+synth::MidiAppDeviceDefault AppDefault(std::string id, std::string displayName,
+                                       synth::MidiProfileKind kind,
+                                       std::initializer_list<std::string> inputAliases,
+                                       std::initializer_list<std::string> outputAliases,
+                                       synth::MidiControllerProfileConfig config) {
+    synth::MidiAppDeviceDefault deviceDefault;
+    deviceDefault.id = std::move(id);
+    deviceDefault.displayName = std::move(displayName);
+    deviceDefault.kind = kind;
+    deviceDefault.inputAliases = inputAliases;
+    deviceDefault.outputAliases = outputAliases;
+    deviceDefault.config = std::move(config);
+    return deviceDefault;
 }
 
 synth::MidiControllerSlot StoredController(std::string name,
@@ -621,7 +645,8 @@ TEST_CASE(UISystemMessageHelpersExposeCatalogLabelsAndPreserveBankSlotArguments)
     REQUIRE_TRUE(synth::FindUISystemMessageChoice(synth::UISystemMessage::SceneSelect) != nullptr);
 
     const synth::MidiControllerSystemMessageAssociation next =
-        synth::MakeUISystemMessageAssociation(synth::UISystemMessage::NextParamBank, 23);
+        synth::MakeUISystemMessageAssociation(
+            *synth::FindUISystemMessageChoice(synth::UISystemMessage::NextParamBank), 23);
     REQUIRE_TRUE(next.press.type == synth::MessageIn::Type::NextParamBank);
     REQUIRE_TRUE(next.press.slotIx == 23);
     REQUIRE_TRUE(next.feedback.type == synth::MessageIn::Type::NextParamBank);
@@ -686,7 +711,7 @@ TEST_CASE(TypedWizardRejectsDifferentConcreteFormWithoutGeneration) {
 
 TEST_CASE(MfTwisterWizardGeneratesCompleteActiveProfileFromItsForm) {
     std::unique_ptr<synth::ControllerWizard> wizard =
-        synth::MakeControllerWizard("com.sheaf.midi-fighter-twister");
+        synth::MakeControllerWizard(EmptyCatalogLibraryRegistry(), "com.sheaf.midi-fighter-twister");
     REQUIRE_TRUE(wizard != nullptr);
     REQUIRE_TRUE(wizard->Id() == "com.sheaf.midi-fighter-twister");
 
@@ -873,7 +898,7 @@ TEST_CASE(MfTwisterSeedExtractionRequiresOneExactRepresentableProfileShape) {
 
 TEST_CASE(MfTwisterWizardRefusesInvalidFormsAtomically) {
     std::unique_ptr<synth::ControllerWizard> wizard =
-        synth::MakeControllerWizard("com.sheaf.midi-fighter-twister");
+        synth::MakeControllerWizard(EmptyCatalogLibraryRegistry(), "com.sheaf.midi-fighter-twister");
     REQUIRE_TRUE(wizard != nullptr);
     std::unique_ptr<synth::ControllerConfigForm> baseForm = wizard->ConfigForm(std::nullopt);
     auto* form = dynamic_cast<synth::MfTwisterConfigForm*>(baseForm.get());
@@ -888,20 +913,261 @@ TEST_CASE(MfTwisterWizardRefusesInvalidFormsAtomically) {
     REQUIRE_TRUE(form->encoderSlotText == "not-a-slot");
 }
 
-TEST_CASE(ControllerWizardRegistryExposesStableMfTwisterDescriptor) {
-    const std::vector<synth::ControllerWizardDescriptor>& registry =
-        synth::ControllerWizardRegistry();
+TEST_CASE(MakeControllerWizardRegistryWithEmptyCatalogReturnsTwisterLaunchpadAndWrldBldr) {
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{});
 
-    REQUIRE_TRUE(!registry.empty());
-    REQUIRE_TRUE(registry.front().id == "com.sheaf.midi-fighter-twister");
-    REQUIRE_TRUE(registry.front().displayName == "MIDI Fighter Twister");
-    REQUIRE_TRUE(registry.front().kind == synth::MidiProfileKind::MfTwister);
-    REQUIRE_TRUE(registry.front().inputAliases.size() == 1);
-    REQUIRE_TRUE(registry.front().inputAliases[0] == "Midi Fighter Twister");
-    REQUIRE_TRUE(registry.front().outputAliases.size() == 1);
-    REQUIRE_TRUE(registry.front().outputAliases[0] == "Midi Fighter Twister");
-    REQUIRE_TRUE(synth::MakeControllerWizard("missing.wizard") == nullptr);
-    REQUIRE_TRUE(synth::MakeControllerWizard("com.sheaf.midi-fighter-twister") != nullptr);
+    REQUIRE_TRUE(registry.size() == 3);
+    REQUIRE_TRUE(registry[0].id == "com.sheaf.midi-fighter-twister");
+    REQUIRE_TRUE(registry[0].displayName == "MIDI Fighter Twister");
+    REQUIRE_TRUE(registry[0].kind == synth::MidiProfileKind::MfTwister);
+    REQUIRE_TRUE(registry[0].inputAliases.size() == 1);
+    REQUIRE_TRUE(registry[0].inputAliases[0] == "Midi Fighter Twister");
+    REQUIRE_TRUE(registry[0].outputAliases.size() == 1);
+    REQUIRE_TRUE(registry[0].outputAliases[0] == "Midi Fighter Twister");
+    REQUIRE_TRUE(synth::MakeControllerWizard(registry, "missing.wizard") == nullptr);
+    REQUIRE_TRUE(synth::MakeControllerWizard(registry, "com.sheaf.midi-fighter-twister") != nullptr);
+
+    REQUIRE_TRUE(registry[1].id == "library.launchpad");
+    REQUIRE_TRUE(registry[1].displayName == "Launchpad");
+    REQUIRE_TRUE(registry[1].kind == synth::MidiProfileKind::Launchpad);
+    REQUIRE_TRUE(registry[1].inputAliases.empty());
+    REQUIRE_TRUE(registry[1].outputAliases.empty());
+
+    REQUIRE_TRUE(registry[2].id == "library.wrldbldr");
+    REQUIRE_TRUE(registry[2].displayName == "WRLD.Bldr");
+    REQUIRE_TRUE(registry[2].kind == synth::MidiProfileKind::WrldBldr);
+    REQUIRE_TRUE(registry[2].inputAliases.empty());
+    REQUIRE_TRUE(registry[2].outputAliases.empty());
+
+    std::unique_ptr<synth::ControllerWizard> launchpadWizard =
+        synth::MakeControllerWizard(registry, "library.launchpad");
+    REQUIRE_TRUE(launchpadWizard != nullptr);
+    std::unique_ptr<synth::ControllerConfigForm> launchpadForm = launchpadWizard->ConfigForm(std::nullopt);
+    REQUIRE_TRUE(launchpadForm != nullptr);
+    const synth::WizardGenerationResult launchpadResult =
+        launchpadWizard->GenerateProfile(*launchpadForm, Context());
+    REQUIRE_TRUE(launchpadResult);
+    REQUIRE_TRUE(launchpadResult.controller->kind == synth::MidiProfileKind::Launchpad);
+    REQUIRE_TRUE(launchpadResult.controller->wizardId == "library.launchpad");
+    const synth::MidiControllerProfileConfig expectedLaunchpad = synth::LaunchpadDefaultProfileConfig();
+    {
+        synth::JsonArena arena(1024 * 1024);
+        const std::string actualJson =
+            synth::ToJSON(arena, launchpadResult.controller->config).Dumps(0);
+        const std::string expectedJson = synth::ToJSON(arena, expectedLaunchpad).Dumps(0);
+        REQUIRE_TRUE(actualJson == expectedJson);
+    }
+
+    std::unique_ptr<synth::ControllerWizard> wrldbldrWizard =
+        synth::MakeControllerWizard(registry, "library.wrldbldr");
+    REQUIRE_TRUE(wrldbldrWizard != nullptr);
+    std::unique_ptr<synth::ControllerConfigForm> wrldbldrForm = wrldbldrWizard->ConfigForm(std::nullopt);
+    REQUIRE_TRUE(wrldbldrForm != nullptr);
+    const synth::WizardGenerationResult wrldbldrResult =
+        wrldbldrWizard->GenerateProfile(*wrldbldrForm, Context());
+    REQUIRE_TRUE(wrldbldrResult);
+    REQUIRE_TRUE(wrldbldrResult.controller->kind == synth::MidiProfileKind::WrldBldr);
+    REQUIRE_TRUE(wrldbldrResult.controller->wizardId == "library.wrldbldr");
+    const synth::MidiControllerProfileConfig expectedWrldBldr = synth::WrldBldrDefaultProfileConfig();
+    {
+        synth::JsonArena arena(1024 * 1024);
+        const std::string actualJson =
+            synth::ToJSON(arena, wrldbldrResult.controller->config).Dumps(0);
+        const std::string expectedJson = synth::ToJSON(arena, expectedWrldBldr).Dumps(0);
+        REQUIRE_TRUE(actualJson == expectedJson);
+    }
+}
+
+TEST_CASE(MakeControllerWizardRegistryReturnsCatalogDefaultsThenLibraryForUncoveredKinds) {
+    // The catalog covers MfTwister and Generic; Launchpad and WRLD.Bldr have
+    // no catalog device, so a device of each stays reachable as a starting
+    // point via the library descriptors, appended after the catalog's own
+    // (frogg3rs' real shape: its six devices cover MfTwister/Generic/
+    // Launchpad, so only WRLD.Bldr gets a library descriptor appended).
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.twister", "MIDI Fighter Twister", synth::MidiProfileKind::MfTwister,
+        {"Midi Fighter Twister"}, {"Midi Fighter Twister"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, synth::MidiControllerProfileConfig{}));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    REQUIRE_TRUE(registry.size() == 4);
+    REQUIRE_TRUE(registry[0].id == "froggers.twister");
+    REQUIRE_TRUE(registry[0].displayName == "MIDI Fighter Twister");
+    REQUIRE_TRUE(registry[0].kind == synth::MidiProfileKind::MfTwister);
+    REQUIRE_TRUE(registry[0].inputAliases.size() == 1);
+    REQUIRE_TRUE(registry[0].inputAliases[0] == "Midi Fighter Twister");
+    REQUIRE_TRUE(registry[0].outputAliases.size() == 1);
+    REQUIRE_TRUE(registry[0].outputAliases[0] == "Midi Fighter Twister");
+    REQUIRE_TRUE(registry[1].id == "froggers.apc40.generic");
+    REQUIRE_TRUE(registry[1].displayName == "Akai APC40 mkII (Generic)");
+    REQUIRE_TRUE(registry[1].kind == synth::MidiProfileKind::Generic);
+    REQUIRE_TRUE(registry[1].inputAliases.size() == 1);
+    REQUIRE_TRUE(registry[1].inputAliases[0] == "APC40 mkII");
+    REQUIRE_TRUE(registry[1].outputAliases.size() == 1);
+    REQUIRE_TRUE(registry[1].outputAliases[0] == "APC40 mkII");
+    REQUIRE_TRUE(registry[2].id == "library.launchpad");
+    REQUIRE_TRUE(registry[2].displayName == "Launchpad");
+    REQUIRE_TRUE(registry[2].kind == synth::MidiProfileKind::Launchpad);
+    REQUIRE_TRUE(registry[3].id == "library.wrldbldr");
+    REQUIRE_TRUE(registry[3].displayName == "WRLD.Bldr");
+    REQUIRE_TRUE(registry[3].kind == synth::MidiProfileKind::WrldBldr);
+}
+
+TEST_CASE(MakeControllerWizardRegistryOmitsLibraryDevicesForKindsTheCatalogAlreadyCovers) {
+    // frogg3rs' real shape: MfTwister, Generic and Launchpad are all covered
+    // by catalog devices (two Launchpad-kind entries here stand in for its
+    // three), so only WRLD.Bldr -- the one kind with no catalog device --
+    // gets a library descriptor appended.
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.twister", "MIDI Fighter Twister", synth::MidiProfileKind::MfTwister,
+        {"Midi Fighter Twister"}, {"Midi Fighter Twister"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.launchpad.x", "Launchpad X", synth::MidiProfileKind::Launchpad,
+        {"Launchpad X"}, {"Launchpad X"}, synth::MidiControllerProfileConfig{}));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    REQUIRE_TRUE(registry.size() == 4);
+    REQUIRE_TRUE(registry[0].id == "froggers.twister");
+    REQUIRE_TRUE(registry[1].id == "froggers.apc40.generic");
+    REQUIRE_TRUE(registry[2].id == "froggers.launchpad.x");
+    REQUIRE_TRUE(registry[3].id == "library.wrldbldr");
+    REQUIRE_TRUE(registry[3].displayName == "WRLD.Bldr");
+    REQUIRE_TRUE(registry[3].kind == synth::MidiProfileKind::WrldBldr);
+}
+
+// The suppression rule is symmetric across the two library kinds: a catalog
+// covering WRLD.Bldr must omit exactly that library entry (and no other),
+// while a catalog covering neither still gets both. Without this, a check
+// that always appended the WRLD.Bldr library entry regardless of catalog
+// coverage would pass every other registry test in this file, since none of
+// them give WRLD.Bldr its own catalog device to be covered by.
+TEST_CASE(MakeControllerWizardRegistryOmitsTheLibraryWrldBldrEntryWhenTheCatalogAlreadyCoversWrldBldr) {
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.wrld", "WRLD.Bldr", synth::MidiProfileKind::WrldBldr, {"WRLD.Bldr"}, {"WRLD.Bldr"},
+        synth::MidiControllerProfileConfig{}));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    // The catalog's own WRLD.Bldr device, plus library entries for the two
+    // kinds it does not cover (MfTwister, Launchpad) -- not a third entry
+    // for WRLD.Bldr.
+    REQUIRE_TRUE(registry.size() == 3);
+    REQUIRE_TRUE(registry[0].id == "froggers.wrld");
+    bool sawLibraryWrldBldr = false;
+    bool sawMfTwister = false;
+    bool sawLibraryLaunchpad = false;
+    for (const synth::ControllerWizardDescriptor& descriptor : registry) {
+        sawLibraryWrldBldr = sawLibraryWrldBldr || descriptor.id == "library.wrldbldr";
+        sawMfTwister = sawMfTwister || descriptor.kind == synth::MidiProfileKind::MfTwister;
+        sawLibraryLaunchpad = sawLibraryLaunchpad || descriptor.id == "library.launchpad";
+    }
+    // A catalog-covered WRLD.Bldr gets no library.wrldbldr entry, while
+    // MfTwister and Launchpad -- kinds this catalog does not cover -- still
+    // get theirs.
+    REQUIRE_TRUE(!sawLibraryWrldBldr);
+    REQUIRE_TRUE(sawMfTwister);
+    REQUIRE_TRUE(sawLibraryLaunchpad);
+}
+
+// An app whose catalog sets an empty libraryDeviceKinds (Frogg3rs) offers
+// only its own presets: no library descriptor is appended for a kind its
+// device defaults do not cover, even though the default libraryDeviceKinds
+// would otherwise offer one.
+TEST_CASE(MakeControllerWizardRegistryWithEmptyLibraryDeviceKindsReturnsOnlyCatalogDefaults) {
+    synth::MidiAppCatalog catalog;
+    catalog.libraryDeviceKinds.clear();
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.twister", "MIDI Fighter Twister", synth::MidiProfileKind::MfTwister,
+        {"Midi Fighter Twister"}, {"Midi Fighter Twister"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, synth::MidiControllerProfileConfig{}));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    REQUIRE_TRUE(registry.size() == 2);
+    REQUIRE_TRUE(registry[0].id == "froggers.twister");
+    REQUIRE_TRUE(registry[1].id == "froggers.apc40.generic");
+}
+
+TEST_CASE(AppDefaultControllerWizardValidatesEmptyFormAndGeneratesTheStoredConfig) {
+    synth::MidiControllerProfileConfig storedConfig;
+    storedConfig.analogInput =
+        synth::AnalogMidiInConfig{.sceneBlend = synth::MidiControlAddress{.channel = 5, .cc = 9}};
+
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, storedConfig));
+
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+    // The one catalog device plus a library descriptor for each of the three
+    // kinds this Generic-only catalog does not cover (MfTwister, Launchpad,
+    // WRLD.Bldr); this test is about AppDefaultControllerWizard's own
+    // descriptor, unaffected by the other three being present too.
+    REQUIRE_TRUE(registry.size() == 4);
+
+    std::unique_ptr<synth::ControllerWizard> wizard =
+        synth::MakeControllerWizard(registry, "froggers.apc40.generic");
+    REQUIRE_TRUE(wizard != nullptr);
+    REQUIRE_TRUE(wizard->Id() == "froggers.apc40.generic");
+
+    std::unique_ptr<synth::ControllerConfigForm> form = wizard->ConfigForm(std::nullopt);
+    REQUIRE_TRUE(form != nullptr);
+    std::string error = "not-yet-cleared";
+    REQUIRE_TRUE(form->Validate(error));
+    REQUIRE_TRUE(error.empty());
+
+    const synth::WizardGenerationResult result = wizard->GenerateProfile(*form, Context());
+    REQUIRE_TRUE(result);
+    REQUIRE_TRUE(result.controller->name == "ignored-by-form");
+    REQUIRE_TRUE(result.controller->kind == synth::MidiProfileKind::Generic);
+    REQUIRE_TRUE(result.controller->disposition == synth::MidiControllerDisposition::Active);
+    REQUIRE_TRUE(result.controller->wizardId == "froggers.apc40.generic");
+    REQUIRE_TRUE(result.controller->input.identifier == "in-id");
+    REQUIRE_TRUE(result.controller->output.identifier == "out-id");
+    REQUIRE_TRUE(result.controller->config.analogInput.has_value());
+    REQUIRE_TRUE(result.controller->config.analogInput->sceneBlend.has_value());
+    REQUIRE_TRUE(result.controller->config.analogInput->sceneBlend->channel == 5);
+    REQUIRE_TRUE(result.controller->config.analogInput->sceneBlend->cc == 9);
+}
+
+TEST_CASE(DiscoveryWithAppRegistryClassifiesDeviceByFirstDefaultsInputAlias) {
+    synth::MidiAppCatalog catalog;
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.twister", "MIDI Fighter Twister", synth::MidiProfileKind::MfTwister,
+        {"Midi Fighter Twister"}, {"Midi Fighter Twister"}, synth::MidiControllerProfileConfig{}));
+    catalog.deviceDefaults.push_back(AppDefault(
+        "froggers.apc40.generic", "Akai APC40 mkII (Generic)", synth::MidiProfileKind::Generic,
+        {"APC40 mkII"}, {"APC40 mkII"}, synth::MidiControllerProfileConfig{}));
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(catalog);
+
+    const synth::MidiDeviceList devices = Devices(
+        {Device("in-1", "Midi Fighter Twister")}, {Device("out-1", "Midi Fighter Twister")});
+
+    const synth::WizardDiscovery discovery =
+        synth::DiscoverControllerWizards(devices, synth::MidiInstrumentConfig{}, registry);
+
+    REQUIRE_TRUE(discovery.available.size() == 1);
+    RequireCandidate(discovery.available[0], "froggers.twister", "MIDI Fighter Twister",
+                     synth::MidiProfileKind::MfTwister, "in-1", "out-1");
 }
 
 TEST_CASE(DiscoveryMatchesMidiFighterTwisterByCaseInsensitiveExactAlias) {

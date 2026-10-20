@@ -1,6 +1,7 @@
 CXX ?= clang++
 CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2
 CPPFLAGS ?= -Iinclude
+DEPFLAGS := -MMD -MP
 BUILD_DIR := build
 BUILD_SENTINEL := $(BUILD_DIR)/.dir
 LIB := $(BUILD_DIR)/libsynth.a
@@ -34,6 +35,25 @@ BROWSER_COMMAND_BUFFER_TEST_BIN := $(BUILD_DIR)/browser_command_buffer_tests
 BROWSER_AUDIO_DEVICE_TEST_BIN := $(BUILD_DIR)/browser_audio_device_tests
 BROWSER_MIDI_BRIDGE_TEST_BIN := $(BUILD_DIR)/browser_midi_bridge_tests
 CONTROLLER_WIZARD_TEST_BIN := $(BUILD_DIR)/controller_wizard_tests
+
+# The browser ships wasm32, where std::size_t is 32 bits. Every gate above
+# builds for the 64-bit host, so arithmetic whose result depends on the width
+# of std::size_t is otherwise never exercised at the width that ships. These
+# two binaries are the ones that reach the block validator and the config view
+# model; they are the host sources unchanged, rebuilt for the other target.
+# em++ rather than emcc: emcc does not link the C++ runtime, so a test harness
+# that throws fails at link time. The vendored toolchain is preferred over one
+# on PATH, which is the opposite of browser/Makefile's order and deliberate --
+# a different emscripten on PATH links against its own sysroot and fails here.
+EMSDK ?= $(HOME)/.local/emsdk
+EMSDK_EMXX := $(EMSDK)/upstream/emscripten/em++
+WASM32_EMXX ?= $(if $(wildcard $(EMSDK_EMXX)),$(EMSDK_EMXX),$(if $(shell command -v em++ 2>/dev/null),em++,))
+NODE ?= node
+WASM32_BUILD_DIR := $(BUILD_DIR)/wasm32
+WASM32_TESTS := blocks_tests viewmodel_tests
+# The test harnesses signal failure by throwing, which emscripten discards
+# unless catching is compiled in. -O0 keeps the build near 15s per binary.
+WASM32_FLAGS := -std=c++20 -O0 -fexceptions -sNO_DISABLE_EXCEPTION_CATCHING
 SRC := src/ParameterModulation.cpp src/ButtonGrid.cpp src/MidiController.cpp src/PatchPersistence.cpp src/DspWavetable.cpp src/Modules.cpp src/MidiReconcile.cpp src/MidiDevicePoller.cpp src/MidiConfigViewModel.cpp src/MidiConfigBlocks.cpp src/MasterClock.cpp src/ControllerWizard.cpp
 OBJ := $(BUILD_DIR)/ParameterModulation.o $(BUILD_DIR)/ButtonGrid.o $(BUILD_DIR)/MidiController.o $(BUILD_DIR)/PatchPersistence.o $(BUILD_DIR)/DspWavetable.o $(BUILD_DIR)/Modules.o $(BUILD_DIR)/MidiReconcile.o $(BUILD_DIR)/MidiDevicePoller.o $(BUILD_DIR)/MidiConfigViewModel.o $(BUILD_DIR)/MidiConfigBlocks.o $(BUILD_DIR)/MasterClock.o $(BUILD_DIR)/ControllerWizard.o
 DSP_HEADERS := include/synth/DspMath.hpp include/synth/DspNumbers.hpp include/synth/DspTransferFunction.hpp include/synth/DspFilters.hpp include/synth/DspScope.hpp include/synth/DspWavetable.hpp include/synth/DspOscillators.hpp include/synth/DspBuffers.hpp include/synth/DspAdsr.hpp include/synth/DspConstant.hpp include/synth/DspDegrade.hpp include/synth/DspMetering.hpp include/synth/DspNoise.hpp include/synth/DspOla.hpp include/synth/DspResynthesis.hpp include/synth/DspSpectral.hpp include/synth/DspPhasor2Tick.hpp
@@ -43,8 +63,9 @@ RUNTIME_PAGE_HEADERS := include/synth/RuntimePages.hpp include/synth/RuntimePage
 APPS_DIR := apps
 MINIAPP_DIR := $(APPS_DIR)/miniapp
 SHEAF_PATCH_DIR := $(APPS_DIR)/sheaf-patch
+JUCE_DIR ?= $(HOME)/JUCE
 
-.PHONY: all build test dsp_tests master_clock_tests contract_tests audio_input_tests engine_tests controller_wizard_tests check-ui-boundary miniapp sheaf-patch apps browser browser-apps browser-fixture-app browser-apps-run browser-apps-smoke browser-unit-test browser-command-buffer-test browser-audio-device-test browser-midi-bridge-test clean
+.PHONY: all build test dsp_tests master_clock_tests contract_tests audio_input_tests engine_tests controller_wizard_tests check-ui-boundary check-ui-boundary-empty-discovery check-app-bundle-plist miniapp sheaf-patch apps browser browser-apps browser-fixture-app browser-apps-run browser-apps-smoke browser-unit-test browser-command-buffer-test browser-audio-device-test browser-midi-bridge-test clean test-wasm32
 
 all: build test
 
@@ -52,6 +73,12 @@ build: $(LIB)
 
 check-ui-boundary:
 	bash scripts/check_ui_boundary.sh
+
+check-ui-boundary-empty-discovery:
+	bash scripts/check_ui_boundary_empty_discovery.sh
+
+check-app-bundle-plist:
+	bash scripts/check_app_bundle_plist.sh
 
 $(BUILD_SENTINEL):
 	mkdir -p $(BUILD_DIR)
@@ -178,29 +205,32 @@ $(VIEWMODEL_TEST_BIN): tests/viewmodel_tests.cpp $(LIB) include/synth/MidiConfig
 $(BLOCKS_TEST_BIN): tests/blocks_tests.cpp $(LIB) include/synth/MidiConfigBlocks.hpp include/synth/MidiController.hpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
-$(PORTABLE_UI_TEST_BIN): tests/portable_ui_tests.cpp tests/support/VisualCriteria.hpp apps/miniapp/MiniAppDraw.hpp apps/miniapp/MiniAppUI.hpp apps/miniapp/MiniAppUiModel.hpp apps/miniapp/MiniAppCore.hpp apps/braid-4/Braid4Draw.hpp apps/braid-4/Braid4UI.hpp apps/braid-4/Braid4UiModel.hpp apps/braid-4/Braid4Core.hpp include/synth/EncoderDraw.hpp include/synth/PortableScopeVisualizer.hpp include/synth/PortableUILayout.hpp include/synth/PortableUIStandardLayout.hpp include/synth/ConstantBarVisualizer.hpp include/synth/NoiseWaveformVisualizer.hpp include/synth/DspConstant.hpp include/synth/DspNoise.hpp $(RUNTIME_PAGE_HEADERS) include/synth/ControllersPageUI.hpp include/synth/MidiConfigBlocks.hpp include/synth/AppConcepts.hpp $(STANDARD_MODULATOR_HEADERS) $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+$(PORTABLE_UI_TEST_BIN): tests/portable_ui_tests.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(LIB) -o $@
 
 $(PORTABLE_UI_LAYOUT_TEST_BIN): tests/portable_ui_layout_tests.cpp tests/support/VisualCriteria.hpp include/synth/PortableUI.hpp include/synth/PortableUIBuilders.hpp include/synth/PortableUILayout.hpp include/synth/PortableUIMetrics.hpp include/synth/PortableUIStandardLayout.hpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
-$(RUNTIME_MAIN_COMPONENT_TEST_BIN): tests/runtime_main_component_tests.cpp include/synth/RuntimeMainComponent.hpp include/synth/AppConcepts.hpp include/synth/ControllerWizardDiscoveryCache.hpp include/synth/ControllersPageUI.hpp include/synth/MidiConfigViewModel.hpp $(RUNTIME_PAGE_HEADERS) include/synth/RuntimePagePolicy.hpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+$(RUNTIME_MAIN_COMPONENT_TEST_BIN): tests/runtime_main_component_tests.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(LIB) -o $@
 
 $(RUNTIME_FILE_SERVICE_TEST_BIN): tests/runtime_file_service_tests.cpp include/synth/RuntimeFileService.hpp $(RUNTIME_PAGE_HEADERS) $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
-$(CONTROLLERS_PAGE_UI_TEST_BIN): tests/controllers_page_ui_tests.cpp include/synth/ControllersPageUI.hpp include/synth/MidiConfigViewModel.hpp include/synth/MidiConfigBlocks.hpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+$(CONTROLLERS_PAGE_UI_TEST_BIN): tests/controllers_page_ui_tests.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(LIB) -o $@
 
-$(BROWSER_CONTRACT_TEST_BIN): tests/browser_runtime_contract_tests.cpp browser/cpp/BrowserRuntimeAbi.cpp include/synth/browser/BrowserAppEntry.hpp include/synth/browser/BrowserRuntime.hpp include/synth/browser/BrowserRuntimeMainServices.hpp include/synth/browser/BrowserAudioDevices.hpp include/synth/browser/BrowserMidiBridge.hpp include/synth/browser/BrowserCommandBuffer.hpp include/synth/ControllerWizardDiscoveryCache.hpp include/synth/RuntimeMainComponent.hpp $(RUNTIME_PAGE_HEADERS) include/synth/RuntimePagePolicy.hpp include/synth/RuntimeFileService.hpp include/synth/AppConcepts.hpp include/synth/AppContext.hpp include/synth/Engine.hpp include/synth/MasterClock.hpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< browser/cpp/BrowserRuntimeAbi.cpp $(LIB) -o $@
+$(BUILD_DIR)/BrowserRuntimeAbi.o: browser/cpp/BrowserRuntimeAbi.cpp | $(BUILD_SENTINEL)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(BROWSER_CONTRACT_TEST_BIN): tests/browser_runtime_contract_tests.cpp $(BUILD_DIR)/BrowserRuntimeAbi.o $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(BUILD_DIR)/BrowserRuntimeAbi.o $(LIB) -o $@
 
 $(BROWSER_COMMAND_BUFFER_TEST_BIN): tests/browser_command_buffer_tests.cpp apps/miniapp/MiniAppDraw.hpp include/synth/browser/BrowserCommandBuffer.hpp $(RUNTIME_PAGE_HEADERS) $(STANDARD_MODULATOR_HEADERS) $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
-$(BROWSER_AUDIO_DEVICE_TEST_BIN): tests/browser_audio_device_tests.cpp include/synth/browser/BrowserAudioDevices.hpp include/synth/browser/BrowserRuntimeMainServices.hpp include/synth/browser/BrowserMidiBridge.hpp include/synth/ControllersPageUI.hpp include/synth/Engine.hpp include/synth/RuntimeFileService.hpp $(RUNTIME_PAGE_HEADERS) include/synth/PatchPersistence.hpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+$(BROWSER_AUDIO_DEVICE_TEST_BIN): tests/browser_audio_device_tests.cpp $(LIB)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) $< $(LIB) -o $@
 
 $(BROWSER_MIDI_BRIDGE_TEST_BIN): tests/browser_midi_bridge_tests.cpp include/synth/browser/BrowserMidiBridge.hpp include/synth/Engine.hpp include/synth/MidiReconcile.hpp include/synth/MidiController.hpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
@@ -223,7 +253,25 @@ browser-audio-device-test: $(BROWSER_AUDIO_DEVICE_TEST_BIN)
 browser-midi-bridge-test: $(BROWSER_MIDI_BRIDGE_TEST_BIN)
 	$(BROWSER_MIDI_BRIDGE_TEST_BIN)
 
-test: check-ui-boundary $(TEST_BIN) $(BUTTON_GRID_TEST_BIN) $(DSP_TEST_BIN) $(MASTER_CLOCK_TEST_BIN) $(MODULE_TEST_BIN) $(INSTRUMENT_TEST_BIN) $(CONTRACT_TEST_BIN) $(AUDIO_INPUT_TEST_BIN) $(LOGGING_TEST_BIN) $(ENGINE_TEST_BIN) $(RIG_TEST_BIN) $(MINIAPP_SYSTEM_TEST_BIN) $(BRAID4_SYSTEM_TEST_BIN) $(BRAID4_DEADLINE_TEST_BIN) $(RECONCILE_TEST_BIN) $(RECONCILE_EXECUTOR_TEST_BIN) $(POLLER_TEST_BIN) $(MIDI_SENDER_TEST_BIN) $(VIEWMODEL_TEST_BIN) $(BLOCKS_TEST_BIN) $(PORTABLE_UI_TEST_BIN) $(PORTABLE_UI_LAYOUT_TEST_BIN) $(RUNTIME_MAIN_COMPONENT_TEST_BIN) $(RUNTIME_FILE_SERVICE_TEST_BIN) $(CONTROLLERS_PAGE_UI_TEST_BIN) $(BROWSER_CONTRACT_TEST_BIN) $(BROWSER_COMMAND_BUFFER_TEST_BIN) $(BROWSER_AUDIO_DEVICE_TEST_BIN) $(BROWSER_MIDI_BRIDGE_TEST_BIN) $(CONTROLLER_WIZARD_TEST_BIN)
+# Fails rather than skips when the toolchain is missing: a gate that skips
+# silently is how the library came to ship a guard that was never run on the
+# target it ships to.
+test-wasm32:
+	@test -n "$(WASM32_EMXX)" || { \
+		echo "em++ not found (looked for '$(EMSDK_EMXX)' and on PATH; set EMSDK or WASM32_EMXX)." >&2; \
+		echo "The browser target is what this gate exists to cover, so it fails rather than skipping." >&2; \
+		exit 1; }
+	@command -v $(NODE) >/dev/null 2>&1 || { echo "$(NODE) not found; needed to run the wasm32 binaries." >&2; exit 1; }
+	@mkdir -p $(WASM32_BUILD_DIR)
+	@for name in $(WASM32_TESTS); do \
+		echo "wasm32: building $$name"; \
+		$(WASM32_EMXX) $(WASM32_FLAGS) $(CPPFLAGS) tests/$$name.cpp $(SRC) \
+			-o $(WASM32_BUILD_DIR)/$$name.js || exit 1; \
+		echo "wasm32: running $$name"; \
+		$(NODE) $(WASM32_BUILD_DIR)/$$name.js || exit 1; \
+	done
+
+test: check-ui-boundary check-ui-boundary-empty-discovery check-app-bundle-plist test-wasm32 $(TEST_BIN) $(BUTTON_GRID_TEST_BIN) $(DSP_TEST_BIN) $(MASTER_CLOCK_TEST_BIN) $(MODULE_TEST_BIN) $(INSTRUMENT_TEST_BIN) $(CONTRACT_TEST_BIN) $(AUDIO_INPUT_TEST_BIN) $(LOGGING_TEST_BIN) $(ENGINE_TEST_BIN) $(RIG_TEST_BIN) $(MINIAPP_SYSTEM_TEST_BIN) $(BRAID4_SYSTEM_TEST_BIN) $(BRAID4_DEADLINE_TEST_BIN) $(RECONCILE_TEST_BIN) $(RECONCILE_EXECUTOR_TEST_BIN) $(POLLER_TEST_BIN) $(MIDI_SENDER_TEST_BIN) $(VIEWMODEL_TEST_BIN) $(BLOCKS_TEST_BIN) $(PORTABLE_UI_TEST_BIN) $(PORTABLE_UI_LAYOUT_TEST_BIN) $(RUNTIME_MAIN_COMPONENT_TEST_BIN) $(RUNTIME_FILE_SERVICE_TEST_BIN) $(CONTROLLERS_PAGE_UI_TEST_BIN) $(BROWSER_CONTRACT_TEST_BIN) $(BROWSER_COMMAND_BUFFER_TEST_BIN) $(BROWSER_AUDIO_DEVICE_TEST_BIN) $(BROWSER_MIDI_BRIDGE_TEST_BIN) $(CONTROLLER_WIZARD_TEST_BIN)
 	$(TEST_BIN)
 	$(BUTTON_GRID_TEST_BIN)
 	$(DSP_TEST_BIN)
@@ -254,6 +302,11 @@ test: check-ui-boundary $(TEST_BIN) $(BUTTON_GRID_TEST_BIN) $(DSP_TEST_BIN) $(MA
 	$(BROWSER_AUDIO_DEVICE_TEST_BIN)
 	$(BROWSER_MIDI_BRIDGE_TEST_BIN)
 	$(CONTROLLER_WIZARD_TEST_BIN)
+	@if [ -d "$(JUCE_DIR)/modules" ]; then \
+		$(MAKE) -C $(MINIAPP_DIR) test; \
+	else \
+		echo "JUCE not found at $(JUCE_DIR); skipping $(MINIAPP_DIR) JUCE-backed tests."; \
+	fi
 
 miniapp:
 	$(MAKE) -C $(MINIAPP_DIR)
@@ -284,3 +337,5 @@ clean:
 	rm -rf $(BUILD_DIR)
 	if [ -f "$(MINIAPP_DIR)/Makefile" ]; then $(MAKE) -C $(MINIAPP_DIR) clean; fi
 	if [ -f "$(SHEAF_PATCH_DIR)/Makefile" ]; then $(MAKE) -C $(SHEAF_PATCH_DIR) clean; fi
+
+-include $(wildcard $(BUILD_DIR)/*.d)
