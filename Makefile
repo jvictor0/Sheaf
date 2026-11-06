@@ -1,8 +1,6 @@
 MAKEFLAGS += --warn-undefined-variables
 
-PROJECTS := conductor web quest-runner dictator realtime-agent sheaf-chat agents xagent synth
-CODEX_HOME ?= $(HOME)/.codex
-PLUGIN_CREATOR_VALIDATOR := $(CODEX_HOME)/skills/.system/plugin-creator/scripts/validate_plugin.py
+PROJECTS := conductor web quest-runner dictator realtime-agent sheaf-chat agents synth
 TOOL ?=
 REF ?=
 FORCE ?=
@@ -20,9 +18,6 @@ FORCE ?=
 .PHONY: agents-install-global agents-check-global agents-clean-global
 .PHONY: cloudcli-install cloudcli-check
 .PHONY: agents-vendor-sync
-.PHONY: xagent-build xagent-test xagent-clean
-.PHONY: xagent-service-run
-.PHONY: xagent-plugin-build xagent-plugin-test xagent-plugin-install-global
 .PHONY: synth-build synth-test synth-clean synth-browser-build synth-browser-test
 
 .DEFAULT_GOAL := all
@@ -37,7 +32,7 @@ clean:
 		$(MAKE) -C projects/$$project clean; \
 	done
 
-test: xagent-plugin-test
+test:
 	@status=0; \
 	for project in $(PROJECTS); do \
 		$(MAKE) -C projects/$$project test || status=$$?; \
@@ -162,30 +157,6 @@ cloudcli-check:
 agents-vendor-sync:
 	$(MAKE) -C projects/agents vendor-sync TOOL="$(TOOL)" REF="$(REF)" FORCE="$(FORCE)"
 
-xagent-build:
-	$(MAKE) -C projects/xagent build
-
-xagent-test:
-	$(MAKE) -C projects/xagent test
-
-xagent-clean:
-	$(MAKE) -C projects/xagent clean
-
-xagent-plugin-build:
-	python3 plugins/xagent/scripts/package_xagent.py
-
-xagent-plugin-test:
-	python3 -m unittest plugins/xagent/scripts/install_global_test.py
-	python3 -m unittest plugins/xagent/scripts/controller_stop_hook_test.py
-	python3 plugins/xagent/scripts/package_xagent.py --check
-	python3 $(PLUGIN_CREATOR_VALIDATOR) plugins/xagent
-
-xagent-plugin-install-global:
-	python3 plugins/xagent/scripts/install_global.py install
-
-xagent-service-run:
-	$(MAKE) -C projects/xagent service-run
-
 synth-build:
 	$(MAKE) -C projects/synth build
 
@@ -224,7 +195,6 @@ help:
 	@echo "  make agents-vendor-sync TOOL=openspec|superpowers REF=<tag>  Refresh vendored tooling pins"
 	@echo "  Repo-local outputs contain repository instructions and Sheaf-only skills."
 	@echo "  Shared skills install only through agents-install-global."
-	@echo "  Plugin-owned skills such as xagent-subagents are excluded from the agents installer."
 	@echo ""
 	@echo "Projects: $(PROJECTS)"
 	@echo ""

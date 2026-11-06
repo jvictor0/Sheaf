@@ -1,6 +1,0 @@
-{"type":"thread.started","thread_id":"codex-thread-1"}
-{"type":"turn.started"}
-{"type":"item.started","item":{"type":"command_execution","id":"tool-1","command":"npm test"}}
-{"type":"item.completed","item":{"type":"command_execution","id":"tool-1","command":"npm test","exit_code":0,"output":"ok"}}
-{"type":"item.completed","item":{"type":"agent_message","id":"msg-1","text":"Codex final"}}
-{"type":"turn.completed","final_text":"Codex final","usage":{"total_tokens":42}}

@@ -140,7 +140,7 @@ python3 projects/agents/task-analyzer/ingest.py [ingest|rebuild-derived|backfill
   an earlier version of this flag printed a RunReport-shaped summary
   instead — all write counts trivially zero on a run that writes nothing,
   and no plan content at all.)
-- `--no-agents`: mechanical ingestion only — no xagent dispatch, no cost to
+- `--no-agents`: mechanical ingestion only — no Claude dispatch, no cost to
   a fleet.
 - `--rescore TABLE`: opt-in re-scoring of everything whose stored
   `rubric_version`/`taxonomy_version` differs from the asset's current
@@ -384,16 +384,14 @@ dispatch against an already-archived change.
 
 ## Configuration
 
-- `TASK_ANALYZER_XAGENT_MAIN` (env var): overrides the resolved path to the
-  xagent CLI entry point (`node <path> run ...`) that `agents.xagent_runner`
-  shells out to for real agentic dispatch. Resolution order: the
-  `xagent_main` keyword argument passed directly to `xagent_runner` (highest
-  priority) → this env var → the repo-relative default
-  (`projects/xagent/dist/src/main.js`). Set it when running the pipeline
-  against a different xagent checkout/build (e.g. a worktree with its own
-  `dist/`); a missing resolved path raises loudly (`RuntimeError` naming all
-  three resolution sources) rather than silently producing zero staged
-  files.
+- `TASK_ANALYZER_CLAUDE_BIN` (env var): overrides the Claude executable used
+  by `agents.claude_runner` for `claude -p` dispatch. Resolution order: the
+  `claude_bin` keyword argument → this env var → `claude` on `PATH`.
+  Values may be executable paths or command names on `PATH`. Install and
+  authenticate Claude Code before running agentic scoring. Missing executables
+  fail before dispatch; failed retries report the captured `claude.log` tail.
+  Each batch reads its full prompt from a scratch file and uses `acceptEdits`
+  to write results there. `--no-agents` remains available for mechanical runs.
 
 ## Known gaps / TODOs
 

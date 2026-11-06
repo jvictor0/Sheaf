@@ -1,10 +1,10 @@
-"""Tests for agents.xagent_runner (Task 7's real agent_runner).
+"""Tests for agents.claude_runner (Task 7's real agent_runner).
 
 Every test monkeypatches ``agents.subprocess.run`` with a fake that never
-touches node/an LLM: it inspects the batch's ``items.json``/``prompt.md``
+touches Claude/an LLM: it inspects the batch's ``items.json``/``prompt.md``
 (found via the fake's ``cwd`` kwarg, which ``agents.py`` sets to the
 per-batch scratch work dir) and writes canned JSON into ``output/`` --
-mimicking what a real xagent subagent run would leave behind. Zero real
+mimicking what a real claude subagent run would leave behind. Zero real
 dispatches happen anywhere in this file.
 """
 import json
@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import agents  # noqa: E402
@@ -47,7 +48,7 @@ def _canned_valid(kind: str, entity_key: str) -> dict:
     return {"session_key": entity_key, "labels": {"1": "green"}}
 
 
-class FakeXagent:
+class FakeClaude:
     """Stand-in for ``subprocess.run`` -- records every call (cmd + kwargs)
     and, for each item in the batch it's handed (read from cwd/items.json),
     writes an output JSON file per ``behavior(entity_key, attempt_number)``.
@@ -56,7 +57,7 @@ class FakeXagent:
     malformed/missing output for specific keys on specific attempts.
 
     ``rc_and_log`` defaults to always-succeed (exit 0, empty log); tests
-    override it to simulate a crashed/misconfigured xagent process -- it's
+    override it to simulate a crashed/misconfigured claude process -- it's
     given the 1-based call index across the whole fake's lifetime and
     returns ``(returncode, log_text)``; ``log_text`` is written to the
     ``stdout`` file object the real code passes (mirroring how a real
@@ -110,28 +111,25 @@ class AgentsTestBase(unittest.TestCase):
         self._real_run = agents.subprocess.run
         self.addCleanup(setattr, agents.subprocess, "run", self._real_run)
 
-        # Every test gets a dummy (existing, but never executed) xagent
-        # entry point as the default -- the existence check added for the
-        # "missing binary silently drops items" fix would otherwise reject
-        # every call in this suite, since the real
-        # projects/xagent/dist/src/main.js doesn't exist in this checkout.
-        self._dummy_xagent_bin = Path(self._tmp.name) / "dummy_xagent_main.js"
-        self._dummy_xagent_bin.write_text("// dummy xagent entry point for tests\n")
-        self._orig_xagent_bin = agents._XAGENT_BIN
-        agents._XAGENT_BIN = self._dummy_xagent_bin
-        self.addCleanup(setattr, agents, "_XAGENT_BIN", self._orig_xagent_bin)
+        # Executable fixture for resolution; subprocess.run is faked below.
+        self._dummy_claude_bin = Path(self._tmp.name) / "dummy_claude"
+        self._dummy_claude_bin.write_text("#!/bin/sh\nexit 0\n")
+        self._dummy_claude_bin.chmod(0o755)
+        self._orig_claude_bin = agents._CLAUDE_BIN
+        agents._CLAUDE_BIN = self._dummy_claude_bin
+        self.addCleanup(setattr, agents, "_CLAUDE_BIN", self._orig_claude_bin)
 
-        # Isolate TASK_ANALYZER_XAGENT_MAIN so host-environment leakage
+        # Isolate TASK_ANALYZER_CLAUDE_BIN so host-environment leakage
         # never affects resolution-order tests.
-        had_env = agents._XAGENT_MAIN_ENV_VAR in os.environ
-        orig_env = os.environ.get(agents._XAGENT_MAIN_ENV_VAR)
-        os.environ.pop(agents._XAGENT_MAIN_ENV_VAR, None)
+        had_env = agents._CLAUDE_BIN_ENV_VAR in os.environ
+        orig_env = os.environ.get(agents._CLAUDE_BIN_ENV_VAR)
+        os.environ.pop(agents._CLAUDE_BIN_ENV_VAR, None)
 
         def _restore_env():
             if had_env:
-                os.environ[agents._XAGENT_MAIN_ENV_VAR] = orig_env
+                os.environ[agents._CLAUDE_BIN_ENV_VAR] = orig_env
             else:
-                os.environ.pop(agents._XAGENT_MAIN_ENV_VAR, None)
+                os.environ.pop(agents._CLAUDE_BIN_ENV_VAR, None)
 
         self.addCleanup(_restore_env)
 
@@ -139,9 +137,40 @@ class AgentsTestBase(unittest.TestCase):
         agents.subprocess.run = fake
 
 
+class TestExecutableDispatch(unittest.TestCase):
+    def test_cli_on_path_reads_brief_and_writes_staged_output(self):
+        # Exercise real process launch and file handoff without contacting an LLM.
+        with tempfile.TemporaryDirectory(prefix="claude scorer ") as tempdir:
+            root = Path(tempdir)
+            cli = root / "claude"
+            cli.write_text(
+                f"#!{sys.executable}\n"
+                "import json, pathlib, sys\n"
+                "assert sys.argv[1] == '-p'\n"
+                "assert sys.argv[sys.argv.index('--model') + 1] == 'haiku'\n"
+                "assert sys.argv[sys.argv.index('--permission-mode') + 1] == 'acceptEdits'\n"
+                "prompt = pathlib.Path.cwd() / 'prompt.md'\n"
+                "assert str(prompt) in sys.argv[2]\n"
+                "assert prompt.is_file()\n"
+                "for item in json.loads(pathlib.Path('items.json').read_text()):\n"
+                "    assert pathlib.Path(item['timeline_file']).read_text() == 'turn 1: wrote test'\n"
+                "    key = item['session_key']\n"
+                "    (pathlib.Path('output') / (key + '.json')).write_text(\n"
+                "        json.dumps({'session_key': key, 'labels': {'1': 'red'}}))\n"
+            )
+            cli.chmod(0o755)
+            items = [{"session_key": "claude:s1", "version": "1", "input_sha256": "a" * 64,
+                      "timeline": "turn 1: wrote test"}]
+            with mock.patch.dict(os.environ, {"PATH": str(root), "TASK_ANALYZER_CLAUDE_BIN": ""}):
+                written = agents.claude_runner("phase_labeling", items, root / "staging")
+            self.assertEqual(len(written), 1)
+            self.assertEqual(json.loads(written[0].read_text()),
+                             {"session_key": "claude:s1", "labels": {"1": "red"}})
+
+
 class TestBatching(AgentsTestBase):
     def test_25_items_yields_3_invocations_of_at_most_12(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
         items = [
@@ -154,7 +183,7 @@ class TestBatching(AgentsTestBase):
             for i in range(25)
         ]
 
-        written = agents.xagent_runner("phase_labeling", items, self.staging_dir)
+        written = agents.claude_runner("phase_labeling", items, self.staging_dir)
 
         self.assertEqual(len(fake.calls), 3)
         self.assertTrue(all(n <= 12 for n in fake.batch_sizes))
@@ -166,24 +195,24 @@ class TestBatching(AgentsTestBase):
             self.assertEqual(p.parent, self.staging_dir / "phase_labeling")
 
     def test_empty_items_returns_empty_without_dispatch(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
-        written = agents.xagent_runner("complexity", [], self.staging_dir)
+        written = agents.claude_runner("complexity", [], self.staging_dir)
 
         self.assertEqual(written, [])
         self.assertEqual(len(fake.calls), 0)
 
     def test_unknown_kind_raises(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
         with self.assertRaises(ValueError):
-            agents.xagent_runner("bogus", [{"task_key": "x"}], self.staging_dir)
+            agents.claude_runner("bogus", [{"task_key": "x"}], self.staging_dir)
 
 
 class TestPromptRendering(AgentsTestBase):
     def test_rendered_prompt_includes_rubric_and_staging_paths(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
         items = [
@@ -201,7 +230,7 @@ class TestPromptRendering(AgentsTestBase):
             },
         ]
 
-        agents.xagent_runner("complexity", items, self.staging_dir)
+        agents.claude_runner("complexity", items, self.staging_dir)
 
         self.assertEqual(len(fake.calls), 1)
         cwd = Path(fake.calls[0][1]["cwd"])
@@ -227,11 +256,11 @@ class TestPromptRendering(AgentsTestBase):
         self.assertEqual(brief_file.read_text(encoding="utf-8"), "Implement the widget core module.")
 
     def test_stdin_closed_and_stdout_is_a_file_not_a_pipe(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
         items = [{"session_key": "claude:s1", "version": "1", "input_sha256": "d" * 64, "timeline": "t"}]
-        agents.xagent_runner("phase_labeling", items, self.staging_dir)
+        agents.claude_runner("phase_labeling", items, self.staging_dir)
 
         kwargs = fake.calls[0][1]
         self.assertNotEqual(kwargs["stdin"], subprocess.PIPE)
@@ -248,7 +277,7 @@ class TestValidationAndRetry(AgentsTestBase):
                 return "invalid", {"task_key": key}  # missing required keys
             return "valid", _canned_valid(kind, key)
 
-        fake = FakeXagent(behavior=behavior)
+        fake = FakeClaude(behavior=behavior)
         self._patch(fake)
 
         items = [
@@ -256,7 +285,7 @@ class TestValidationAndRetry(AgentsTestBase):
             {"task_key": "add-widget--task-2", "version": "1", "input_sha256": "f" * 64, "brief_text": "brief two"},
         ]
 
-        written = agents.xagent_runner("complexity", items, self.staging_dir)
+        written = agents.claude_runner("complexity", items, self.staging_dir)
 
         self.assertEqual(len(fake.calls), 2)  # initial batch + one retry batch
         self.assertEqual(fake.batch_sizes, [2, 1])  # retry batch has only the invalid item
@@ -272,7 +301,7 @@ class TestValidationAndRetry(AgentsTestBase):
                 return "missing", None  # never produces output, even on retry
             return "valid", _canned_valid(kind, key)
 
-        fake = FakeXagent(behavior=behavior)
+        fake = FakeClaude(behavior=behavior)
         self._patch(fake)
 
         items = [
@@ -280,7 +309,7 @@ class TestValidationAndRetry(AgentsTestBase):
             {"task_key": "add-widget--task-2", "version": "1", "input_sha256": "2" * 64, "brief_text": "brief two"},
         ]
 
-        written = agents.xagent_runner("complexity", items, self.staging_dir)
+        written = agents.claude_runner("complexity", items, self.staging_dir)
 
         self.assertEqual(len(fake.calls), 2)
         self.assertEqual(len(written), 1)
@@ -290,49 +319,47 @@ class TestValidationAndRetry(AgentsTestBase):
 
 class TestModelHint(AgentsTestBase):
     def test_model_hint_honored_by_default(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
         # phase_labeling's prompt frontmatter declares model_hint: haiku.
         items = [{"session_key": "claude:s1", "version": "1", "input_sha256": "3" * 64, "timeline": "t"}]
-        agents.xagent_runner("phase_labeling", items, self.staging_dir)
+        agents.claude_runner("phase_labeling", items, self.staging_dir)
         cmd = fake.calls[0][0]
         self.assertEqual(cmd[cmd.index("--model") + 1], "haiku")
 
         fake.calls.clear()
         # complexity/grading declare model_hint: sonnet.
         items = [{"task_key": "t1", "version": "1", "input_sha256": "4" * 64, "brief_text": "b"}]
-        agents.xagent_runner("complexity", items, self.staging_dir)
+        agents.claude_runner("complexity", items, self.staging_dir)
         cmd = fake.calls[0][0]
         self.assertEqual(cmd[cmd.index("--model") + 1], "sonnet")
 
     def test_model_override_wins_over_hint(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
         items = [{"session_key": "claude:s2", "version": "1", "input_sha256": "5" * 64, "timeline": "t"}]
-        agents.xagent_runner("phase_labeling", items, self.staging_dir, model="opus")
+        agents.claude_runner("phase_labeling", items, self.staging_dir, model="opus")
         cmd = fake.calls[0][0]
         self.assertEqual(cmd[cmd.index("--model") + 1], "opus")
 
-    def test_harness_default_and_override(self):
-        fake = FakeXagent()
+    def test_headless_cli_receives_prompt_file_pointer_and_write_permissions(self):
+        fake = FakeClaude()
         self._patch(fake)
-
         items = [{"task_key": "t1", "version": "1", "input_sha256": "6" * 64, "brief_text": "b"}]
-        agents.xagent_runner("complexity", items, self.staging_dir)
-        cmd = fake.calls[0][0]
-        self.assertEqual(cmd[cmd.index("--harness") + 1], "claude_code")
-
-        fake.calls.clear()
-        agents.xagent_runner("complexity", items, self.staging_dir, harness="codex")
-        cmd = fake.calls[0][0]
-        self.assertEqual(cmd[cmd.index("--harness") + 1], "codex")
+        agents.claude_runner("complexity", items, self.staging_dir)
+        cmd, kwargs = fake.calls[0]
+        self.assertEqual(cmd[:2], [str(self._dummy_claude_bin.resolve()), "-p"])
+        prompt_path = Path(kwargs["cwd"]) / "prompt.md"
+        self.assertEqual(cmd[2], f"Read your full task prompt at {prompt_path} and follow it exactly.")
+        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "acceptEdits")
+        self.assertTrue(prompt_path.is_file())
 
 
 class TestGradingReviewFiles(AgentsTestBase):
     def test_grading_item_writes_review_text_and_uses_review_files_list(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
         items = [
@@ -343,7 +370,7 @@ class TestGradingReviewFiles(AgentsTestBase):
                 "review_text": "PASS: looks correct, no issues found.",
             }
         ]
-        written = agents.xagent_runner("grading", items, self.staging_dir)
+        written = agents.claude_runner("grading", items, self.staging_dir)
 
         self.assertEqual(len(written), 1)
         cwd = Path(fake.calls[0][1]["cwd"])
@@ -386,7 +413,7 @@ class TestGradingUngradeableShape(AgentsTestBase):
         def behavior(kind, key, attempt):
             return "valid", _canned_ungradeable(key)
 
-        fake = FakeXagent(behavior=behavior)
+        fake = FakeClaude(behavior=behavior)
         self._patch(fake)
 
         items = [
@@ -397,7 +424,7 @@ class TestGradingUngradeableShape(AgentsTestBase):
                 "review_text": "unrelated content, mis-joined",
             }
         ]
-        written = agents.xagent_runner("grading", items, self.staging_dir)
+        written = agents.claude_runner("grading", items, self.staging_dir)
 
         self.assertEqual(len(fake.calls), 1)  # no retry -- accepted first attempt
         self.assertEqual(len(written), 1)
@@ -443,7 +470,7 @@ class TestGradingShapeDiscrimination(AgentsTestBase):
             data["reason"] = "harmless note"
             return "valid", data
 
-        fake = FakeXagent(behavior=behavior)
+        fake = FakeClaude(behavior=behavior)
         self._patch(fake)
 
         items = [
@@ -454,7 +481,7 @@ class TestGradingShapeDiscrimination(AgentsTestBase):
                 "review_text": "clean review",
             }
         ]
-        written = agents.xagent_runner("grading", items, self.staging_dir)
+        written = agents.claude_runner("grading", items, self.staging_dir)
 
         self.assertEqual(len(fake.calls), 1)  # no retry
         self.assertEqual(len(written), 1)
@@ -468,7 +495,7 @@ class TestGradingShapeDiscrimination(AgentsTestBase):
             data["G1"] = None
             return "valid", data  # "valid" JSON, but an invalid grading shape
 
-        fake = FakeXagent(behavior=behavior)
+        fake = FakeClaude(behavior=behavior)
         self._patch(fake)
 
         items = [
@@ -479,65 +506,66 @@ class TestGradingShapeDiscrimination(AgentsTestBase):
                 "review_text": "clean review",
             }
         ]
-        written = agents.xagent_runner("grading", items, self.staging_dir)
+        written = agents.claude_runner("grading", items, self.staging_dir)
 
         self.assertEqual(len(fake.calls), 2)  # initial + one retry
         self.assertEqual(len(written), 0)  # still invalid after retry -- dropped
 
 
-class TestXagentBinResolution(AgentsTestBase):
-    """Review fix: the xagent entry point must be resolvable without editing
-    source -- explicit param beats env var beats the repo-relative default."""
+class TestClaudeBinResolution(AgentsTestBase):
+    """Review fix: the claude entry point must be resolvable without editing
+    source -- explicit param beats env var beats the PATH default."""
 
     def test_param_beats_env_beats_default(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
         tmp = Path(self._tmp.name)
-        env_bin = tmp / "env_main.js"
-        param_bin = tmp / "param_main.js"
+        env_bin = tmp / "env_claude"
+        param_bin = tmp / "param_claude"
         for p in (env_bin, param_bin):
-            p.write_text("// fake xagent entry\n")
+            p.write_text("#!/bin/sh\nexit 0\n")
+            p.chmod(0o755)
 
         item = [{"task_key": "t1", "version": "1", "input_sha256": "a" * 64, "brief_text": "b"}]
 
-        # Default (no override) -- setUp already pointed agents._XAGENT_BIN
+        # Default (no override) -- setUp already pointed agents._CLAUDE_BIN
         # at a dummy existing file.
-        agents.xagent_runner("complexity", item, self.staging_dir)
+        agents.claude_runner("complexity", item, self.staging_dir)
         cmd = fake.calls[-1][0]
-        self.assertEqual(cmd[1], str(self._dummy_xagent_bin))
+        self.assertEqual(cmd[0], str(self._dummy_claude_bin.resolve()))
 
         # Env var beats the default.
-        os.environ[agents._XAGENT_MAIN_ENV_VAR] = str(env_bin)
-        agents.xagent_runner("complexity", item, self.staging_dir)
+        os.environ[agents._CLAUDE_BIN_ENV_VAR] = str(env_bin)
+        agents.claude_runner("complexity", item, self.staging_dir)
         cmd = fake.calls[-1][0]
-        self.assertEqual(cmd[1], str(env_bin))
+        self.assertEqual(cmd[0], str(env_bin.resolve()))
 
         # Explicit param beats the env var.
-        agents.xagent_runner("complexity", item, self.staging_dir, xagent_main=str(param_bin))
+        agents.claude_runner("complexity", item, self.staging_dir, claude_bin=str(param_bin.resolve()))
         cmd = fake.calls[-1][0]
-        self.assertEqual(cmd[1], str(param_bin))
+        self.assertEqual(cmd[0], str(param_bin.resolve()))
 
 
-class TestXagentBinMissing(AgentsTestBase):
+class TestClaudeBinMissing(AgentsTestBase):
     """Review fix: a missing entry point must raise loudly, before any
     dispatch is attempted, naming the resolved path and all three
     resolution sources -- not silently produce zero staged files."""
 
     def test_missing_binary_raises_before_any_dispatch(self):
-        fake = FakeXagent()
+        fake = FakeClaude()
         self._patch(fake)
 
-        missing = Path(self._tmp.name) / "does-not-exist" / "main.js"
+        missing = Path(self._tmp.name) / "does-not-exist" / "claude"
         item = [{"task_key": "t1", "version": "1", "input_sha256": "a" * 64, "brief_text": "b"}]
 
         with self.assertRaises(RuntimeError) as ctx:
-            agents.xagent_runner("complexity", item, self.staging_dir, xagent_main=str(missing))
+            agents.claude_runner("complexity", item, self.staging_dir, claude_bin=str(missing))
 
         msg = str(ctx.exception)
         self.assertIn(str(missing), msg)
-        self.assertIn("xagent_main", msg)
-        self.assertIn(agents._XAGENT_MAIN_ENV_VAR, msg)
+        self.assertIn("claude_bin", msg)
+        self.assertIn(agents._CLAUDE_BIN_ENV_VAR, msg)
         self.assertEqual(len(fake.calls), 0)  # never dispatched
 
 
@@ -549,18 +577,18 @@ class TestNonzeroExit(AgentsTestBase):
 
     def test_nonzero_exit_after_retry_raises_with_exit_code_and_log_tail(self):
         def rc_and_log(call_index):
-            return 1, f"call {call_index}: node crash TAIL_MARKER_XYZ\n"
+            return 1, f"call {call_index}: CLI crash TAIL_MARKER_XYZ\n"
 
         def behavior(kind, key, attempt):
             return "missing", None  # process crashed -- no output ever produced
 
-        fake = FakeXagent(behavior=behavior, rc_and_log=rc_and_log)
+        fake = FakeClaude(behavior=behavior, rc_and_log=rc_and_log)
         self._patch(fake)
 
         items = [{"task_key": "t1", "version": "1", "input_sha256": "a" * 64, "brief_text": "b"}]
 
         with self.assertRaises(RuntimeError) as ctx:
-            agents.xagent_runner("complexity", items, self.staging_dir)
+            agents.claude_runner("complexity", items, self.staging_dir)
 
         msg = str(ctx.exception)
         self.assertIn("1", msg)  # exit code
@@ -577,28 +605,28 @@ class TestNonzeroExit(AgentsTestBase):
                 return "missing", None
             return "valid", _canned_valid(kind, key)
 
-        fake = FakeXagent(behavior=behavior, rc_and_log=rc_and_log)
+        fake = FakeClaude(behavior=behavior, rc_and_log=rc_and_log)
         self._patch(fake)
 
         items = [{"task_key": "t1", "version": "1", "input_sha256": "a" * 64, "brief_text": "b"}]
-        written = agents.xagent_runner("complexity", items, self.staging_dir)
+        written = agents.claude_runner("complexity", items, self.staging_dir)
 
         self.assertEqual(len(written), 1)
         self.assertEqual(len(fake.calls), 2)
 
     def test_genuine_validation_failure_with_zero_exit_still_just_drops(self):
-        """Not every retry failure is a crash -- if xagent exits 0 both times
+        """Not every retry failure is a crash -- if claude exits 0 both times
         but the model's output never validates, that item is still silently
         dropped (an accepted, pre-existing behavior; only nonzero-exit
         failures must raise)."""
         def behavior(kind, key, attempt):
             return "invalid", {"task_key": key}  # always missing required keys
 
-        fake = FakeXagent(behavior=behavior)  # rc_and_log defaults to always-0
+        fake = FakeClaude(behavior=behavior)  # rc_and_log defaults to always-0
         self._patch(fake)
 
         items = [{"task_key": "t1", "version": "1", "input_sha256": "a" * 64, "brief_text": "b"}]
-        written = agents.xagent_runner("complexity", items, self.staging_dir)
+        written = agents.claude_runner("complexity", items, self.staging_dir)
 
         self.assertEqual(written, [])
         self.assertEqual(len(fake.calls), 2)  # initial + 1 retry, then dropped -- no raise

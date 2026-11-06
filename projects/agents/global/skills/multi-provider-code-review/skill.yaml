@@ -1,6 +1,6 @@
 id: multi-provider-code-review
 name: multi-provider-code-review
-description: Review a change or individual task with Codex and Claude through xagent, cross-check findings, and report agreed findings and bounded disputes.
+description: Review a change or individual task with Codex and Claude through their native CLIs, cross-check findings, and report agreed findings and bounded disputes.
 targets:
   - claude
   - cursor

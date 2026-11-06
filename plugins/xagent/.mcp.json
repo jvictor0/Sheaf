@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "xagent": {
-      "type": "http",
-      "url": "http://127.0.0.1:9005/mcp",
-      "tool_timeout_sec": 7200
-    }
-  }
-}

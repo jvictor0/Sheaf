@@ -1,4 +1,0 @@
-{"type":"stream_event","session_id":"claude-thread-1","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Claude "}}}
-{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"npm test"}}}}
-{"type":"stream_event","event":{"type":"content_block_stop","content_block":{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}}}
-{"type":"result","session_id":"claude-thread-1","message_id":"msg-1","result":"Claude final","usage":{"input_tokens":10}}

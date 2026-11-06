@@ -142,9 +142,11 @@ Apply the review audit and convergence rules below to this phase too.
 
 ## Implement and review each unit
 
-Use the installed `xagent-subagents` skill for dispatch, waiting, follow-up,
-and session management. The lead coordinates and maintains planning artifacts;
-implementation and code fixes go to subagents.
+Launch implementers directly through `claude -p` or `codex exec` from the
+assigned worktree. The lead coordinates and maintains planning artifacts;
+implementation and code fixes go to subagents. Use **Direct CLI dispatch**
+below for implementers and fixers; reviewer invocation and settings come from
+the selected review skill.
 
 1. Dispatch a fresh implementer for each unit, alternating **Claude Opus** and
    **Codex GPT-5.5**, starting with Opus, at **high effort**. Explicit user
@@ -183,8 +185,50 @@ implementation and code fixes go to subagents.
 
 Reuse the implementer for unit fixes while its session remains available; use
 a fresh fixer using **Hand off briefs by file** if the session is lost.
-New review rounds receive the previous findings and dispositions. Close retained
-implementers once their unit is finished.
+New review rounds receive the previous findings and dispositions. Once a unit
+is finished, retain its reports and session ID with the plan artifacts; no idle
+CLI process needs to stay running.
+
+## Direct CLI dispatch
+
+Write a dispatch file that explicitly names the absolute unit-brief path and
+requires the implementer to read it in full, following **Hand off briefs by
+file**. Include the unit X / total label, assigned worktree, applicable skills,
+and implementation-report path. Do not replace the brief with a summary.
+Launch from that worktree using absolute, shell-quoted artifact paths:
+
+```sh
+claude -p --model opus --effort high --output-format json \
+  < "/absolute/path/to/unit-dispatch.md" \
+  > "/absolute/path/to/unit-implementation-result.json"
+```
+
+For Codex implementers:
+
+```sh
+codex exec --json --model gpt-5.5 -c 'model_reasoning_effort="high"' - \
+  < "/absolute/path/to/unit-dispatch.md" \
+  > "/absolute/path/to/unit-implementation-events.jsonl"
+```
+
+The examples show implementer defaults; apply explicit user overrides. Record
+Claude's JSON `session_id` or Codex's JSON event thread ID in the index along
+with the report path. Inspect exit status and result content for failures.
+Follow running processes to completion with the host's process tools while
+doing independent lead work; avoid repeated short status polls. Preserve
+normal repository instructions, skills, and permissions in these sessions.
+Surface missing permissions or prerequisites instead of bypassing them.
+
+Keeping an implementer available means retaining its resumable session, not
+leaving an idle process running. Send fixes to the same implementer using
+`claude -p --resume "<session-id>" --model opus --effort high --output-format json`
+or `codex exec resume "<thread-id>" --json --model gpt-5.5
+-c 'model_reasoning_effort="high"' -`, supplying a follow-up file on stdin and
+saving output to a new round's file. Retain the model/effort actually selected
+for that unit. The follow-up points to the full updated brief, review file,
+and assigned finding IDs. Do not use Claude's `--no-session-persistence`.
+If a session cannot be resumed, give a fresh fixer those files and the prior
+implementation report.
 
 ## Audit reviews and converge
 

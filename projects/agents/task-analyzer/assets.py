@@ -8,7 +8,7 @@ any such asset's ``version`` field -- this is the cache-key version ingest.py
 compares against stored ``rubric_version``/``taxonomy_version`` rows (design.md
 D3). ``load_prompt`` reads a prompt asset and returns its body (frontmatter
 stripped, ``{{...}}`` placeholders intact for the caller -- Task 7's
-xagent dispatch wrapper -- to substitute), plus its ``version`` and
+Claude dispatch wrapper -- to substitute), plus its ``version`` and
 ``model_hint``.
 
 Stdlib only.

@@ -1,5 +1,0 @@
-{"type":"agent_start","thread_id":"pi-thread-1"}
-{"type":"message_update","message_id":"msg-1","delta":"Pi "}
-{"type":"tool_execution_start","tool_call_id":"tool-1","name":"shell","input":{"cmd":"npm test"}}
-{"type":"tool_execution_end","tool_call_id":"tool-1","name":"shell","status":"completed","output":"ok"}
-{"type":"agent_end","message_id":"msg-1","final_text":"Pi final","usage":{"total_tokens":12}}

@@ -28,14 +28,8 @@ from vendor_manifest import loads as load_vendor_manifest
 SUPPORTED_TARGETS = ("claude", "cursor", "pi", "codex")
 SCOPES = ("repo", "global", "all")
 RETIRED_REPO_SKILL_IDS = ("xagent-subagents", "openspec-superpowers-workflow")
-# Owned by plugins/xagent, which installs it globally for Claude, Cursor, and
-# Pi (Codex receives it inside the plugin package). This installer never
-# renders it. It still prunes STALE copies this installer wrote in the past —
-# keyed on our own marker — but a file carrying the plugin's marker is the
-# plugin installer's live output and must be left alone and reported as owned,
-# not as an unmanaged obstacle.
-PLUGIN_OWNED_GLOBAL_SKILL_IDS = ("xagent-subagents",)
-PLUGIN_OWNED_MARKER = "sheaf-xagent-managed: DO NOT EDIT"
+# Recognize legacy standalone skill copies during obsolete-output cleanup.
+RETIRED_XAGENT_MARKER = "sheaf-xagent-managed: DO NOT EDIT"
 OBSOLETE_GLOBAL_SKILL_IDS = ("smoke-test", "xagent-subagents", "openspec-superpowers-workflow")
 REPO_TARGET_DIRS = {
     "claude": Path(".claude/skills"),
@@ -681,8 +675,6 @@ def build_global_outputs(
     for skill in global_skills:
         if skill.skill_id in OBSOLETE_GLOBAL_SKILL_IDS:
             continue
-        if skill.skill_id in PLUGIN_OWNED_GLOBAL_SKILL_IDS:
-            continue
         rendered = render_skill(skill, repo_root)
         if "claude" in skill.targets:
             outputs.append(
@@ -1261,8 +1253,11 @@ def check_outputs(outputs: list[Output]) -> int:
     return status
 
 
-def is_plugin_owned(content: str) -> bool:
-    return PLUGIN_OWNED_MARKER in content
+def is_retired_plugin_skill(output: Output, content: str) -> bool:
+    return (
+        output.path.parts[-2:] == ("xagent-subagents", "SKILL.md")
+        and RETIRED_XAGENT_MARKER in content
+    )
 
 
 def check_obsolete_outputs(outputs: list[Output]) -> int:
@@ -1271,10 +1266,7 @@ def check_obsolete_outputs(outputs: list[Output]) -> int:
         if not output.path.exists():
             continue
         existing = output.path.read_text(encoding="utf-8")
-        if is_plugin_owned(existing):
-            print(f"plugin-owned {output.path}")
-            continue
-        if is_managed(existing):
+        if is_managed(existing) or is_retired_plugin_skill(output, existing):
             print(f"obsolete managed {output.path}", file=sys.stderr)
             status = 1
         else:
@@ -1287,10 +1279,7 @@ def clean_outputs(outputs: list[Output]) -> int:
         if not output.path.exists():
             continue
         existing = output.path.read_text(encoding="utf-8")
-        if is_plugin_owned(existing):
-            print(f"plugin-owned {output.path}")
-            continue
-        if not is_managed(existing):
+        if not (is_managed(existing) or is_retired_plugin_skill(output, existing)):
             print(f"skip unmanaged {output.path}")
             continue
         output.path.unlink()

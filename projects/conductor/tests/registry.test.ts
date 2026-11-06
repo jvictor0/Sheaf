@@ -25,20 +25,6 @@ test("loadServiceRegistry reads the conductor service entry from config", async 
   assert.equal(conductor.port, 9001);
 });
 
-test("loadServiceRegistry registers the xagent service on loopback", async () =>
-{
-  const paths = createRepoPaths();
-  const services = await loadServiceRegistry(paths.servicesJsonPath);
-  const xagent = services.find((service) => service.name === "xagent");
-
-  assert.deepEqual(xagent, {
-    name: "xagent",
-    host: "127.0.0.1",
-    port: 9005,
-    command: "make xagent-service-run",
-  });
-});
-
 test("loadServiceRegistry rejects malformed JSON", async () =>
 {
   const filePath = await writeRegistryFile("{ not valid json");

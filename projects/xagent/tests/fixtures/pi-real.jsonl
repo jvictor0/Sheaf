@@ -1,5 +1,0 @@
-{"type":"session","version":3,"id":"pi-session-1","cwd":"."}
-{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"reasoning"},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"reasoning"}]}}
-{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"XAGENT_HELLO_PI"},"message":{"role":"assistant","content":[{"type":"thinking","thinking":"reasoning"},{"type":"text","text":"XAGENT_HELLO_PI"}]}}
-{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"reasoning"},{"type":"text","text":"XAGENT_HELLO_PI"}],"usage":{"totalTokens":10},"stopReason":"stop","responseId":"pi-message-1"}}
-{"type":"agent_end","messages":[],"willRetry":false}

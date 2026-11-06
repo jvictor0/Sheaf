@@ -9,7 +9,7 @@ separate fake "sessions corpus" directory, pointed at via the
 ``~/.claude/projects`` on this machine is never touched.
 
 ``fake_agent_runner`` is a zero-LLM stand-in for Task 7's real
-``agents.xagent_runner``: it just writes canned, schema-valid JSON straight
+``agents.claude_runner``: it just writes canned, schema-valid JSON straight
 into the staging dir per the ``kind``/``entity_key``/``version``/
 ``input_sha256`` cache key ingest.py passes it, and records every call it
 receives so tests can assert dispatch counts/idempotency directly.

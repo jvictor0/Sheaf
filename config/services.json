@@ -26,11 +26,5 @@
     "port": 9004,
     "home_path": "/",
     "command": "make sheaf-chat-run"
-  },
-  {
-    "name": "xagent",
-    "host": "127.0.0.1",
-    "port": 9005,
-    "command": "make xagent-service-run"
   }
 ]

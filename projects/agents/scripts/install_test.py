@@ -5,7 +5,6 @@ import copy
 import importlib.util
 import io
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -22,12 +21,7 @@ OPENSPEC_VENDOR_TOML = (
     REPO_ROOT / "projects" / "agents" / "vendor" / "openspec" / "VENDOR.toml"
 )
 
-# install.py imports its sibling `managed_package` by bare name, which only
-# resolves when the scripts directory is on sys.path. That happens implicitly
-# when unittest discovers this file from inside scripts/, but not when another
-# suite imports it as projects.agents.scripts.install_test — which is exactly
-# what plugins/xagent/scripts/install_global_test.py does, so
-# `make xagent-plugin-test` failed to even load.
+# Resolve install.py's sibling imports when another suite imports this module.
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -83,14 +77,14 @@ class CodexHookOutputTests(unittest.TestCase):
             "hooks": [{"type": "command", "command": command}],
         }
 
-    def xagent_group(self, mode: str) -> dict[str, object]:
+    def external_group(self, mode: str) -> dict[str, object]:
         return {
             "hooks": [
                 {
                     "type": "command",
                     "command": (
-                        "python3 /opt/xagent/controller_stop_hook.py "
-                        f"--harness codex --state-root /tmp/xagent {mode}"
+                        "python3 /opt/example/observe_hook.py "
+                        f"--state-root /tmp/example {mode}"
                     ),
                 }
             ]
@@ -272,7 +266,7 @@ class CodexHookOutputTests(unittest.TestCase):
                     }
                 ],
             }
-            xagent = self.xagent_group("observe")
+            external = self.external_group("observe")
             self.write_json(
                 output.config_path,
                 {
@@ -280,7 +274,7 @@ class CodexHookOutputTests(unittest.TestCase):
                         "sheaf-agents-managed: DO NOT EDIT; "
                         "source=projects/agents/global/codex/hooks/hooks.json"
                     ),
-                    "hooks": {"SessionStart": [legacy], "PostToolUse": [xagent]},
+                    "hooks": {"SessionStart": [legacy], "PostToolUse": [external]},
                 },
             )
 
@@ -289,14 +283,14 @@ class CodexHookOutputTests(unittest.TestCase):
             merged = self.read_json(output.config_path)
             self.assertNotIn("_sheaf_agents_managed", merged)
             self.assertEqual([output.desired_group], merged["hooks"]["SessionStart"])
-            self.assertEqual([xagent], merged["hooks"]["PostToolUse"])
+            self.assertEqual([external], merged["hooks"]["PostToolUse"])
 
-    def test_install_preserves_canonical_xagent_groups(self) -> None:
+    def test_install_preserves_canonical_external_groups(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             codex_home = (Path(tempdir) / "codex-home").resolve()
             output = self.shared_output(codex_home)
-            observe = self.xagent_group("observe")
-            guard = self.xagent_group("guard")
+            observe = self.external_group("observe")
+            guard = self.external_group("guard")
             self.write_json(
                 output.config_path,
                 {"hooks": {"PostToolUse": [observe], "Stop": [guard]}},
@@ -316,7 +310,7 @@ class CodexHookOutputTests(unittest.TestCase):
             foreign = self.foreign_group()
             self.assertEqual(0, install.install_codex_hook_shared(output))
             config = self.read_json(output.config_path)
-            config["hooks"]["PostToolUse"] = [self.xagent_group("observe")]
+            config["hooks"]["PostToolUse"] = [self.external_group("observe")]
             self.write_json(output.config_path, config)
 
             self.assertEqual(0, install.check_codex_hook_shared(output))
@@ -344,13 +338,13 @@ class CodexHookOutputTests(unittest.TestCase):
             output = self.shared_output(codex_home)
             before = self.foreign_group("python3 /opt/other/before.py")
             after = self.foreign_group("python3 /opt/other/after.py")
-            xagent = self.xagent_group("observe")
+            external = self.external_group("observe")
             self.write_json(
                 output.config_path,
                 {
                     "hooks": {
                         "SessionStart": [before, output.desired_group, after],
-                        "PostToolUse": [xagent],
+                        "PostToolUse": [external],
                     }
                 },
             )
@@ -362,7 +356,7 @@ class CodexHookOutputTests(unittest.TestCase):
             cleaned = self.read_json(output.config_path)
             self.assertFalse(output.script_output.path.exists())
             self.assertEqual([before, after], cleaned["hooks"]["SessionStart"])
-            self.assertEqual([xagent], cleaned["hooks"]["PostToolUse"])
+            self.assertEqual([external], cleaned["hooks"]["PostToolUse"])
 
     def test_clean_deletes_hooks_json_only_when_no_foreign_content_remains(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -474,70 +468,8 @@ class CodexHookOutputTests(unittest.TestCase):
                 self.assertEqual(0, install.clean_codex_hook_shared(output))
             self.assertIn(install.CODEX_HOOK_TRUST_NOTICE, stdout.getvalue())
 
-    def test_agents_and_xagent_install_order_converges(self) -> None:
-        module_path = REPO_ROOT / "plugins" / "xagent" / "scripts" / "install_global.py"
-        spec = importlib.util.spec_from_file_location("xagent_install_global", module_path)
-        self.assertIsNotNone(spec)
-        xagent_install_global = importlib.util.module_from_spec(spec)
-        self.assertIsNotNone(spec.loader)
-        spec.loader.exec_module(xagent_install_global)
-
-        def apply_xagent(path: Path) -> dict[str, object]:
-            payload: dict[str, object] = {}
-            if path.exists():
-                payload = self.read_json(path)
-            commands = xagent_install_global.hook_commands(
-                installed_hook=Path("/opt/xagent/controller_stop_hook.py"),
-                harness="codex",
-                state_root=Path("/tmp/xagent-state"),
-            )
-            merged, _changed = xagent_install_global.merge_xagent_hook_groups(
-                payload,
-                harness="codex",
-                observe_command=commands["observe"],
-                guard_command=commands["guard"],
-            )
-            self.write_json(path, merged)
-            return merged
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            codex_home = (Path(tempdir) / "codex-home").resolve()
-            output = self.shared_output(codex_home)
-            self.assertEqual(0, install.install_codex_hook_shared(output))
-            apply_xagent(output.config_path)
-            self.assertEqual(0, install.install_codex_hook_shared(output))
-            first = self.read_json(output.config_path)
-
-            shutil.rmtree(codex_home)
-            output = self.shared_output(codex_home)
-            apply_xagent(output.config_path)
-            self.assertEqual(0, install.install_codex_hook_shared(output))
-            second = self.read_json(output.config_path)
-
-            self.assertEqual(first, second)
-
 
 class SkillScopeOutputTests(unittest.TestCase):
-    def test_xagent_skill_is_not_an_agents_source_or_desired_output(self) -> None:
-        self.assertFalse(
-            (REPO_ROOT / "projects/agents/global/skills/xagent-subagents").exists()
-        )
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            output_sets = [
-                install.build_repo_outputs(REPO_ROOT),
-                install.build_global_outputs(
-                    REPO_ROOT,
-                    home=Path(tempdir) / "home",
-                    codex_home=Path(tempdir) / "codex-home",
-                ),
-            ]
-            for outputs in output_sets:
-                for output in outputs:
-                    self.assertNotEqual(
-                        Path("xagent-subagents/SKILL.md"),
-                        Path(*output.path.parts[-2:]),
-                    )
 
     def test_repo_outputs_include_only_sheaf_skills(self) -> None:
         outputs = install.build_repo_outputs(REPO_ROOT)
@@ -584,7 +516,7 @@ class SkillScopeOutputTests(unittest.TestCase):
             self.assertNotIn(Path(".cursor/skills/codex-only/SKILL.md"), paths)
             self.assertNotIn(Path(".pi/skills/codex-only/SKILL.md"), paths)
 
-    def test_global_outputs_include_all_non_plugin_global_skills(self) -> None:
+    def test_global_outputs_include_all_current_global_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             home = (Path(tempdir) / "home").resolve()
             codex_home = (Path(tempdir) / "codex-home").resolve()
@@ -621,54 +553,6 @@ class SkillScopeOutputTests(unittest.TestCase):
                         codex_home / "skills" / skill.skill_id / "SKILL.md",
                         paths,
                     )
-
-    def test_global_outputs_exclude_synthetic_plugin_owned_skill(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            repo_root = copied_repo_fixture(tempdir)
-            skill_root = (
-                repo_root
-                / "projects"
-                / "agents"
-                / "global"
-                / "skills"
-                / "xagent-subagents"
-            )
-            skill_root.mkdir(parents=True)
-            (skill_root / "skill.yaml").write_text(
-                "\n".join(
-                    [
-                        "id: xagent-subagents",
-                        "name: xagent-subagents",
-                        "description: Synthetic plugin-owned skill.",
-                        "targets:",
-                        "  - claude",
-                        "  - cursor",
-                        "  - pi",
-                        "  - codex",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            (skill_root / "SKILL.md").write_text(
-                "# Synthetic Plugin Skill\n",
-                encoding="utf-8",
-            )
-            home = (Path(tempdir) / "home").resolve()
-            codex_home = (Path(tempdir) / "codex-home").resolve()
-            outputs = install.build_global_outputs(
-                repo_root,
-                home=home,
-                codex_home=codex_home,
-            )
-            paths = {output.path for output in outputs}
-
-            self.assertFalse(
-                any(
-                    path.parts[-2:] == ("xagent-subagents", "SKILL.md")
-                    for path in paths
-                )
-            )
 
 
 class ObsoleteRepoOutputTests(unittest.TestCase):
@@ -845,112 +729,6 @@ class ObsoleteRepoOutputTests(unittest.TestCase):
             self.assertEqual(0, run_main("clean", *common_args))
             self.assertFalse(managed_obsolete.exists())
             self.assertTrue(unmanaged_obsolete.exists())
-
-
-def skill_output_content(
-    outputs: list[install.Output],
-    skill_id: str,
-    *,
-    parent: Path | None = None,
-) -> str:
-    matches = [
-        output
-        for output in outputs
-        if output.path.parts[-2:] == (skill_id, "SKILL.md")
-    ]
-    if parent is not None:
-        parent = parent.resolve()
-        matches = [output for output in matches if output.path.is_relative_to(parent)]
-    if len(matches) != 1:
-        paths = [str(output.path) for output in matches]
-        raise AssertionError(
-            f"expected exactly one rendered output for {skill_id}, found {len(matches)}: {paths}"
-        )
-    return matches[0].content
-
-
-def assert_all_present(test_case: unittest.TestCase, content: str, phrases: tuple[str, ...]) -> None:
-    lowered = content.lower()
-    for phrase in phrases:
-        test_case.assertIn(
-            phrase.lower(),
-            lowered,
-            f"missing required guidance phrase: {phrase!r}",
-        )
-
-
-def assert_none_present(
-    test_case: unittest.TestCase, content: str, phrases: tuple[str, ...]
-) -> None:
-    lowered = content.lower()
-    for phrase in phrases:
-        test_case.assertNotIn(
-            phrase.lower(),
-            lowered,
-            f"forbidden routine-polling guidance phrase: {phrase!r}",
-        )
-
-
-def extract_markdown_section(content: str, heading: str) -> str:
-    pattern = re.compile(rf"^## {re.escape(heading)}\s*$", re.MULTILINE)
-    match = pattern.search(content)
-    if match is None:
-        raise AssertionError(f"missing section heading: {heading!r}")
-    start = match.end()
-    next_heading = re.search(r"^## ", content[start:], re.MULTILINE)
-    if next_heading is None:
-        return content[start:]
-    return content[start : start + next_heading.start()]
-
-
-class DistributedSkillSemanticsTests(unittest.TestCase):
-    def test_xagent_subagents_skill_event_driven_supervision_guidance(self) -> None:
-        skill_path = REPO_ROOT / "plugins" / "xagent" / "skills" / "xagent-subagents" / "SKILL.md"
-        self.assertTrue(skill_path.is_file(), f"missing packaged skill: {skill_path}")
-        content = skill_path.read_text(encoding="utf-8")
-        generic_section = extract_markdown_section(content, "Generic Delegation")
-
-        assert_all_present(
-            self,
-            generic_section,
-            (
-                "xagent_start",
-                "xagent_await",
-                "report.text",
-                "after_sequence",
-                "deterministic",
-                "Haiku",
-                "watchdog attention never",
-                "broken agentic infrastructure",
-                "xagent supervise",
-                "do not poll",
-                "write_stdin",
-                "xagent list",
-                "xagent logs",
-                "claude_code",
-                "verify it with local Claude Code",
-                "do not silently downgrade",
-                "xagent_message",
-            ),
-        )
-        assert_all_present(
-            self,
-            content,
-            (
-                "Conductor",
-                "xagent",
-                "healthy",
-                "127.0.0.1:9005",
-            ),
-        )
-        assert_none_present(
-            self,
-            content,
-            (
-                "poll every",
-                "short timeout loop",
-            ),
-        )
 
 
 class OpenSpecCliInstallTests(unittest.TestCase):
@@ -1467,46 +1245,29 @@ class OpenSpecHarnessInstallTests(unittest.TestCase):
             self.assertEqual("leave me\n", foreign.read_text(encoding="utf-8"))
 
 
+class RetiredPluginSkillTests(unittest.TestCase):
+    def test_retired_plugin_marked_skill_is_reported_and_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home)
+            stale = home / ".claude" / "skills" / "xagent-subagents" / "SKILL.md"
+            stale.parent.mkdir(parents=True)
+            stale.write_text(f"<!-- {install.RETIRED_XAGENT_MARKER} -->\nbody\n")
+            outputs = install.build_obsolete_global_outputs(home=home, codex_home=None)
+            self.assertEqual(1, install.check_obsolete_outputs(outputs))
+            self.assertEqual(0, install.clean_outputs(outputs))
+            self.assertFalse(stale.exists())
+            self.assertEqual(0, install.check_obsolete_outputs(outputs))
+
+    def test_unmanaged_personal_copy_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home)
+            personal = home / ".claude" / "skills" / "xagent-subagents" / "SKILL.md"
+            personal.parent.mkdir(parents=True)
+            personal.write_text("my personal skill\n")
+            outputs = install.build_obsolete_global_outputs(home=home, codex_home=None)
+            self.assertEqual(0, install.clean_outputs(outputs))
+            self.assertEqual("my personal skill\n", personal.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
-class PluginOwnedSkillTests(unittest.TestCase):
-    def test_agents_installer_does_not_delete_the_plugin_owned_xagent_skill(self) -> None:
-        # plugins/xagent owns xagent-subagents for every harness (A1/A2). If the
-        # agents installer still listed it as obsolete, `make agents-install-global`
-        # would delete the skill the plugin installer just wrote for Claude,
-        # Cursor, and Pi.
-        self.assertIn("xagent-subagents", install.PLUGIN_OWNED_GLOBAL_SKILL_IDS)
-
-        with tempfile.TemporaryDirectory() as raw_home:
-            home = Path(raw_home)
-            live = home / ".claude" / "skills" / "xagent-subagents" / "SKILL.md"
-            live.parent.mkdir(parents=True)
-            live.write_text(
-                "---\nname: xagent-subagents\n---\n\n"
-                f"<!-- {install.PLUGIN_OWNED_MARKER} -->\n\nbody\n",
-                encoding="utf-8",
-            )
-            outputs = install.build_obsolete_global_outputs(home=home, codex_home=None)
-            obsolete = [
-                output for output in outputs if "xagent-subagents" in str(output.path)
-            ]
-            self.assertTrue(obsolete, "stale agents-managed copies must still be prunable")
-
-            self.assertEqual(0, install.clean_outputs(obsolete))
-            self.assertTrue(live.exists(), "the plugin's live skill must survive clean")
-            self.assertEqual(0, install.check_obsolete_outputs(obsolete))
-
-    def test_agents_installer_still_does_not_render_the_plugin_owned_skill(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_home:
-            home = Path(raw_home)
-            outputs = install.build_global_outputs(
-                REPO_ROOT,
-                home=home,
-                codex_home=None,
-            )
-            self.assertEqual(
-                [],
-                [str(output.path) for output in outputs if "xagent-subagents" in str(output.path)],
-            )

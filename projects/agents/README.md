@@ -113,8 +113,6 @@ Default `install`, `check`, and `clean` operate on both repo-local and
 user-global outputs. The `*-repo` and `*-global` targets limit the scope.
 Repo-local outputs contain repository instructions and Sheaf-only skills.
 Shared skills install only through agents-install-global.
-Plugin-owned skills such as xagent-subagents are excluded from the agents
-filesystem skill renderer (`install.py`).
 
 ## Node.js
 
@@ -130,19 +128,13 @@ outputs; it never falls back to `npm install -g`.
 ```text
 Shared skills: projects/agents/global/skills -> agents-install-global
 smoke-test: projects/agents/sheaf/skills/smoke-test -> agents-install-repo
-xagent-subagents + launcher + runtime: plugins/xagent -> xagent-plugin-install-global
 ```
 
-Install or update the xagent plugin package with:
-
-```shell
-make xagent-plugin-install-global
-```
-
-Open a new Codex conversation after installing or updating the plugin so Codex
-reloads the installed skill and launcher metadata. If recovery is needed, rerun
-`make xagent-plugin-install-global`. If the installed package is unmarked,
-inspect it and move it aside manually rather than forcing overwrite.
+Review and implementation skills launch Claude directly with `claude -p` and
+Codex with `codex exec`. Install and authenticate those CLIs separately. Claude
+native reviews also require the enabled `pr-review-toolkit` plugin (or the
+review agent explicitly selected by the user). The review skills document
+invocation, model selection, saved output, and native session resumption.
 
 User-global outputs are written to:
 
@@ -182,13 +174,12 @@ The agents installer owns only its post-compaction `SessionStart` group
 It does **not** whole-file-own `$CODEX_HOME/hooks.json`.
 
 - Install merges that canonical group in place when present, or appends it
-  after existing `SessionStart` groups, preserving unrelated groups and
-  canonical xagent `PostToolUse`/`Stop` groups in relative order.
+  after existing `SessionStart` groups, preserving unrelated plugin groups in relative order.
 - A legacy top-level `_sheaf_agents_managed` marker is removed during
   install migration; ownership is the group matcher and command, not that
   marker.
 - Check compares only the managed script and the canonical agents group;
-  xagent and unrelated groups are not treated as stale agents content.
+  unrelated plugin groups are not treated as stale agents content.
 - Clean removes only the agents group and managed script, rewriting the
   shared file when foreign content remains and deleting `hooks.json` only
   when nothing non-agents remains.
@@ -197,7 +188,7 @@ It does **not** whole-file-own `$CODEX_HOME/hooks.json`.
   authorize destructive replacement of malformed shared hook configuration.
 - After install or clean changes the `SessionStart` group array in a way
   that can invalidate Codex's positional trust, the installer prints a
-  `/hooks` re-approval notice (symmetric with xagent's Codex trust notice).
+  `/hooks` re-approval notice.
 
 The Codex hook injects a short developer-context reminder after compaction:
 if the agent was working from a plan, checklist, or task list, it should

@@ -55,11 +55,11 @@ succession MUST produce no changes on the second run.
 - **WHEN** a change exists only in a worktree branch or only in the local working tree, and not in the archive tree of the configured `--archive-ref`
 - **THEN** it is not ingested (even when named via `--change`), and is listed in the run report as unlanded
 
-### Requirement: Agentic scoring via xagent with asset-pinned prompts
+### Requirement: Agentic scoring via Claude CLI with asset-pinned prompts
 The system SHALL dispatch grading (from review texts, per the grading rubric),
 complexity scoring (from briefs, per the complexity rubric), and TDD phase
 labeling (from condensed per-turn timelines, per the phase taxonomy) to
-cheap models via xagent, using prompt files stored in
+cheap models via `claude -p`, using prompt files stored in
 `projects/agents/task-analyzer/prompts/` and rubric files in
 `projects/agents/task-analyzer/rubrics/`; the rubrics MUST be standalone
 versioned markdown deliverables matching the 2026-07-19 methodology

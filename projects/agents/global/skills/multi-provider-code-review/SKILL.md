@@ -1,10 +1,10 @@
 # Multi-provider Code Review
 
 Use this skill to review a code change or an individual implementation task.
-Run two independent reviewers through xagent: one Codex subagent and one
-Claude subagent. Each xagent session invokes its provider's review facility
-with the additional review brief below, then routes cross-checks back to that
-reviewer. The controller coordinates the review and records its outcomes.
+Run two independent reviewers using their native CLIs: one Codex review agent
+and one Claude review agent launched with `claude -p`. Add the review brief
+below to each provider's native review instructions. The controller coordinates
+cross-checks and records outcomes.
 
 ## Review brief
 
@@ -52,34 +52,39 @@ they do not modify the implementation.
 
 Unless the user specifies otherwise, use **Astra at extra-high reasoning
 effort** (`gpt-6-astra`, `xhigh`) for Codex and **Fable** for Claude. Apply these
-defaults to the xagent sessions and the actual native reviewers they invoke,
-including cross-checks and dispute responses. Explicit user model or effort
+defaults to the actual native reviewer sessions, including cross-checks and
+dispute responses. Explicit user model or effort
 choices override the corresponding default. Resolve Fable's supported model
 identifier in the active Claude harness; do not silently substitute another
 model if it is unavailable.
 
-1. Use the installed `xagent-subagents` skill for current dispatch, waiting,
-   follow-up, and session management mechanics. Launch one Codex reviewer and
-   one Claude reviewer through xagent, in parallel when available. This skill
-   requires both providers regardless of which provider wrote the change.
-2. Use the provider-specific invocation below. Pass the complete review brief
-   to the actual native reviewer, not just its xagent parent. Preserve the
-   native review instructions and add our criteria as task instructions.
-   Reviewers must not recursively dispatch this two-reviewer workflow.
-3. Collect both complete independent reports before sharing either with the
-   other reviewer. Keep both reviewer sessions available for cross-checking
-   and responses from the original finder.
+1. Launch one Codex reviewer and one Claude reviewer directly from the
+   reviewed worktree, in parallel when available, using the commands below.
+   This skill requires both providers regardless of who wrote the change.
+2. Pass the complete brief to each native reviewer. Preserve its native review
+   instructions and add our criteria as task instructions. Reviewers must not
+   recursively dispatch this two-reviewer workflow.
+3. Save each process's output, exit status, full report, and native session ID
+   in the review's temporary directory. Collect both independent reports before
+   sharing either with the other reviewer. Retain the session IDs for resuming
+   the original reviewers during cross-checks and dispute responses.
 
-If xagent, either reviewer, or a required native review skill is unavailable,
+If either CLI, reviewer model, or required native review agent is unavailable,
 surface the blocker. Do not silently substitute a single-provider review or
-report the incomplete process as a completed review.
+report an incomplete process as completed. Follow the running process through
+completion using the host's process tools; avoid repeated short status polls.
+A process exit is not sufficient: inspect its result for errors and confirm
+that it produced the requested review.
 
 ## Invoking the native reviewers
 
-xagent currently launches ordinary `codex exec` and `claude --print` sessions.
-Selecting a provider or calling that session a reviewer does not activate its
-specialized review behavior. In each xagent dispatch prompt, explicitly require
-the following invocation and have the session return the native review report.
+Launch these commands directly; no service or wrapper session is required.
+Use absolute paths for prompt and result files, quote them in shell commands,
+and set the working directory to the reviewed worktree or fixed snapshot.
+Keep separate output files for each reviewer and round. Do not disable session
+persistence: later turns must resume the original reviewer. Supply permissions
+appropriate to the assigned work through the normal CLI/host controls; surface
+permission failures rather than bypassing them.
 
 ### Codex
 
@@ -87,12 +92,13 @@ Codex exposes its dedicated review agent through `/review` in the interactive
 CLI and `codex review` / `codex exec review` non-interactively. It is not an
 installed `SKILL.md` or a generic subagent named `reviewer`.
 
-In the xagent Codex session, write the complete scope, spec references, and
-additional review criteria to a prompt file. From the reviewed worktree, invoke:
+Write the complete scope, spec references, and additional review criteria to
+a prompt file. From the reviewed worktree, invoke:
 
 ```sh
 codex exec review --json --model gpt-6-astra \
-  -c 'model_reasoning_effort="xhigh"' - < /absolute/path/to/codex-review-prompt.md
+  -c 'model_reasoning_effort="xhigh"' - < "/absolute/path/to/codex-review-prompt.md" \
+  > "/absolute/path/to/codex-review-events.jsonl"
 ```
 
 The command shows the defaults; use any explicit user overrides instead.
@@ -105,8 +111,8 @@ when running without a custom prompt. Do not send the literal `/review` as
 ordinary text to `codex exec` and assume the slash command will execute.
 
 Retain the native review's thread ID from its JSON events and its full report.
-For cross-checks and the finder's response, have the same xagent session resume
-that native Codex thread with `codex exec resume <thread-id> <follow-up-prompt>`.
+For cross-checks and the finder's response, resume that native Codex thread
+with `codex exec resume <thread-id> -`, supplying the follow-up file on stdin.
 The follow-up supplies the other reviewer's findings or objection and the
 required verdict. Preserve the original report and finding IDs.
 Pass the selected model and reasoning effort on resumed turns as well.
@@ -116,38 +122,43 @@ and the installed `codex exec review --help` for the review interface.
 
 ### Claude
 
-Use Claude's `Agent` tool to invoke a named code-review subagent. Anthropic's
-official `pr-review-toolkit` plugin supplies
-`pr-review-toolkit:code-reviewer`; its `feature-dev` plugin also supplies
+Anthropic's official `pr-review-toolkit` plugin supplies the native
+`pr-review-toolkit:code-reviewer` agent; `feature-dev` also supplies
 `feature-dev:code-reviewer`. Use the user's selected reviewer when specified;
-otherwise use `pr-review-toolkit:code-reviewer`. Confirm that the corresponding
-plugin is installed and enabled with `claude plugin list --json`; a definition
-in a marketplace checkout alone does not make the agent available.
+otherwise use `pr-review-toolkit:code-reviewer`. Confirm the corresponding
+plugin is installed and enabled with `claude plugin list --json`.
 
-Give the xagent Claude session this dispatch instruction, replacing the brief
-placeholder with the complete review brief:
+Run the named native agent directly as a headless session with `--agent`:
 
-```text
-Invoke the Agent tool with subagent_type="pr-review-toolkit:code-reviewer".
-Run the reviewer on Fable unless the user selected another Claude model.
-Explicitly override the plugin agent's model setting; setting only the parent
-session's model does not override the reviewer's own model declaration.
-Pass the complete brief below as its prompt, keeping its native reviewer
-instructions. Return its full findings and retain its agent ID so subsequent
-cross-checks and responses go back to this same reviewer.
-
-<complete review brief, including the additional criteria below>
+```sh
+claude -p --agent pr-review-toolkit:code-reviewer --model fable \
+  --output-format json < "/absolute/path/to/claude-review-prompt.md" \
+  > "/absolute/path/to/claude-review-result.json"
 ```
 
-For follow-ups, route the other report or objection through the same xagent
-Claude session to the original native subagent using the harness's supported
-resume/message mechanism. Have that subagent supply the verdict or defense.
-The xagent parent must not answer on the reviewer's behalf.
+The prompt file contains the full review brief and additional criteria.
+`--agent` loads the plugin's reviewer instructions; a general session merely
+called a reviewer does not. Set the model explicitly, using any user override,
+and confirm the session uses the selected agent and model. Do not use `--bare`,
+which skips normal plugin discovery, or `--no-session-persistence`.
 
-This is the named review subagent, not the `code-review` plugin's separate PR
-workflow or the removed Superpowers workflow. If the selected review agent is
-missing, report that prerequisite rather than imitating it with a general
-agent. See [Claude subagent invocation](https://code.claude.com/docs/en/subagents).
+Save the JSON result's `session_id` and complete report. For cross-checks and
+the finder's response, resume this exact reviewer with a new prompt file:
+
+```sh
+claude -p --resume "<session-id>" --agent pr-review-toolkit:code-reviewer \
+  --model fable --output-format json \
+  < "/absolute/path/to/claude-follow-up.md" \
+  > "/absolute/path/to/claude-follow-up-result.json"
+```
+
+Preserve the selected model, any explicit effort override, original finding
+IDs, and prior reports across resumed turns. Check that the native reviewer
+is still available before resuming; do not accept a fallback to a general
+session if the plugin is missing.
+
+See [Claude native agents](https://code.claude.com/docs/en/sub-agents) and
+[headless sessions and resuming](https://code.claude.com/docs/en/headless).
 
 ### Additional prompt language
 
@@ -205,4 +216,6 @@ the user can judge the disagreement. Withdrawn findings are not final findings.
 
 State the reviewed scope and any verification limits or incomplete checks.
 If there are no agreed findings, say so while still reporting any disputes.
-Close the reviewer sessions after all findings have reached an outcome.
+Finish any running reviewer processes after all findings have reached an
+outcome. Retain reports and session IDs with the review artifacts; completed
+CLI processes need not stay running between turns.

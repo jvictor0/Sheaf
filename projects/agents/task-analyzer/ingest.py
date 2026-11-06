@@ -2064,7 +2064,7 @@ def main(argv=None) -> int:
         try:
             import agents  # Task 7's real dispatcher
 
-            agent_runner = agents.xagent_runner
+            agent_runner = agents.claude_runner
         except ImportError:
             agent_runner = None
 
