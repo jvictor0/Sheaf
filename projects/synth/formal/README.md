@@ -38,11 +38,14 @@ host rates retain the ratio. Targets and the Fuego/UI seam advance at host caden
 Low-pass-filtered modulation sources and audio DSP advance at engine cadence. Root
 publication weights are 1/4, 1/2, 3/4 and 1. Filter history persists across callbacks and holds exactly while source advancement is disabled by stopped transport.
 
-The Froggers integration also models Randomize All's shared density quartile,
-integer quantile count bounds, four-preimage marginal count law, empty eligible
-sets, drilled one-source floor, and geometric rational depth magnitudes/masses.
-Uniform independent random inputs are assumptions, not claims about the PRNG.
-The finite geometric mass theorem specifies the untruncated mathematical law;
-floating-point underflow/curve inversion and held-gesture/storage semantics remain
-native-tested. This app-specific correspondence fingerprints
-`../../../../app/FroggersModulation.hpp`, so its audit runs in the Froggers checkout.
+The Froggers integration models density quartiles over the number of target
+parameters receiving modulation, independently of source count per selected target.
+Coverage proofs establish bounds and the four-preimage marginal count mapping.
+Source weights peak at two eligible sources, halving at each step away from the
+mode; native tests enumerate every integer entropy ticket and verify those ratios.
+Separate proofs specify geometric depth magnitudes, finite probability mass and
+one-way signs. Uniform independent RNG inputs are assumptions. Native tests cover
+target selection, actual sampler weights, floating-point curve inversion, held
+gestures, recursive scope and storage lifecycle. The app-specific correspondence
+fingerprints `../../../../app/FroggersModulation.hpp`, so this audit runs within
+Froggers. These behavioral proofs do not establish audio-thread deadline safety.

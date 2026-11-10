@@ -2418,11 +2418,15 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
 
     for (std::size_t sourceIx = 0; sourceIx < group_.Config().numModulators; ++sourceIx) {
         const Parameter* depthParameter = modulationDepths_[sourceIx];
+        if (depthParameter == nullptr && sourceRoutePositions_[sourceIx] >= activeRouteCount_)
+            continue;
         bool targetNonNeutral = false;
         if (depthParameter != nullptr) {
             for (std::size_t voiceIx = 0; voiceIx < group_.Config().numVoices; ++voiceIx) {
-                if (std::fabs(ModulationDepthTargetForKind(config_.modulationTargetKind,
-                                                            depthParameter->GetRaw(voiceIx))) >
+                if (std::fabs((depthParameter->scalarLeafPrepared_ &&
+                     depthParameter->config_.modulationTargetKind == config_.modulationTargetKind
+                         ? depthParameter->preparedScalarDepthTarget_
+                         : ModulationDepthTargetForKind(config_.modulationTargetKind, depthParameter->GetRaw(voiceIx)))) >
                     kModulationNeutralTolerance) {
                     targetNonNeutral = true;
                     break;
@@ -2450,7 +2454,10 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
             targetDepths_[VoiceRouteIndex(voiceIx, routeSlot)] =
                 depthParameter == nullptr
                     ? 0.0f
-                    : ModulationDepthTargetForKind(config_.modulationTargetKind, depthParameter->GetRaw(voiceIx));
+                    : (depthParameter->scalarLeafPrepared_ &&
+                       depthParameter->config_.modulationTargetKind == config_.modulationTargetKind
+                           ? depthParameter->preparedScalarDepthTarget_
+                           : ModulationDepthTargetForKind(config_.modulationTargetKind, depthParameter->GetRaw(voiceIx)));
         }
     }
 
@@ -2548,6 +2555,8 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
     }
     PruneNeutralActiveRoutes();
     scalarLeafPrepared_ = recursionDepth > 0 && assignedDepthCount_ == 0 && activeRouteCount_ == 0;
+    if (scalarLeafPrepared_)
+        preparedScalarDepthTarget_ = ModulationDepthTargetForKind(config_.modulationTargetKind, GetRaw(0));
 }
 
 void Parameter::SnapCurrentToTarget() {

@@ -41,21 +41,26 @@
     "Sheaf.Randomization.rectangle_roundtrip",
     "Sheaf.Randomization.flattened_count",
     "Sheaf.Randomization.rectangle_quartile",
-    "Sheaf.Randomization.fifteen_source_bands",
-    "Sheaf.Randomization.no_sources_no_routes",
-    "Sheaf.Randomization.drilled_count_floor",
+    "Sheaf.Randomization.coverage_bounds",
+    "Sheaf.Randomization.eightyfour_dense_coverage",
     "Sheaf.Randomization.depth_starts_full",
     "Sheaf.Randomization.depth_halves",
     "Sheaf.Randomization.geometric_partial_mass",
     "Sheaf.Randomization.one_way_positive_sign",
-    "Sheaf.Randomization.press_shares_quartile"
+    "Sheaf.Randomization.depth_positive_bounded",
+    "Sheaf.Randomization.source_mode_maximal",
+    "Sheaf.Randomization.source_right_tail_halves",
+    "Sheaf.Randomization.source_left_tail_halves",
+    "Sheaf.Randomization.source_mode_two",
+    "Sheaf.Randomization.unselected_has_no_routes",
+    "Sheaf.Randomization.selected_retains_independent_draw"
   ],
   "sources": {
     "include/synth/RateSeparatedParameters.hpp": "0af485cb13e19fd88da45f08b37271e721e086fe5d66997bc08ac4290af30c61",
-    "include/synth/ParameterModulation.hpp": "9a62d66852ec0fd554c7aed46ab0abe3abdb9631ef9ce64281346fdde097ce64",
-    "src/ParameterModulation.cpp": "92c5b545df2dd637cdaf567ec777c9bd722a7f51fd1f14279e46f44e93672786",
+    "include/synth/ParameterModulation.hpp": "ee043ab4ebcf404eb8a5d0a84b9405e2d40d0471fbf6e80fde16fc030397af8c",
+    "src/ParameterModulation.cpp": "51a0ac367e3fd49bbf7b80afae4322f7fca7cf9938025ec6b6ee0c8f07fbb9e3",
     "include/synth/DspFilters.hpp": "9f99e536fbda57c898d90be1a46ac34984b3052854c31483fc96f5363ac8da43",
-    "../../../../app/FroggersModulation.hpp": "eb687d0d272eb567178445b033076db1fac28a4ae5ecc6fcb605c7c57af7d476"
+    "../../../../app/FroggersModulation.hpp": "89a30b4bfb926b425cc737a40640e501d7dd81d26fc463dd9636ea6c0ad9d23e"
   },
   "contracts": [
     {
@@ -158,25 +163,40 @@
       "boundary": "Abstract filter state; native stopped-noise and frozen-edit regressions exercise integration."
     },
     {
-      "behavior": "Randomize All shared quartile, bounded quantile counts and geometric effective depths",
+      "behavior": "Quartiles select target coverage; independent mode-two source counts and geometric magnitudes",
       "source": "../../../../app/FroggersModulation.hpp",
-      "anchor": "inline std::size_t DrawQuartileCount",
+      "anchor": "inline bool RandomizeDepthTargets",
       "proofs": [
         "Sheaf.Randomization.count_bounds",
         "Sheaf.Randomization.count_fiber",
         "Sheaf.Randomization.rectangle_roundtrip",
         "Sheaf.Randomization.flattened_count",
         "Sheaf.Randomization.rectangle_quartile",
-        "Sheaf.Randomization.fifteen_source_bands",
-        "Sheaf.Randomization.no_sources_no_routes",
-        "Sheaf.Randomization.drilled_count_floor",
+        "Sheaf.Randomization.coverage_bounds",
+        "Sheaf.Randomization.eightyfour_dense_coverage",
         "Sheaf.Randomization.depth_starts_full",
         "Sheaf.Randomization.depth_halves",
         "Sheaf.Randomization.geometric_partial_mass",
         "Sheaf.Randomization.one_way_positive_sign",
-        "Sheaf.Randomization.press_shares_quartile"
+        "Sheaf.Randomization.depth_positive_bounded",
+        "Sheaf.Randomization.source_mode_maximal",
+        "Sheaf.Randomization.source_right_tail_halves",
+        "Sheaf.Randomization.source_left_tail_halves",
+        "Sheaf.Randomization.source_mode_two",
+        "Sheaf.Randomization.unselected_has_no_routes",
+        "Sheaf.Randomization.selected_retains_independent_draw"
       ],
-      "boundary": "Exact integer mapping and rational depth recurrence. Uniform independent RNG draws are assumptions; native tests cover PRNG use, float curve inversion, held gestures, routing scope and allocation. App source correspondence requires the Froggers checkout around Sheaf."
+      "boundary": "Exact coverage mapping, rational two-sided source weights and magnitude recurrence. Native exhaustive entropy-ticket tests connect integer sampler weights to this law. Uniform independent RNG inputs, floating-point inversion, gesture dispatch, target selection and allocation remain native-tested."
+    },
+    {
+      "behavior": "Reuse an unchanged scalar leaf curve and skip absent inactive source slots",
+      "source": "src/ParameterModulation.cpp",
+      "anchor": "preparedScalarDepthTarget_",
+      "proofs": [
+        "Sheaf.Schedule.unaffected_node_can_skip",
+        "Sheaf.empty_crossfade_preserves_center"
+      ],
+      "boundary": "Conditional behavioral identities only; native curve equivalence, direct-edit/cache invalidation, multi-voice and route removal regressions verify concrete cache/store conditions. No deadline guarantee follows."
     }
   ]
 }

@@ -672,6 +672,7 @@ private:
     std::size_t recursionDepth_ = 0;
     std::size_t assignedDepthCount_ = 0;
     bool scalarLeafPrepared_ = false;
+    float preparedScalarDepthTarget_ = 0.0f;
     float currentCenter_ = 0.0f;
     float targetCenter_ = 0.0f;
     std::span<float> currentCenterScales_;

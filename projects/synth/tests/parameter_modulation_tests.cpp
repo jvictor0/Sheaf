@@ -16531,6 +16531,33 @@ TEST_CASE(prepared_scalar_depth_leaf_reuses_only_an_unchanged_image) {
     REQUIRE_NEAR(leaf.CachedKnobValue(1), 0.8f, 1e-6f);
 }
 
+TEST_CASE(prepared_scalar_curve_matches_fresh_depth_for_both_kinds_and_voices) {
+    for (auto kind : {synth::ModulationTargetKind::kBipolar, synth::ModulationTargetKind::kOneWayAmount}) {
+        synth::ParameterManager manager;
+        auto& group = manager.CreateGroup({.numVoices = 2, .numModulators = 2,
+            .numScenes = 2, .maxParameters = 8});
+        auto& root = manager.CreateParameter(group, {.name = "root", .defaultValue = 0.2f,
+            .modulationTargetKind = kind});
+        group.GetModulators().Metadata(0).connected = true;
+        auto& leaf = *root.EnsureModulationDepth(0);
+        for (float knob : {0.5f, 0.8f, 0.6f, 1.0f, 0.51f, 0.5f}) {
+            leaf.SceneCenter(0) = knob;
+            for (int reuse = 0; reuse < 3; ++reuse) {
+                root.Compute(manager.Scene());
+                const float expected = kind == synth::ModulationTargetKind::kOneWayAmount
+                    ? synth::OneWayModulationDepthTargetFromKnob(knob)
+                    : synth::ModulationDepthTargetFromKnob(knob);
+                for (std::size_t voice = 0; voice < 2; ++voice)
+                    REQUIRE_NEAR(root.TargetDepthForSource(voice, 0), expected, 1e-7f);
+            }
+        }
+        root.ClearModulationDepths();
+        root.Compute(manager.Scene());
+        for (std::size_t voice = 0; voice < 2; ++voice)
+            REQUIRE_NEAR(root.TargetDepthForSource(voice, 0), 0.0f, 0.0f);
+    }
+}
+
 TEST_CASE(rate_separated_parameters_interpolate_post_seam_once_per_frame) {
     synth::ParameterManager manager;
     auto& group = manager.CreateGroup({.numVoices = 2, .numModulators = 0,
