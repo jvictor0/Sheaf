@@ -1,5 +1,6 @@
 import Sheaf.Behavior
 import Sheaf.Schedule
+import Sheaf.Randomization
 
 #print axioms Sheaf.clamp_bounded
 #print axioms Sheaf.blend_left
@@ -32,3 +33,17 @@ import Sheaf.Schedule
 #print axioms Sheaf.Schedule.prepared_equals_recursive
 #print axioms Sheaf.Schedule.unaffected_node_can_skip
 #print axioms Sheaf.stopped_sources_hold
+
+#print axioms Sheaf.Randomization.count_bounds
+#print axioms Sheaf.Randomization.count_fiber
+#print axioms Sheaf.Randomization.rectangle_roundtrip
+#print axioms Sheaf.Randomization.flattened_count
+#print axioms Sheaf.Randomization.rectangle_quartile
+#print axioms Sheaf.Randomization.fifteen_source_bands
+#print axioms Sheaf.Randomization.no_sources_no_routes
+#print axioms Sheaf.Randomization.drilled_count_floor
+#print axioms Sheaf.Randomization.depth_starts_full
+#print axioms Sheaf.Randomization.depth_halves
+#print axioms Sheaf.Randomization.geometric_partial_mass
+#print axioms Sheaf.Randomization.one_way_positive_sign
+#print axioms Sheaf.Randomization.press_shares_quartile

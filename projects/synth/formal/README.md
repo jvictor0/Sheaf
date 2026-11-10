@@ -37,3 +37,12 @@ At 48 kHz host cadence, the integrated Froggers engine runs at 192 kHz. Other
 host rates retain the ratio. Targets and the Fuego/UI seam advance at host cadence;
 Low-pass-filtered modulation sources and audio DSP advance at engine cadence. Root
 publication weights are 1/4, 1/2, 3/4 and 1. Filter history persists across callbacks and holds exactly while source advancement is disabled by stopped transport.
+
+The Froggers integration also models Randomize All's shared density quartile,
+integer quantile count bounds, four-preimage marginal count law, empty eligible
+sets, drilled one-source floor, and geometric rational depth magnitudes/masses.
+Uniform independent random inputs are assumptions, not claims about the PRNG.
+The finite geometric mass theorem specifies the untruncated mathematical law;
+floating-point underflow/curve inversion and held-gesture/storage semantics remain
+native-tested. This app-specific correspondence fingerprints
+`../../../../app/FroggersModulation.hpp`, so its audit runs in the Froggers checkout.

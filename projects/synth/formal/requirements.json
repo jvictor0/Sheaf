@@ -35,13 +35,27 @@
     "Sheaf.Schedule.Expr.depends_only_on_earlier",
     "Sheaf.Schedule.prepared_equals_recursive",
     "Sheaf.Schedule.unaffected_node_can_skip",
-    "Sheaf.stopped_sources_hold"
+    "Sheaf.stopped_sources_hold",
+    "Sheaf.Randomization.count_bounds",
+    "Sheaf.Randomization.count_fiber",
+    "Sheaf.Randomization.rectangle_roundtrip",
+    "Sheaf.Randomization.flattened_count",
+    "Sheaf.Randomization.rectangle_quartile",
+    "Sheaf.Randomization.fifteen_source_bands",
+    "Sheaf.Randomization.no_sources_no_routes",
+    "Sheaf.Randomization.drilled_count_floor",
+    "Sheaf.Randomization.depth_starts_full",
+    "Sheaf.Randomization.depth_halves",
+    "Sheaf.Randomization.geometric_partial_mass",
+    "Sheaf.Randomization.one_way_positive_sign",
+    "Sheaf.Randomization.press_shares_quartile"
   ],
   "sources": {
     "include/synth/RateSeparatedParameters.hpp": "0af485cb13e19fd88da45f08b37271e721e086fe5d66997bc08ac4290af30c61",
     "include/synth/ParameterModulation.hpp": "9a62d66852ec0fd554c7aed46ab0abe3abdb9631ef9ce64281346fdde097ce64",
     "src/ParameterModulation.cpp": "92c5b545df2dd637cdaf567ec777c9bd722a7f51fd1f14279e46f44e93672786",
-    "include/synth/DspFilters.hpp": "9f99e536fbda57c898d90be1a46ac34984b3052854c31483fc96f5363ac8da43"
+    "include/synth/DspFilters.hpp": "9f99e536fbda57c898d90be1a46ac34984b3052854c31483fc96f5363ac8da43",
+    "../../../../app/FroggersModulation.hpp": "eb687d0d272eb567178445b033076db1fac28a4ae5ecc6fcb605c7c57af7d476"
   },
   "contracts": [
     {
@@ -142,6 +156,27 @@
         "Sheaf.stopped_sources_hold"
       ],
       "boundary": "Abstract filter state; native stopped-noise and frozen-edit regressions exercise integration."
+    },
+    {
+      "behavior": "Randomize All shared quartile, bounded quantile counts and geometric effective depths",
+      "source": "../../../../app/FroggersModulation.hpp",
+      "anchor": "inline std::size_t DrawQuartileCount",
+      "proofs": [
+        "Sheaf.Randomization.count_bounds",
+        "Sheaf.Randomization.count_fiber",
+        "Sheaf.Randomization.rectangle_roundtrip",
+        "Sheaf.Randomization.flattened_count",
+        "Sheaf.Randomization.rectangle_quartile",
+        "Sheaf.Randomization.fifteen_source_bands",
+        "Sheaf.Randomization.no_sources_no_routes",
+        "Sheaf.Randomization.drilled_count_floor",
+        "Sheaf.Randomization.depth_starts_full",
+        "Sheaf.Randomization.depth_halves",
+        "Sheaf.Randomization.geometric_partial_mass",
+        "Sheaf.Randomization.one_way_positive_sign",
+        "Sheaf.Randomization.press_shares_quartile"
+      ],
+      "boundary": "Exact integer mapping and rational depth recurrence. Uniform independent RNG draws are assumptions; native tests cover PRNG use, float curve inversion, held gestures, routing scope and allocation. App source correspondence requires the Froggers checkout around Sheaf."
     }
   ]
 }
