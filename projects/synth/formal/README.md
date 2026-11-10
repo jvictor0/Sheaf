@@ -58,3 +58,9 @@ modulation-source filter's continuous-band frequency-response bounds using exact
 binary32 coefficient embeddings. It also proves the 47 kHz to 1 kHz folding
 identity under four-to-one sampling. Its scope excludes per-sample float error,
 startup transients, nonlinear DSP and the separate output FIR.
+
+The [state/arithmetic extension](STATE_AND_ROUNDING.md) adds full biquad memory,
+concrete stability and initial-history decay, nearest-even binary32/binary64
+rounding with FTZ/DAZ, accumulated disturbances, the actual 287-tap output FIR,
+and nonlinear cell/jump contracts. Its guards and compiler-correspondence limits
+are explicit; it does not claim whole-instrument alias freedom.

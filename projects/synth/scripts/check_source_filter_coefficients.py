@@ -20,6 +20,7 @@ with tempfile.TemporaryDirectory(prefix='sheaf-alias-coefficients-') as director
         '-std=c++20', '-O2', '-DNDEBUG', '-I' + str(root / 'include'),
         str(root / 'formal/support/source_filter_coefficients.cpp'), '-o', str(binary)], check=True)
     actual = json.loads(subprocess.check_output([str(binary)], text=True))
+    fir_actual = json.loads(subprocess.check_output([str(binary), "fir"], text=True))
 if len(actual) != 4 or any(len(section) != 5 for section in actual):
     raise SystemExit('Expected four five-coefficient source-filter sections')
 
@@ -47,3 +48,28 @@ else:
     if model.read_text() != expected_model:
         raise SystemExit('Lean source-filter coefficients differ from the exact C++ export')
 print('Verified 20 exact binary32 source-filter coefficients')
+
+if len(fir_actual) != 287:
+    raise SystemExit('Expected 287 output FIR coefficients')
+fir_snapshot = root / 'formal/output-fir-coefficients.json'
+fir_model = root / 'formal/Sheaf/OutputFirCoefficients.lean'
+fir_lines = ['import Mathlib.Data.Real.Basic', '',
+             '-- Exact binary32 taps copied by FirDecimator from the configured double taps.',
+             '-- Generated with the source-filter coefficient export; do not edit independently.',
+             'namespace Sheaf.OutputFirCoefficients', '',
+             'noncomputable def taps : List ℝ := [']
+for index, bits in enumerate(fir_actual):
+    value = Fraction(struct.unpack('!f', struct.pack('!I', bits))[0])
+    comma = ',' if index + 1 < len(fir_actual) else ''
+    fir_lines.append(f'  ({value.numerator} : ℝ) / {value.denominator}{comma}')
+fir_lines.extend([']', '', 'end Sheaf.OutputFirCoefficients', ''])
+expected_fir = '\n'.join(fir_lines)
+if args.write:
+    fir_snapshot.write_text(json.dumps(fir_actual, indent=2) + '\n')
+    fir_model.write_text(expected_fir)
+else:
+    if json.loads(fir_snapshot.read_text()) != fir_actual:
+        raise SystemExit('Output FIR coefficients changed; review the state/error model before refreshing')
+    if fir_model.read_text() != expected_fir:
+        raise SystemExit('Lean FIR taps differ from the exact C++ export')
+print('Verified 287 exact binary32 output FIR coefficients')

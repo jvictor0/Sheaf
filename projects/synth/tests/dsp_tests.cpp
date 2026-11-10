@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cfenv>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -2772,6 +2773,76 @@ TEST_CASE(fir_decimator_four_to_one_coefficients_are_symmetric_with_expected_gro
 
     REQUIRE_NEAR(dcGain, 1.0, 1.0e-12);
     REQUIRE_TRUE((coefficients.size() - 1) / 2 == 143);
+}
+
+TEST_CASE(actual_output_fir_history_flush_and_l1_gain_match_formal_model) {
+    const auto coefficients = synth::FourToOneDecimatorCoefficients();
+    double l1 = 0;
+    for (double coefficient : coefficients) l1 += std::abs(static_cast<float>(coefficient));
+    REQUIRE_TRUE(l1 <= 9.0/4.0);
+    using Decimator = synth::FirDecimator<4,1,synth::kFourToOneDecimatorTaps>;
+    Decimator first{coefficients}, second{coefficients};
+    std::array<float,1> a{}, b{}, oa{}, ob{};
+    for (int n = 0; n < 512; ++n) {
+        a[0] = 1; b[0] = -1;
+        first.ProcessFrame(a,oa); second.ProcessFrame(b,ob);
+    }
+    bool observedHistory = false;
+    for (int n = 0; n < 576; ++n) {
+        a[0] = b[0] = static_cast<float>(0.5*std::sin(0.03*n));
+        const bool emitted = first.ProcessFrame(a,oa);
+        REQUIRE_TRUE(second.ProcessFrame(b,ob) == emitted);
+        if (!emitted) continue;
+        if (n < 286 && oa[0] != ob[0]) observedHistory = true;
+        if (n >= 286) REQUIRE_TRUE(oa[0] == ob[0]);
+    }
+    REQUIRE_TRUE(observedHistory);
+    Decimator worstCase{coefficients};
+    for (int n = 0; n < 288; ++n) {
+        a[0] = n == 0 ? 0.0f : coefficients[287-n] >= 0 ? 1.0f : -1.0f;
+        worstCase.ProcessFrame(a,oa);
+    }
+    REQUIRE_TRUE(oa[0] > 2.0f); // exercise genuine reconstruction overshoot, not a silent path
+    REQUIRE_NEAR(oa[0],l1,1e-6);
+    REQUIRE_TRUE(oa[0] <= 9.0f/4.0f);
+}
+
+TEST_CASE(actual_output_fir_mixed_precision_error_fits_proved_budget) {
+    REQUIRE_TRUE(std::numeric_limits<double>::is_iec559 && std::numeric_limits<double>::digits == 53);
+    REQUIRE_TRUE(std::fegetround() == FE_TONEAREST);
+    const auto coefficients = synth::FourToOneDecimatorCoefficients();
+    constexpr std::size_t taps = synth::kFourToOneDecimatorTaps;
+    synth::FirDecimator<4,1,taps> decimator{coefficients};
+    std::array<float,taps> history{};
+    std::array<float,1> input{}, output{};
+    std::size_t write = 0;
+    double peakError = 0;
+    for (int n = 0; n < 4096; ++n) {
+        input[0] = n % 997 == 0 ? std::numeric_limits<float>::denorm_min() : static_cast<float>(std::sin(0.071*n));
+        history[write] = input[0];
+        write = (write+1)%taps;
+        if (!decimator.ProcessFrame(input,output)) continue;
+        double ideal = 0, accumulated = 0;
+        std::size_t index = write;
+        for (std::size_t tap = 0; tap < taps; ++tap) {
+            index = index == 0 ? taps-1 : index-1;
+            const float coefficient = static_cast<float>(coefficients[tap]);
+            const double product = double(coefficient)*history[index];
+            REQUIRE_TRUE(std::abs(product) <= 8);
+            const float roundedProduct = coefficient*history[index];
+            REQUIRE_TRUE(std::abs(double(roundedProduct)-product) <= 1.0/1048576.0);
+            REQUIRE_TRUE(std::abs(accumulated+roundedProduct) <= 16);
+            accumulated += roundedProduct;
+            ideal += product;
+        }
+        REQUIRE_TRUE(std::abs(accumulated) <= 8);
+        REQUIRE_TRUE(output[0] == static_cast<float>(accumulated)); // exact tap order and precision correspondence
+        const double error = std::abs(double(output[0])-ideal);
+        REQUIRE_TRUE(error <= (taps+1.0)/1048576.0+taps/281474976710656.0);
+        peakError = std::max(peakError,error);
+    }
+    REQUIRE_TRUE(peakError > 0);
+    std::cout << "  [FIR mixed precision] peak error=" << peakError << "\n";
 }
 
 TEST_CASE(fir_decimator_four_to_one_frequency_response_meets_spec) {

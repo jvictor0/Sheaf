@@ -59,9 +59,16 @@ the first stage's three numerator coefficients in a temporary proof copy preserv
 its low-pass shape but violates its attenuation certificate; Lean rejects it.
 No weakened theorem or new axiom is used to accept either control.
 
-## Boundaries
+## State and arithmetic extension
 
-The theorems describe the fixed-coefficient, exact-real, steady-state frequency
+[STATE_AND_ROUNDING.md](STATE_AND_ROUNDING.md) documents the complementary
+full-memory recurrence, stability/decay, finite IEEE rounding, FTZ/DAZ, actual
+287-tap FIR, and nonlinear-cell composition contracts. Their native checks cover
+state copies, priming, arithmetic residuals, ring history, and actual Fuego jumps.
+
+## Boundaries of the frequency-response theorem
+
+The frequency-response theorems describe the fixed-coefficient, exact-real, steady-state frequency
 response using the implementation's rounded coefficients. They do **not** prove:
 
 - sample-by-sample IEEE arithmetic error bounds or overflow behavior;

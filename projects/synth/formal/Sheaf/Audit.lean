@@ -3,6 +3,11 @@ import Sheaf.Schedule
 import Sheaf.Randomization
 import Sheaf.Aliasing
 
+import Sheaf.FilterState
+import Sheaf.Rounding
+import Sheaf.NonlinearBoundary
+import Sheaf.OutputFir
+
 #print axioms Sheaf.clamp_bounded
 #print axioms Sheaf.blend_left
 #print axioms Sheaf.blend_right
@@ -74,3 +79,74 @@ import Sheaf.Aliasing
 #print axioms Sheaf.Aliasing.low_frequency_band_floor
 #print axioms Sheaf.Aliasing.band_rejection_power_ratio
 #print axioms Sheaf.Aliasing.band_rejection_amplitude_ratio
+
+#print axioms Sheaf.FilterState.section0_stability
+#print axioms Sheaf.FilterState.section1_stability
+#print axioms Sheaf.FilterState.section2_stability
+#print axioms Sheaf.FilterState.section3_stability
+#print axioms Sheaf.FilterState.energy_coercive
+#print axioms Sheaf.FilterState.energy_nonnegative
+#print axioms Sheaf.FilterState.energy_upper
+#print axioms Sheaf.FilterState.unforced_energy_identity
+#print axioms Sheaf.FilterState.difference_is_forced_recurrence
+#print axioms Sheaf.FilterState.arithmetic_disturbance_step
+#print axioms Sheaf.FilterState.bounded_disturbance_step
+#print axioms Sheaf.FilterState.unforced_transient_exact
+#print axioms Sheaf.FilterState.unforced_transient_bound
+#print axioms Sheaf.FilterState.accumulated_disturbance_bound
+#print axioms Sheaf.FilterState.component_error_budget
+#print axioms Sheaf.FilterState.transient_energy_tends_to_zero
+#print axioms Sheaf.FilterState.energy_after_512_samples
+#print axioms Sheaf.FilterState.full_memory_matches_feedback_step
+#print axioms Sheaf.FilterState.input_history_aligns_after_two_samples
+#print axioms Sheaf.FilterState.aligned_memory_error_is_forced_recurrence
+#print axioms Sheaf.FilterState.zero_memory_zero_input
+#print axioms Sheaf.FilterState.common_input_cancels
+#print axioms Sheaf.FilterState.filter_hold_preserves_state
+#print axioms Sheaf.Rounding.nearest_even_half_unit
+#print axioms Sheaf.Rounding.grid_round_half_ulp
+#print axioms Sheaf.Rounding.finite_region_binade_bound
+#print axioms Sheaf.Rounding.finite_binary32_rounding_error
+#print axioms Sheaf.Rounding.actual_source_coefficients_normal_and_bounded
+#print axioms Sheaf.Rounding.flush_error_bound
+#print axioms Sheaf.Rounding.finite_binary32_ftz_error
+#print axioms Sheaf.Rounding.flush_idempotent
+#print axioms Sheaf.Rounding.daz_product_error
+#print axioms Sheaf.Rounding.finite_rounding_result_bound
+#print axioms Sheaf.Rounding.ftz_regional_rounding_bound
+#print axioms Sheaf.Rounding.finite_binary64_rounding_error
+#print axioms Sheaf.Rounding.ftz_binary64_regional_bound
+#print axioms Sheaf.Rounding.nine_operation_residual
+#print axioms Sheaf.Rounding.rounded_operation_residual
+#print axioms Sheaf.Rounding.rounded_execution_is_trace
+#print axioms Sheaf.Rounding.executed_binary32_local_bound
+#print axioms Sheaf.Rounding.nine_operation_ftz_daz_residual
+#print axioms Sheaf.Rounding.rounding_enters_state_budget
+#print axioms Sheaf.Rounding.upstream_and_rounding_disturbance
+#print axioms Sheaf.NonlinearBoundary.first_bit_cells
+#print axioms Sheaf.NonlinearBoundary.below_first_threshold
+#print axioms Sheaf.NonlinearBoundary.at_first_threshold
+#print axioms Sheaf.NonlinearBoundary.threshold_jump
+#print axioms Sheaf.NonlinearBoundary.no_uniform_small_error_gain
+#print axioms Sheaf.NonlinearBoundary.cell_warp_offset_form
+#print axioms Sheaf.NonlinearBoundary.same_code_and_cell_preserve_error
+#print axioms Sheaf.NonlinearBoundary.explicit_cell_crossing_budget
+#print axioms Sheaf.NonlinearBoundary.two_stage_cell_error_budget
+#print axioms Sheaf.NonlinearBoundary.final_bound_range
+#print axioms Sheaf.NonlinearBoundary.final_bound_does_not_amplify_error
+#print axioms Sheaf.OutputFir.bounded_input_gain
+#print axioms Sheaf.OutputFir.convolution_difference
+#print axioms Sheaf.OutputFir.convolution_error
+#print axioms Sheaf.OutputFir.finite_history_flush
+#print axioms Sheaf.OutputFir.actual_tap_count
+#print axioms Sheaf.OutputFir.actual_l1_gain
+#print axioms Sheaf.OutputFir.actual_history_flush
+#print axioms Sheaf.OutputFir.actual_final_output_error
+#print axioms Sheaf.OutputFir.final_error_with_arithmetic_residual
+#print axioms Sheaf.OutputFir.round32_error
+#print axioms Sheaf.OutputFir.round64_error
+#print axioms Sheaf.OutputFir.accumulated_binary64_error
+#print axioms Sheaf.OutputFir.summed_binary32_product_error
+#print axioms Sheaf.OutputFir.mixed_precision_output_error
+#print axioms Sheaf.OutputFir.actual_287_tap_arithmetic_budget
+#print axioms Sheaf.OutputFir.daz_input_tail_error_bound

@@ -18,6 +18,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cfenv>
 #include <cmath>
 #include <cstdlib>
 #include <exception>
@@ -16588,6 +16589,113 @@ TEST_CASE(rate_separated_parameters_interpolate_post_seam_once_per_frame) {
     bridge.Configure(group);
     REQUIRE_TRUE(bridge.MatrixFrames() == 0);
     REQUIRE_TRUE(bridge.EngineSamples() == 0);
+}
+
+TEST_CASE(source_filter_state_decay_and_512_sample_priming_match_model) {
+    synth::RateSeparatedParameters::SourceFilter filter;
+    filter.SetCutoff(synth::RateSeparatedParameters::kSourceCutoff);
+    for (const auto* section : {&filter.m_biquad1, &filter.m_biquad2, &filter.m_biquad3, &filter.m_biquad4}) {
+        const double a1 = section->m_a1, a2 = section->m_a2;
+        const auto energy = [&](double x, double y) { return x*x+a1*x*y+a2*y*y; };
+        for (const auto initial : {std::array<double,2>{1,-1}, {0.25,0.75}, {-1,-1}}) {
+            double x = initial[0], y = initial[1];
+            const double initialEnergy = energy(x,y);
+            REQUIRE_TRUE(initialEnergy >= (x*x+y*y)/1000.0);
+            for (int n = 0; n < 512; ++n) {
+                const double next = -a1*x-a2*y;
+                REQUIRE_NEAR(energy(next,x), a2*energy(x,y), 1e-12);
+                y = x; x = next;
+            }
+            REQUIRE_TRUE(energy(x,y) <= initialEnergy*1e-49);
+        }
+    }
+    constexpr float input = 0.5625f;
+    double dc = input;
+    for (const auto* section : {&filter.m_biquad1, &filter.m_biquad2, &filter.m_biquad3, &filter.m_biquad4})
+        dc *= (double(section->m_b0)+section->m_b1+section->m_b2)/(1.0+section->m_a1+section->m_a2);
+    float output = 0;
+    for (int n = 0; n < 512; ++n) output = filter.Process(input);
+    REQUIRE_NEAR(output, dc, 5e-6);
+}
+
+TEST_CASE(source_filter_native_rounding_residual_fits_state_disturbance_budget) {
+    REQUIRE_TRUE(std::numeric_limits<float>::is_iec559);
+    REQUIRE_TRUE(std::numeric_limits<float>::digits == 24);
+    REQUIRE_TRUE(std::fegetround() == FE_TONEAREST);
+    synth::RateSeparatedParameters::SourceFilter filter;
+    filter.SetCutoff(synth::RateSeparatedParameters::kSourceCutoff);
+    double maximumResidual = 0;
+    for (int n = 0; n < 20000; ++n) {
+        float value = n < 512 ? 0.5625f : n % 4 == 0 ? 1.0f : n % 4 == 1 ? -1.0f :
+            static_cast<float>(std::sin(0.071*n));
+        for (auto* section : {&filter.m_biquad1, &filter.m_biquad2, &filter.m_biquad3, &filter.m_biquad4}) {
+            const std::array<double,5> products{double(section->m_b0)*value,
+                double(section->m_b1)*section->m_x1, double(section->m_b2)*section->m_x2,
+                double(section->m_a1)*section->m_y1, double(section->m_a2)*section->m_y2};
+            double absoluteProducts = 0;
+            for (double product : products) absoluteProducts += std::abs(product);
+            REQUIRE_TRUE(absoluteProducts+9.0/2097152.0 <= 8.0); // all partial sums, including prior rounding, fit the finite region
+            const double exact = products[0]+products[1]+products[2]-products[3]-products[4];
+            const float oldInput = section->m_x1, oldOutput = section->m_y1;
+            const float actual = section->Process(value);
+            REQUIRE_TRUE(section->m_x1 == value && section->m_x2 == oldInput);
+            REQUIRE_TRUE(section->m_y1 == actual && section->m_y2 == oldOutput);
+            const double residual = std::abs(double(actual)-exact);
+            REQUIRE_TRUE(std::isfinite(actual));
+            REQUIRE_TRUE(residual <= 9.0/2097152.0+19.0*std::numeric_limits<float>::min());
+            maximumResidual = std::max(maximumResidual,residual);
+            value = actual;
+        }
+    }
+    REQUIRE_TRUE(maximumResidual > 0); // positive control: the test exercises actual rounding
+    std::cout << "  [rounding residual] peak=" << maximumResidual << " bound=" << 9.0/2097152.0 << "\n";
+}
+
+TEST_CASE(binary32_native_flush_mode_matches_ftz_and_daz_contract) {
+#if defined(__aarch64__) || defined(__arm64__)
+    std::fenv_t original;
+    REQUIRE_TRUE(std::fegetenv(&original) == 0);
+    std::uint64_t control = 0;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(control));
+    const auto evaluate = [&](bool flush) {
+        const std::uint64_t selected = flush ? control | (std::uint64_t{1} << 24)
+                                             : control & ~(std::uint64_t{1} << 24);
+        __asm__ volatile("msr fpcr, %0\nisb" : : "r"(selected) : "memory");
+        volatile float normal = std::numeric_limits<float>::min(), half = 0.5f;
+        volatile float denormal = std::bit_cast<float>(std::uint32_t{0x00400000}), huge = std::ldexp(1.0f,126);
+        volatile float tinyResult = normal*half;
+        volatile float inputResult = denormal*huge;
+        return std::array<std::uint32_t,2>{std::bit_cast<std::uint32_t>(static_cast<float>(tinyResult)),
+            std::bit_cast<std::uint32_t>(static_cast<float>(inputResult))};
+    };
+    const auto gradual = evaluate(false), flushed = evaluate(true);
+    std::fesetenv(&original); // restore both control and exception flags before any assertion can throw
+    REQUIRE_TRUE(gradual[0] == 0x00400000 && gradual[1] == std::bit_cast<std::uint32_t>(0.5f));
+    REQUIRE_TRUE(flushed[0] == 0 && flushed[1] == 0);
+    std::cout << "  [FP mode] actual ARM64 FTZ output and DAZ input behavior checked\n";
+#else
+    REQUIRE_TRUE(std::numeric_limits<float>::is_iec559);
+#endif
+}
+
+TEST_CASE(binary32_native_ties_and_subnormal_handling_fit_rounding_model) {
+    REQUIRE_TRUE(std::fegetround() == FE_TONEAREST);
+    volatile float one = 1.0f;
+    volatile float halfUlp = std::ldexp(1.0f,-24);
+    const float even = one+halfUlp;
+    REQUIRE_TRUE(even == 1.0f);
+    volatile float odd = std::nextafter(1.0f,2.0f);
+    const float upperEven = odd+halfUlp;
+    REQUIRE_TRUE(upperEven == std::nextafter(static_cast<float>(odd),2.0f));
+    const auto flush = [](float x) { return std::fabs(x)<std::numeric_limits<float>::min() ? 0.0f : x; };
+    const float subnormal = std::numeric_limits<float>::denorm_min();
+    REQUIRE_TRUE(flush(subnormal) == 0.0f);
+    REQUIRE_TRUE(std::abs(double(flush(subnormal))-subnormal) <= std::numeric_limits<float>::min());
+    for (int i = -8192; i <= 8192; ++i) {
+        const double exact = i/1024.0+std::ldexp(1.0,-25);
+        const float rounded = static_cast<float>(exact);
+        REQUIRE_TRUE(std::abs(double(rounded)-exact) <= 1.0/2097152.0);
+    }
 }
 
 TEST_CASE(rate_separated_source_filter_matches_proved_response_band_bounds) {

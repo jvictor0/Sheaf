@@ -1,10 +1,22 @@
 // Emit the exact binary32 coefficients used by the modulation-source bridge.
 #include "synth/RateSeparatedParameters.hpp"
+#include "synth/DspBuffers.hpp"
 #include <bit>
 #include <cstdint>
 #include <iostream>
 
-int main() {
+int main(int argc, char**) {
+    if (argc > 1) {
+        std::cout << "[";
+        bool first = true;
+        for (double coefficient : synth::FourToOneDecimatorCoefficients()) {
+            if (!first) std::cout << ",";
+            first = false;
+            std::cout << std::bit_cast<std::uint32_t>(static_cast<float>(coefficient));
+        }
+        std::cout << "]\n";
+        return 0;
+    }
     synth::RateSeparatedParameters::SourceFilter filter;
     filter.SetCutoff(synth::RateSeparatedParameters::kSourceCutoff);
     std::cout << "[";
