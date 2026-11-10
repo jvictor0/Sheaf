@@ -53,14 +53,36 @@
     "Sheaf.Randomization.source_left_tail_halves",
     "Sheaf.Randomization.source_mode_two",
     "Sheaf.Randomization.unselected_has_no_routes",
-    "Sheaf.Randomization.selected_retains_independent_draw"
+    "Sheaf.Randomization.selected_retains_independent_draw",
+    "Sheaf.Aliasing.direct_response_matches_polynomial",
+    "Sheaf.Aliasing.section0_certificate",
+    "Sheaf.Aliasing.section1_certificate",
+    "Sheaf.Aliasing.section2_certificate",
+    "Sheaf.Aliasing.section3_certificate",
+    "Sheaf.Aliasing.numerator_lowpass",
+    "Sheaf.Aliasing.denominator_quadratic",
+    "Sheaf.Aliasing.stopband_section",
+    "Sheaf.Aliasing.passband_section",
+    "Sheaf.Aliasing.cascade_response_matches_polynomial",
+    "Sheaf.Aliasing.stopband_power_bound",
+    "Sheaf.Aliasing.passband_power_floor",
+    "Sheaf.Aliasing.fortyseven_k_folds_to_one_k",
+    "Sheaf.Aliasing.one_k_cosine_in_passband",
+    "Sheaf.Aliasing.fortyseven_k_cosine_in_stopband",
+    "Sheaf.Aliasing.fortyseven_k_rejection_relative_to_one_k",
+    "Sheaf.Aliasing.high_frequency_band_bound",
+    "Sheaf.Aliasing.low_frequency_band_floor",
+    "Sheaf.Aliasing.band_rejection_power_ratio",
+    "Sheaf.Aliasing.band_rejection_amplitude_ratio"
   ],
   "sources": {
-    "include/synth/RateSeparatedParameters.hpp": "0af485cb13e19fd88da45f08b37271e721e086fe5d66997bc08ac4290af30c61",
+    "include/synth/RateSeparatedParameters.hpp": "6f1240da49c217344a3a56ed75de9688cbf5f211d89843dd444175ba562ecabb",
     "include/synth/ParameterModulation.hpp": "ee043ab4ebcf404eb8a5d0a84b9405e2d40d0471fbf6e80fde16fc030397af8c",
     "src/ParameterModulation.cpp": "51a0ac367e3fd49bbf7b80afae4322f7fca7cf9938025ec6b6ee0c8f07fbb9e3",
     "include/synth/DspFilters.hpp": "9f99e536fbda57c898d90be1a46ac34984b3052854c31483fc96f5363ac8da43",
-    "../../../../app/FroggersModulation.hpp": "89a30b4bfb926b425cc737a40640e501d7dd81d26fc463dd9636ea6c0ad9d23e"
+    "../../../../app/FroggersModulation.hpp": "89a30b4bfb926b425cc737a40640e501d7dd81d26fc463dd9636ea6c0ad9d23e",
+    "include/synth/DspMath.hpp": "ea9bd21b615ae5b6d87f7d41a543eac589a9666690a27c3930c7b2ad1598b031",
+    "formal/support/source_filter_coefficients.cpp": "33c5e6df94b2a0be655ccef9f33cd6866ca2d3db59ec132aac5e2e73b6f73212"
   },
   "contracts": [
     {
@@ -197,6 +219,34 @@
         "Sheaf.empty_crossfade_preserves_center"
       ],
       "boundary": "Conditional behavioral identities only; native curve equivalence, direct-edit/cache invalidation, multi-voice and route removal regressions verify concrete cache/store conditions. No deadline guarantee follows."
+    },
+    {
+      "behavior": "Exact configured binary32 coefficients, real steady-state response and continuous-band alias rejection",
+      "source": "include/synth/RateSeparatedParameters.hpp",
+      "anchor": "static constexpr float kSourceCutoff",
+      "proofs": [
+        "Sheaf.Aliasing.direct_response_matches_polynomial",
+        "Sheaf.Aliasing.section0_certificate",
+        "Sheaf.Aliasing.section1_certificate",
+        "Sheaf.Aliasing.section2_certificate",
+        "Sheaf.Aliasing.section3_certificate",
+        "Sheaf.Aliasing.numerator_lowpass",
+        "Sheaf.Aliasing.denominator_quadratic",
+        "Sheaf.Aliasing.stopband_section",
+        "Sheaf.Aliasing.passband_section",
+        "Sheaf.Aliasing.cascade_response_matches_polynomial",
+        "Sheaf.Aliasing.stopband_power_bound",
+        "Sheaf.Aliasing.passband_power_floor",
+        "Sheaf.Aliasing.fortyseven_k_folds_to_one_k",
+        "Sheaf.Aliasing.one_k_cosine_in_passband",
+        "Sheaf.Aliasing.fortyseven_k_cosine_in_stopband",
+        "Sheaf.Aliasing.fortyseven_k_rejection_relative_to_one_k",
+        "Sheaf.Aliasing.high_frequency_band_bound",
+        "Sheaf.Aliasing.low_frequency_band_floor",
+        "Sheaf.Aliasing.band_rejection_power_ratio",
+        "Sheaf.Aliasing.band_rejection_amplitude_ratio"
+      ],
+      "boundary": "Real frequency-response model with exact binary32 coefficient embeddings, synchronized by a fresh C++ export. Power rejection over 47..96 kHz versus 0..1 kHz at a 192 kHz engine is at least 60 dB. No proof of sample-by-sample floating-point errors, initial conditions/transients, pole convergence, nonlinear DSP, interpolator imaging or the output FIR."
     }
   ]
 }

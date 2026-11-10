@@ -5,10 +5,13 @@ implementation strategy. `Sheaf/Schedule.lean` is adapted from its GPL-3.0 sched
 proof at the revision pinned in `requirements.json`; `COPYING.smart-grid` retains
 the license. The remaining model describes Sheaf's own normalized parameter API.
 
-Run `make formal-test` with Lean/Lake 4.32.0 on PATH. No Mathlib, Veil, network
-fetch or global installation is required. The gate builds all proofs, checks
-reviewed source fingerprints, then reruns the transitive axiom audit even on a
-cached build. Only Lean's standard `propext`, `Classical.choice`, and `Quot.sound`
+Run `make formal-test` with Lean/Lake 4.32.0 on PATH and a C++20 compiler.
+The real-valued filter proof uses Mathlib v4.32.0, pinned with its transitive
+revisions in `lake-manifest.json`. Initial setup uses `lake update` and Mathlib's
+proof cache; dependencies live in this checkout's ignored `.lake/packages`.
+Veil is not required. The gate builds all proofs, checks reviewed source
+fingerprints and freshly exported C++ filter coefficients, then reruns the
+transitive axiom audit even on a cached build. Only Lean's standard `propext`, `Classical.choice`, and `Quot.sound`
 axioms are permitted. There are no admitted proofs or trusted SMT results.
 
 `requirements.json` is the reviewed source correspondence manifest. Hashes are
@@ -25,8 +28,8 @@ as a reusable result; this integration uses Sheaf's recursive evaluator with reu
 
 The model quantifies over arbitrary finite counts; the native gesture selector is limited to 64 slots by its uint64 mask.
 
-The rational model abstracts floats and external warp functions. It does not
-prove IEEE rounding, source IIR/output FIR frequency response, the actual graph
+The parameter model abstracts floats and external warp functions. It does not
+prove IEEE rounding, the output FIR frequency response, the actual graph
 builder, weighted absolute-edit projection solver, event recording/replay, gesture
 edit allocation, allocator ownership, hardware/UI dispatch, performance or the
 entire C++ implementation. Source filtering and app integration are native-tested.
@@ -49,3 +52,9 @@ target selection, actual sampler weights, floating-point curve inversion, held
 gestures, recursive scope and storage lifecycle. The app-specific correspondence
 fingerprints `../../../../app/FroggersModulation.hpp`, so this audit runs within
 Froggers. These behavioral proofs do not establish audio-thread deadline safety.
+
+The additional real-valued [alias-rejection model](ALIASING.md) proves the fixed
+modulation-source filter's continuous-band frequency-response bounds using exact
+binary32 coefficient embeddings. It also proves the 47 kHz to 1 kHz folding
+identity under four-to-one sampling. Its scope excludes per-sample float error,
+startup transients, nonlinear DSP and the separate output FIR.

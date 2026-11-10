@@ -13,6 +13,7 @@ namespace synth {
 class RateSeparatedParameters {
 public:
     static constexpr std::size_t kFactor = 4;
+    static constexpr float kSourceCutoff = 0.45f / kFactor;
     using SourceFilter = ButterworthFilter;
 
     void Configure(ParameterGroup& group) {
@@ -82,7 +83,7 @@ private:
             : voice(v), mod(m), filtered(initial) {
             // Eighth-order anti-alias filter, 90% of the matrix Nyquist.
             // Prime at initial DC to avoid a normalized-source startup dip.
-            filter.SetCutoff(0.45f / kFactor);
+            filter.SetCutoff(kSourceCutoff);
             for (std::size_t i = 0; i < 512; ++i) filter.Process(initial);
         }
     };

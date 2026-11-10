@@ -26,6 +26,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <numbers>
 #include <optional>
 #include <random>
 #include <span>
@@ -16587,6 +16588,35 @@ TEST_CASE(rate_separated_parameters_interpolate_post_seam_once_per_frame) {
     bridge.Configure(group);
     REQUIRE_TRUE(bridge.MatrixFrames() == 0);
     REQUIRE_TRUE(bridge.EngineSamples() == 0);
+}
+
+TEST_CASE(rate_separated_source_filter_matches_proved_response_band_bounds) {
+    synth::RateSeparatedParameters::SourceFilter filter;
+    filter.SetCutoff(synth::RateSeparatedParameters::kSourceCutoff);
+    const auto power = [&](double frequency) {
+        const double angle = 2.0 * std::numbers::pi * frequency / 192000.0;
+        const double c = std::cos(angle), sn = std::sin(angle);
+        const double c2 = std::cos(2*angle), s2 = std::sin(2*angle);
+        double cascade = 1;
+        for (const auto* section : {&filter.m_biquad1, &filter.m_biquad2,
+                                    &filter.m_biquad3, &filter.m_biquad4}) {
+            const double nr = section->m_b0 + section->m_b1*c + section->m_b2*c2;
+            const double ni = section->m_b1*sn + section->m_b2*s2;
+            const double dr = 1 + section->m_a1*c + section->m_a2*c2;
+            const double di = section->m_a1*sn + section->m_a2*s2;
+            const double denominator = dr*dr + di*di;
+            REQUIRE_TRUE(denominator > 0);
+            cascade *= (nr*nr + ni*ni) / denominator;
+        }
+        return cascade;
+    };
+    // Numerical cross-check of the formal continuous-band inequalities.
+    // Existing time-domain tests independently exercise binary32 processing.
+    for (int i = 0; i <= 8192; ++i) {
+        REQUIRE_TRUE(power(47000.0 + 49000.0 * i / 8192.0) <= 1.0/4000000.0);
+        REQUIRE_TRUE(power(1000.0 * i / 8192.0) >= 0.5);
+    }
+    REQUIRE_TRUE(power(47000.0) <= power(1000.0) / 1000000.0);
 }
 
 TEST_CASE(rate_separated_sources_reject_aliases_before_matrix_evaluation) {

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 root = Path(__file__).resolve().parents[1]
 manifest = json.loads((root / "formal/requirements.json").read_text())
@@ -31,6 +32,7 @@ for model in (root / "formal/Sheaf").glob("*.lean"):
     declared.extend(namespaces[0] + "." + name for name in names)
 if set(declared) != set(manifest["theorems"]):
     raise SystemExit("Model theorem declarations differ from the manifest")
+subprocess.run([sys.executable, str(root / "scripts/check_source_filter_coefficients.py")], check=True)
 subprocess.run(["lake", "build"], cwd=root, check=True)
 run = subprocess.run(["lake", "env", "lean", "formal/Sheaf/Audit.lean"],
                      cwd=root, text=True, capture_output=True, check=True)

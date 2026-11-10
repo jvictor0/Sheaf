@@ -1,6 +1,7 @@
 import Sheaf.Behavior
 import Sheaf.Schedule
 import Sheaf.Randomization
+import Sheaf.Aliasing
 
 #print axioms Sheaf.clamp_bounded
 #print axioms Sheaf.blend_left
@@ -52,3 +53,24 @@ import Sheaf.Randomization
 #print axioms Sheaf.Randomization.source_mode_two
 #print axioms Sheaf.Randomization.unselected_has_no_routes
 #print axioms Sheaf.Randomization.selected_retains_independent_draw
+
+#print axioms Sheaf.Aliasing.direct_response_matches_polynomial
+#print axioms Sheaf.Aliasing.section0_certificate
+#print axioms Sheaf.Aliasing.section1_certificate
+#print axioms Sheaf.Aliasing.section2_certificate
+#print axioms Sheaf.Aliasing.section3_certificate
+#print axioms Sheaf.Aliasing.numerator_lowpass
+#print axioms Sheaf.Aliasing.denominator_quadratic
+#print axioms Sheaf.Aliasing.stopband_section
+#print axioms Sheaf.Aliasing.passband_section
+#print axioms Sheaf.Aliasing.cascade_response_matches_polynomial
+#print axioms Sheaf.Aliasing.stopband_power_bound
+#print axioms Sheaf.Aliasing.passband_power_floor
+#print axioms Sheaf.Aliasing.fortyseven_k_folds_to_one_k
+#print axioms Sheaf.Aliasing.one_k_cosine_in_passband
+#print axioms Sheaf.Aliasing.fortyseven_k_cosine_in_stopband
+#print axioms Sheaf.Aliasing.fortyseven_k_rejection_relative_to_one_k
+#print axioms Sheaf.Aliasing.high_frequency_band_bound
+#print axioms Sheaf.Aliasing.low_frequency_band_floor
+#print axioms Sheaf.Aliasing.band_rejection_power_ratio
+#print axioms Sheaf.Aliasing.band_rejection_amplitude_ratio
