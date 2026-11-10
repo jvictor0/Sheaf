@@ -1,0 +1,147 @@
+{
+  "schema": 1,
+  "reference": {
+    "repository": "https://github.com/jvictor0/theallelectricsmartgrid",
+    "revision": "e7afa9761bb2238b5affc3c61d92be27aec88476"
+  },
+  "theorems": [
+    "Sheaf.clamp_bounded",
+    "Sheaf.blend_left",
+    "Sheaf.blend_right",
+    "Sheaf.edit_isolates_current",
+    "Sheaf.absolute_leaf_reaches_target",
+    "Sheaf.edit_preserves_other_scene",
+    "Sheaf.reset_uses_configured_defaults",
+    "Sheaf.reset_snaps_current",
+    "Sheaf.one_way_ignores_group_blend_mode",
+    "Sheaf.disconnected_one_way_is_neutral",
+    "Sheaf.resting_unipolar_preserves_center",
+    "Sheaf.resting_bipolar_preserves_center",
+    "Sheaf.attenuverter_zero_depth",
+    "Sheaf.signed_contribution_matches_offset",
+    "Sheaf.empty_crossfade_preserves_center",
+    "Sheaf.clear_gesture_base",
+    "Sheaf.clear_gesture_selected",
+    "Sheaf.clear_gesture_other",
+    "Sheaf.pinned_storage_survives",
+    "Sheaf.crispy_gets_global_only",
+    "Sheaf.ordinary_row_uses_warped_crispy",
+    "Sheaf.quiescence_preserves_step",
+    "Sheaf.publication_finishes",
+    "Sheaf.settled_publication",
+    "Sheaf.current_frame_uses_fresh_evaluation",
+    "Sheaf.four_to_one_cadence",
+    "Sheaf.engine_192k",
+    "Sheaf.Schedule.Expr.depends_only_on_earlier",
+    "Sheaf.Schedule.prepared_equals_recursive",
+    "Sheaf.Schedule.unaffected_node_can_skip",
+    "Sheaf.stopped_sources_hold"
+  ],
+  "sources": {
+    "include/synth/RateSeparatedParameters.hpp": "0af485cb13e19fd88da45f08b37271e721e086fe5d66997bc08ac4290af30c61",
+    "include/synth/ParameterModulation.hpp": "9a62d66852ec0fd554c7aed46ab0abe3abdb9631ef9ce64281346fdde097ce64",
+    "src/ParameterModulation.cpp": "92c5b545df2dd637cdaf567ec777c9bd722a7f51fd1f14279e46f44e93672786",
+    "include/synth/DspFilters.hpp": "9f99e536fbda57c898d90be1a46ac34984b3052854c31483fc96f5363ac8da43"
+  },
+  "contracts": [
+    {
+      "behavior": "Host evaluation and application seam, four interpolated DSP publications",
+      "source": "include/synth/RateSeparatedParameters.hpp",
+      "anchor": "void ProcessSample",
+      "proofs": [
+        "Sheaf.four_to_one_cadence",
+        "Sheaf.publication_finishes",
+        "Sheaf.current_frame_uses_fresh_evaluation"
+      ]
+    },
+    {
+      "behavior": "Configurable scene/voice counts, normalized leaf edits, configured reset defaults with immediate current reset",
+      "source": "include/synth/ParameterModulation.hpp",
+      "anchor": "struct ParameterGroupConfig",
+      "proofs": [
+        "Sheaf.edit_preserves_other_scene",
+        "Sheaf.absolute_leaf_reaches_target",
+        "Sheaf.reset_uses_configured_defaults",
+        "Sheaf.reset_snaps_current"
+      ],
+      "boundary": "Leaf edit effect only; absolute projection solver, routing/modifiers and weighted scene allocation remain native-tested."
+    },
+    {
+      "behavior": "Crossfade signed sums and attenuverter rests-at-zero convention",
+      "source": "src/ParameterModulation.cpp",
+      "anchor": "if (group_.Config().modulationBlendMode == ModulationBlendMode::kAttenuverter",
+      "proofs": [
+        "Sheaf.signed_contribution_matches_offset",
+        "Sheaf.empty_crossfade_preserves_center",
+        "Sheaf.resting_unipolar_preserves_center",
+        "Sheaf.resting_bipolar_preserves_center"
+      ]
+    },
+    {
+      "behavior": "One-way targets override blend mode and disconnect to neutral",
+      "source": "src/ParameterModulation.cpp",
+      "anchor": "if (isOneWayAmount)",
+      "proofs": [
+        "Sheaf.one_way_ignores_group_blend_mode",
+        "Sheaf.disconnected_one_way_is_neutral"
+      ]
+    },
+    {
+      "behavior": "Optional gesture storage with arbitrary IDs and pinned-view lifetime",
+      "source": "include/synth/ParameterModulation.hpp",
+      "anchor": "std::size_t GestureCount() const",
+      "proofs": [
+        "Sheaf.clear_gesture_other",
+        "Sheaf.clear_gesture_base",
+        "Sheaf.pinned_storage_survives"
+      ],
+      "boundary": "Logical slots only; concrete recursive allocation/reclamation and pin predicate are native-tested."
+    },
+    {
+      "behavior": "Quiescent skipping preserves an unchanged step",
+      "source": "src/ParameterModulation.cpp",
+      "anchor": "parameter->Phase2WouldChangeNothing()",
+      "proofs": [
+        "Sheaf.quiescence_preserves_step"
+      ],
+      "boundary": "Conditional theorem; does not prove the C++ bitwise predicate or IEEE rounding."
+    },
+    {
+      "behavior": "Application Fuego seam retains shared Crunchy and applies global/local processing once per matrix frame",
+      "source": "include/synth/RateSeparatedParameters.hpp",
+      "anchor": "seam();",
+      "proofs": [
+        "Sheaf.crispy_gets_global_only",
+        "Sheaf.ordinary_row_uses_warped_crispy"
+      ],
+      "boundary": "Pure global/local warp functions abstract row-specific Fuego math; Froggers native tests exercise the actual seam."
+    },
+    {
+      "behavior": "Child-before-parent evaluation-order equivalence",
+      "source": "src/ParameterModulation.cpp",
+      "anchor": "depthParameter->ComputeAtDepth",
+      "proofs": [
+        "Sheaf.Schedule.prepared_equals_recursive"
+      ],
+      "boundary": "Imported reusable theorem only. Sheaf still uses recursive evaluation; no prepared graph builder is claimed."
+    },
+    {
+      "behavior": "Reuse scalar nested leaves only with an unchanged fresh raw center and no child/source routes",
+      "source": "src/ParameterModulation.cpp",
+      "anchor": "scalarWasPrepared",
+      "proofs": [
+        "Sheaf.Schedule.unaffected_node_can_skip"
+      ],
+      "boundary": "Conditional equality theorem; native edits/cache-overwrite/wiring tests cover concrete invalidation."
+    },
+    {
+      "behavior": "Hold source-filter state while stopped without gating control-frame edits",
+      "source": "include/synth/RateSeparatedParameters.hpp",
+      "anchor": "if (advanceSources) group.UpdateModValues();",
+      "proofs": [
+        "Sheaf.stopped_sources_hold"
+      ],
+      "boundary": "Abstract filter state; native stopped-noise and frozen-edit regressions exercise integration."
+    }
+  ]
+}

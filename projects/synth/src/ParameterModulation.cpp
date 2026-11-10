@@ -289,6 +289,7 @@ void ValidateOnePoleAlpha(float alpha) {
 
 void ValidateProcessingTiming(const ParameterProcessingTiming& timing) {
     ValidateOnePoleAlpha(timing.processLiteAlpha);
+    if (timing.targetCenterAlpha) ValidateOnePoleAlpha(*timing.targetCenterAlpha);
     ValidateOnePoleAlpha(timing.uiDisplayCenterAlpha);
     ValidateOnePoleAlpha(timing.uiDisplaySpreadAlpha);
     if (timing.targetComputeIntervalSamples == 0) {
@@ -924,6 +925,7 @@ void ParameterGroup::UpdateModValues() {
 void ParameterGroup::ConfigureProcessingTiming(const ParameterProcessingTiming& timing) {
     ValidateProcessingTiming(timing);
     config_.processLiteAlpha = timing.processLiteAlpha;
+    if (timing.targetCenterAlpha) config_.targetCenterAlpha = *timing.targetCenterAlpha;
     config_.targetComputeIntervalSamples = timing.targetComputeIntervalSamples;
     config_.uiDisplayCenterAlpha = timing.uiDisplayCenterAlpha;
     config_.uiDisplaySpreadAlpha = timing.uiDisplaySpreadAlpha;
@@ -1045,6 +1047,8 @@ Parameter::Parameter(ParameterId id, ParameterGroup& group, ParameterConfig conf
         sourceRoutePositions_[sourceIx] = sourceIx;
     }
     std::fill(modulationDepths_.begin(), modulationDepths_.end(), nullptr);
+    assignedDepthCount_ = 0;
+    scalarLeafPrepared_ = false;
     std::fill(sceneCenters_.begin(), sceneCenters_.end(), currentCenter_);
     std::fill(gestureValues_.begin(), gestureValues_.end(), currentCenter_);
     std::fill(gestureActiveMasks_.begin(), gestureActiveMasks_.end(), 0);
@@ -1131,6 +1135,8 @@ Parameter::Parameter(ParameterId id, ParameterGroup& group, ParameterConfig conf
         sourceRoutePositions_[sourceIx] = sourceIx;
     }
     std::fill(modulationDepths_.begin(), modulationDepths_.end(), nullptr);
+    assignedDepthCount_ = 0;
+    scalarLeafPrepared_ = false;
     std::fill(sceneCenters_.begin(), sceneCenters_.end(), currentCenter_);
     std::fill(gestureValues_.begin(), gestureValues_.end(), currentCenter_);
     std::fill(gestureActiveMasks_.begin(), gestureActiveMasks_.end(), 0);
@@ -1190,6 +1196,8 @@ std::size_t Parameter::CollectNeutralChildren() {
         }
 
         modulationDepths_[sourceIx] = nullptr;
+        --assignedDepthCount_;
+        scalarLeafPrepared_ = false;
         group_.RecycleLocalParameter(*child);
         ++collected;
     }
@@ -1227,6 +1235,8 @@ void Parameter::ResetLocalForReuse(ParameterId id, ParameterConfig config) {
     std::fill(uiDisplayCenters_.begin(), uiDisplayCenters_.end(), defaultValue);
     std::fill(uiDisplaySpreadEnergies_.begin(), uiDisplaySpreadEnergies_.end(), 0.0f);
     std::fill(modulationDepths_.begin(), modulationDepths_.end(), nullptr);
+    assignedDepthCount_ = 0;
+    scalarLeafPrepared_ = false;
     std::fill(sceneCenters_.begin(), sceneCenters_.end(), defaultValue);
     std::fill(gestureValues_.begin(), gestureValues_.end(), defaultValue);
     std::fill(gestureActiveMasks_.begin(), gestureActiveMasks_.end(), 0);
@@ -1576,6 +1586,7 @@ void Parameter::ReplaceCachedKnobValue(std::size_t voiceIx, float normalizedValu
     if (voiceIx >= currentKnobValues_.size()) {
         throw std::out_of_range("parameter cached knob voice index out of range");
     }
+    scalarLeafPrepared_ = false;
     currentKnobValues_[voiceIx] = std::clamp(normalizedValue, 0.0f, 1.0f);
 }
 
@@ -1965,6 +1976,9 @@ bool Parameter::AssignModulationDepth(std::size_t modIx, Parameter* parameter) {
         return false;
     }
 
+    if (modulationDepths_[modIx] != nullptr) --assignedDepthCount_;
+    if (parameter != nullptr) ++assignedDepthCount_;
+    scalarLeafPrepared_ = false;
     modulationDepths_[modIx] = parameter;
     return true;
 }
@@ -2001,6 +2015,8 @@ Parameter& Parameter::EnsureModulationDepth(std::size_t modIx, ParameterConfig c
 
 void Parameter::ClearModulationDepths() {
     std::fill(modulationDepths_.begin(), modulationDepths_.end(), nullptr);
+    assignedDepthCount_ = 0;
+    scalarLeafPrepared_ = false;
 }
 
 Parameter* Parameter::ModulationDepthParameter(std::size_t modIx) const {
@@ -2370,12 +2386,22 @@ float Parameter::ComputeRawCenter(const SceneState& scene) const {
 }
 
 void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDepth, bool smoothTargetCenter) {
+    const bool scalarWasPrepared = scalarLeafPrepared_;
     Wake();  // spm-96
     recursionDepth_ = recursionDepth;
     if (recursionDepth > 0 && group_.processingObserver_ != nullptr) {
         ++group_.processingObserver_->localRecursiveComputeCalls;
     }
     const float rawCenter = ClampToRange(ComputeRawCenter(scene), config_.range);
+    // A scalar depth leaf has no source dependencies. Direct scene/gesture
+    // references can be edited without Wake(), so compare its fresh raw value.
+    // All other writers invalidate this image through Wake() or cache overwrite.
+    if (recursionDepth > 0 && scalarWasPrepared && assignedDepthCount_ == 0 &&
+        activeRouteCount_ == 0 && SameBits(rawCenter, currentCenter_)) {
+        scalarLeafPrepared_ = true;
+        if (group_.processingObserver_ != nullptr) ++group_.processingObserver_->scalarLeafCacheHits;
+        return;
+    }
     if (smoothTargetCenter && recursionDepth == 0) {
         const float alpha = group_.Config().targetCenterAlpha;
         targetCenter_ += alpha * (rawCenter - targetCenter_);
@@ -2521,6 +2547,7 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
         SeedCachedKnobAndUiDisplayState();
     }
     PruneNeutralActiveRoutes();
+    scalarLeafPrepared_ = recursionDepth > 0 && assignedDepthCount_ == 0 && activeRouteCount_ == 0;
 }
 
 void Parameter::SnapCurrentToTarget() {

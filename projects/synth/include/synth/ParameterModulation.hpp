@@ -202,6 +202,7 @@ struct ParameterProcessingTiming {
     std::size_t targetComputeIntervalSamples;
     float uiDisplayCenterAlpha;
     float uiDisplaySpreadAlpha;
+    std::optional<float> targetCenterAlpha = std::nullopt;
 };
 
 struct ParameterProcessingObserver {
@@ -210,6 +211,7 @@ struct ParameterProcessingObserver {
     std::size_t activeRouteVisits = 0;
     std::size_t activeGestureVisits = 0;
     std::size_t neutralCollectionPasses = 0;
+    std::size_t scalarLeafCacheHits = 0;
     // spm-96: phase-1 visits the group skipped because the parameter was quiescent.
     std::size_t topLevelQuiescentSkips = 0;
 };
@@ -391,6 +393,7 @@ public:
     std::size_t StorageLowWatermark() const { return storageLowWatermark_; }
     std::size_t ParameterCount() const { return parameterCount_; }
     std::size_t TopLevelParameterCount() const { return topLevelParameters_.size(); }
+    std::span<Parameter* const> TopLevelParameters() const { return topLevelParameters_; }
     std::size_t LiveLocalParameterCount() const { return liveLocalParameterCount_; }
     std::size_t FreeLocalParameterSlotCount() const { return recycledLocalSlots_.size(); }
     std::size_t CollectNeutralLocalParameters();
@@ -581,12 +584,14 @@ public:
     void Wake() {
         phase1Quiescent_ = false;
         phase2Settled_ = false;
+        scalarLeafPrepared_ = false;
     }
     bool Phase1Quiescent() const { return phase1Quiescent_; }
     // spm-96: the skipped phase 1 of a quiescent parameter: the cached knob
     // values return to the raw values its last phase 1 computed, which an
     // application may have overwritten after phase 1 (ReplaceCachedKnobValue).
     void RestoreLastRawKnobValues() {
+        scalarLeafPrepared_ = false;
         for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
             currentKnobValues_[voiceIx] = lastRawValues_[voiceIx];
         }
@@ -665,6 +670,8 @@ private:
     std::size_t storageLocalIx_ = 0;
     std::size_t localViewPinCount_ = 0;
     std::size_t recursionDepth_ = 0;
+    std::size_t assignedDepthCount_ = 0;
+    bool scalarLeafPrepared_ = false;
     float currentCenter_ = 0.0f;
     float targetCenter_ = 0.0f;
     std::span<float> currentCenterScales_;

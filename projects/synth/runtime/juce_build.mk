@@ -52,7 +52,7 @@ SYNTH_HEADERS := $(SYNTH_ROOT)/include/synth/AppConcepts.hpp $(SYNTH_ROOT)/inclu
 	$(SYNTH_ROOT)/include/synth/AppContext.hpp \
 	$(SYNTH_ROOT)/include/synth/Engine.hpp \
 	$(SYNTH_ROOT)/include/synth/AtomicColor.hpp $(SYNTH_ROOT)/include/synth/ButtonGrid.hpp \
-	$(SYNTH_ROOT)/include/synth/ParameterModulation.hpp $(SYNTH_ROOT)/include/synth/MidiController.hpp \
+	$(SYNTH_ROOT)/include/synth/ParameterModulation.hpp $(SYNTH_ROOT)/include/synth/RateSeparatedParameters.hpp $(SYNTH_ROOT)/include/synth/MidiController.hpp \
 	$(SYNTH_ROOT)/include/synth/Json.hpp \
 	$(SYNTH_ROOT)/include/synth/Modules.hpp \
 	$(SYNTH_ROOT)/include/synth/PatchPersistence.hpp \

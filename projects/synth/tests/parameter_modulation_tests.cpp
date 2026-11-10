@@ -4,6 +4,7 @@
 #include "synth/MidiController.hpp"
 #include "synth/Json.hpp"
 #include "synth/ParameterModulation.hpp"
+#include "synth/RateSeparatedParameters.hpp"
 #include "synth/PatchPersistence.hpp"
 #include "synth/PortableUI.hpp"
 #include "synth/ThreadId.hpp"
@@ -16494,6 +16495,101 @@ TEST_CASE(patch_manager_save_load_new_lifecycle_uses_messages_and_current_direct
     REQUIRE_NEAR(cutoff.SceneCenter(0), 0.2f, 0.000001f);
 
     std::filesystem::remove_all(tempRoot);
+}
+
+// The application seam is evaluated once, after phase 1, for every voice.
+// Publishing subframes must not repeatedly apply a nonlinear transform.
+TEST_CASE(prepared_scalar_depth_leaf_reuses_only_an_unchanged_image) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices = 2, .numModulators = 2,
+        .numScenes = 3, .maxParameters = 8});
+    auto& root = manager.CreateParameter(group, {.name = "root", .defaultValue = 0.2f});
+    auto& leaf = *root.EnsureModulationDepth(0);
+    synth::ParameterProcessingObserver observer;
+    group.SetProcessingObserverForTests(&observer);
+    root.Compute(manager.Scene());
+    root.Compute(manager.Scene());
+    REQUIRE_TRUE(observer.scalarLeafCacheHits > 0);
+    const auto beforeEdit = observer.scalarLeafCacheHits;
+    leaf.SceneCenter(0) = 0.8f; // A direct reference write does not call Wake().
+    root.Compute(manager.Scene());
+    REQUIRE_NEAR(leaf.CachedKnobValue(0), 0.8f, 1e-6f);
+    REQUIRE_TRUE(observer.scalarLeafCacheHits == beforeEdit);
+    root.Compute(manager.Scene());
+    REQUIRE_TRUE(observer.scalarLeafCacheHits > beforeEdit);
+    leaf.ReplaceCachedKnobValue(0, 0.1f);
+    root.Compute(manager.Scene());
+    REQUIRE_NEAR(leaf.CachedKnobValue(0), 0.8f, 1e-6f);
+    leaf.RestoreLastRawKnobValues();
+    root.Compute(manager.Scene());
+    REQUIRE_NEAR(leaf.CachedKnobValue(0), 0.8f, 1e-6f);
+    leaf.EnsureModulationDepth(1)->SceneCenter(0) = 1.0f;
+    root.Compute(manager.Scene());
+    REQUIRE_TRUE(leaf.ModulationDepthParameter(1) != nullptr);
+    leaf.ClearModulationDepths();
+    root.Compute(manager.Scene());
+    REQUIRE_NEAR(leaf.CachedKnobValue(1), 0.8f, 1e-6f);
+}
+
+TEST_CASE(rate_separated_parameters_interpolate_post_seam_once_per_frame) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices = 2, .numModulators = 0,
+        .numScenes = 3, .maxParameters = 2});
+    auto& root = manager.CreateParameter(group, {.name = "root", .defaultValue = 0.2f});
+    synth::RateSeparatedParameters bridge;
+    bridge.Configure(group);
+    int seams = 0;
+    for (std::size_t phase = 0; phase < 4; ++phase) {
+        bridge.ProcessSample(group, 0, phase, [&] {
+            ++seams;
+            root.ReplaceCachedKnobValue(0, 0.8f);
+            root.ReplaceCachedKnobValue(1, 0.6f);
+        });
+        REQUIRE_NEAR(root.CachedKnobValue(0), 0.2f + 0.6f * (phase + 1) / 4.0f, 1e-6f);
+        REQUIRE_NEAR(root.CachedKnobValue(1), 0.2f + 0.4f * (phase + 1) / 4.0f, 1e-6f);
+    }
+    REQUIRE_TRUE(seams == 1);
+    REQUIRE_TRUE(bridge.MatrixFrames() == 1);
+    REQUIRE_TRUE(bridge.EngineSamples() == 4);
+    for (std::size_t phase = 0; phase < 4; ++phase)
+        bridge.ProcessSample(group, 1, phase, [&] {
+            root.ReplaceCachedKnobValue(0, 0.8f);
+            root.ReplaceCachedKnobValue(1, 0.6f);
+        });
+    REQUIRE_NEAR(root.CachedKnobValue(0), 0.8f, 1e-6f);
+    bridge.Configure(group);
+    REQUIRE_TRUE(bridge.MatrixFrames() == 0);
+    REQUIRE_TRUE(bridge.EngineSamples() == 0);
+}
+
+TEST_CASE(rate_separated_sources_reject_aliases_before_matrix_evaluation) {
+    const auto measure = [](double hz) {
+        synth::ParameterManager manager;
+        auto& group = manager.CreateGroup({.numVoices = 1, .numModulators = 1,
+            .numScenes = 2, .maxParameters = 1});
+        float source = 0.5f;
+        std::array<float*, 1> pointers{&source};
+        group.SetModulationSource(0, pointers, {.connected = true});
+        synth::RateSeparatedParameters bridge;
+        bridge.Configure(group);
+        double energy = 0.0;
+        std::size_t count = 0;
+        for (std::size_t i = 0; i < 16384; ++i) {
+            source = 0.5f + 0.4f * std::sin(2.0 * 3.141592653589793 * hz * i / 192000.0);
+            bridge.ProcessSample(group, i / 4, i % 4, [&] {
+                if (i > 1024) {
+                    const double value = group.GetModulators().Value(0, 0) - 0.5;
+                    energy += value * value;
+                    ++count;
+                }
+            });
+        }
+        return std::sqrt(energy / count);
+    };
+    const double audible = measure(1000.0);
+    const double ultrasonic = measure(47000.0);
+    REQUIRE_TRUE(audible > 0.27 && audible < 0.29);
+    REQUIRE_TRUE(ultrasonic < audible * 0.001);
 }
 
 TEST_CASE(invalid_indices_throw) {
