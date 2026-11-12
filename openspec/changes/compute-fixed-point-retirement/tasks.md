@@ -251,3 +251,12 @@ Same rules as before. Read the finding named in each task.
       `ComputeAllParameters`), not on the data's origin. That is the same
       ruling as the `CollectNeutralChildren` bump. Task 5.8's red control for
       it is recorded as unmeetable. Edit nothing for this item.
+
+Recorded 2026-11-12 after round 5: the lead accepts three deviations, each of
+which strengthens a check.
+- 6.1 routes each source's aliases under `% 32` and `% 63` alongside it. With
+  a single route per source, an aliasing mutant cannot fail.
+- 6.3 adds a 40000-sample idle window to the 64-modulator run, so that a
+  periodic throttle cannot hide between windows.
+- 6.3 adds a retiring rig with the skip off to the settled test. With the skip
+  on, a settled parameter never reaches the retired branch.
