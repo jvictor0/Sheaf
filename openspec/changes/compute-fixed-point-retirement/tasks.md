@@ -1,0 +1,125 @@
+The executor's deliverable is a report; code changes are a side effect of it.
+A conflict between this file, `proposal.md`, the spec delta and the code is
+reported and stops that task. Every new assertion is shown to fail with its
+production change reverted, by the executor, before the task is reported done.
+A test that is red before the task starts is reported, never edited. Build and
+run one binary at a time; C++ builds run at `-j2` under `nice`. Nothing is
+installed and nothing is fetched: Mathlib is already present at
+`projects/synth/.lake` (a local copy), and `make formal-test` needs
+`export PATH="$HOME/.elan/bin:$PATH"` first; with that it passed offline on this
+tree before the change (180 theorems, 11 sources). Paths are relative to
+`projects/synth` unless they say frogg3rs.
+
+## 0. Trace
+
+- [ ] 0.1 Confirm `proposal.md`'s trace table against `ComputeAtDepth` and
+      everything it calls. Report every read the table does not cover, and
+      every site that writes `modulationDepths_` or `assignedDepthCount_`,
+      with whether it already calls `Wake()`. Stop on any uncovered read.
+      Check: the report lists each site with file and function.
+
+## 1. Lean law
+
+- [ ] 1.1 Add `Sheaf.second_compute_fixed_point` and
+      `Sheaf.retired_frames_match_full` to `formal/Sheaf/Behavior.lean`, stated
+      as in `proposal.md` ("The law"), with `step k (t, p) = (g k t, h k (g k t))`
+      over arbitrary types, with the key / carried / derived partition as a
+      named definition whose comment says it is a judgment ruled by the lead
+      on 2026-11-11 from `proposal.md`'s trace table and checked against the
+      code by the native differential tests, and with both theorems stated
+      over that definition; proved without `sorry` or new axioms, using only
+      what that file already imports. Add both to `formal/Sheaf/Audit.lean`
+      (`#print axioms`) and to `formal/requirements.json` (theorem list and
+      statement pins) in the positions the gate requires; pinned statements
+      cannot contain `:=`, and the gate's escape-hatch scan bans the words it
+      lists in `scripts/check_parameter_model.py`. Done before any task-2 edit,
+      while the source fingerprints still match.
+      Check: `make formal-test` passes and prints both names; deleting either
+      theorem, or editing either statement without its pin, makes it fail.
+
+## 2. Retirement
+
+- [ ] 2.1 Implement "The C++" section of `proposal.md` exactly: write epoch
+      (every listed site, including the local-only increments), epoch
+      sampling, key, armed (including the early return), retirable, the group
+      change, the 64-modulator bound, `retireFixedPointComputes`,
+      `SetRetireFixedPointComputesForTests`, `topLevelRetiredComputes`. Update
+      the spm-96 comments in `ParameterModulation.hpp`
+      (`skipQuiescentParameters`) and `ParameterGroup::ProcessSamplePhase1` so
+      they state the retired case.
+      Check: tasks 2.2 and 2.3.
+- [ ] 2.2 Give `quiescence::Rig` constructor parameters for the compute
+      interval and for `retireFixedPointComputes`; existing callers keep
+      interval 16 and retirement off, so the spm-96 tests still compare
+      against full `Compute()`. "Compute-sample visits" below means
+      `topLevelProcessLiteCalls` divided by the run's interval. Add
+      `fixed_point_compute_retirement_matches_full_compute`: the spec delta's
+      first spm-97 scenario, a rig with retirement on against a rig with
+      retirement and the quiescent skip off, at intervals 1 and 16, comparing
+      after every sample every public const accessor of every top-level
+      parameter and of every depth child reachable from them. Positive control
+      written now: `topLevelRetiredComputes` exceeds half of the compute-sample
+      visits in each run. Red controls,
+      each with only that one guard removed from production, each making this
+      test fail (report which sample and parameter): the fresh raw-centre
+      compare; the metadata masks; the child `activeRouteCount_ == 0`
+      condition; the child-is-local condition; the `ProcessLitePhase1` epoch
+      increment; the epoch increment in each of `AssignModulationDepth`,
+      `CollectNeutralChildren` and `ClearModulationDepths`; the local-only
+      increment in `ReplaceCachedKnobValue`; the route-changed flag; the
+      `targetCenter_` unchanged condition. A guard whose removal leaves the
+      test green is reported, with the event added to the sequence that would
+      exercise it, or with the trace showing the guard is unreachable.
+- [ ] 2.3 Add `settled_parameters_retire_their_compute_until_written` (the
+      second spm-97 scenario) on the seven-parameter rig at interval 1 with
+      retirement on: after 48000 samples, 160 more samples retire all
+      7 × 160 visits; after `RevertAllToDefault` on parameter 2, the next
+      sample retires exactly 6. Update
+      `quiescent_parameters_skip_their_lite_step_until_woken` to the MODIFIED
+      spm-96 scenario: the existing `visits - 7 * 10` assertion on a rig with
+      retirement off, and `visits` on a rig with it on.
+      Check: both pass; with the group change reverted, the retired count
+      is 0 and the new assertions fail.
+- [ ] 2.4 Run every `projects/synth` test binary. Report each test that
+      fails, with the observer counter or value it asserts. Do not edit it.
+
+## 3. Froggers
+
+- [ ] 3.1 In frogg3rs `app/FroggersModulation.hpp`, add the test seam the
+      proposal describes (`SetLaunchSaltForTests`, read only by the default
+      constructor).
+      Check: task 3.2's determinism control.
+- [ ] 3.2 In frogg3rs `app/FroggersParameterModelTests.cpp`, add
+      `froggers_compute_retirement_matches_full_compute`, the third spm-97
+      scenario: set `FroggersModulationSlate::SetLaunchSaltForTests(0x5EED)`,
+      build three `SynthRig<FroggersApp>` rigs (48 kHz, 256 frames, own
+      scratch data paths), then clear the override; rigs B and C call
+      `SetRetireFixedPointComputesForTests(false)` on
+      `Application().Parameters().Group()`. Same sequence on all three:
+      `StartAt(0)`; settle 16 blocks; six Randomize All presses 40 blocks
+      apart; a knob turn through the surface; a scene blend sweep over 40
+      blocks; transport stop for 40 blocks and start; then 40 idle blocks.
+      After every block: every output sample, and every top-level parameter's
+      `CachedKnobValue(0)`, equal bit for bit between A and B and between B
+      and C. Attach one `ParameterProcessingObserver` per rig with
+      `SetProcessingObserverForTests` on its group after construction; the
+      counters are cumulative, so window counts are differences of snapshots
+      taken at the window's first and last block. Positive control: A's
+      `topLevelRetiredComputes` exceeds half of its
+      `topLevelProcessLiteCalls` over the whole run. Over the final 40 idle
+      blocks only: B's `localRecursiveComputeCalls` is greater than 0, and
+      A's is at most one tenth of B's. If B and C disagree, or either
+      idle-window assertion fails on the implementation as written, stop and
+      report the numbers; do not weaken any comparison or threshold.
+      Check: passes; with the fresh raw-centre compare removed from Sheaf
+      production it fails; with the group's retired branch calling
+      `Parameter::ProcessSamplePhase1` instead of `ProcessLitePhase1` the
+      idle-window assertion fails.
+- [ ] 3.3 Run every frogg3rs app test binary against this Sheaf tree. Report
+      failures; do not edit them.
+
+## 4. Fingerprints
+
+- [ ] 4.1 Do not refresh the `sources` fingerprints in
+      `formal/requirements.json`. Report the gate's mismatch output; the lead
+      refreshes them after the after-code audit reviews the three files.
