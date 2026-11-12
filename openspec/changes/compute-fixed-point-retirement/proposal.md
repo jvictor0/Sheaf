@@ -142,7 +142,15 @@ correspondence check that carries it to the compiled path.
   `FroggersModulationSlate::SetLaunchSaltForTests(std::optional<std::uint32_t>)`,
   is read only by that default constructor
   (`TestLaunchSalt().value_or(std::random_device{}())`); unset, behaviour is
-  unchanged.
+  unchanged. The slate's noise source (`noiseProcessor_`,
+  `synth::NoiseModulatorProcessor`) also seeds itself from `std::random_device`
+  (`NoiseInitializationSeed()`, `DspNoise.hpp`) independently of the salt
+  (found by the executor in task 3.2, amended 2026-11-12). The slate's salted
+  constructor therefore builds it with the existing seeded constructor
+  `NoiseModulatorProcessor(1, seed)` when, and only when, `TestLaunchSalt()` is
+  set, with `seed = (std::uint64_t{*TestLaunchSalt()} << 32) ^
+  0x9E3779B97F4A7C15ULL`; otherwise it keeps `NoiseInitializationSeed()`. Unset,
+  behaviour is unchanged.
 
 ### Trace: why the key covers every input
 

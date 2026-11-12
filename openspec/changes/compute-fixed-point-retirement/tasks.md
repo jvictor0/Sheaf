@@ -67,7 +67,12 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
       increment; the epoch increment in each of `AssignModulationDepth`,
       `CollectNeutralChildren` and `ClearModulationDepths`; the local-only
       increment in `ReplaceCachedKnobValue`; the route-changed flag; the
-      `targetCenter_` unchanged condition. A guard whose removal leaves the
+      `targetCenter_` unchanged condition. Give `quiescence::Rig` a
+      blend-mode constructor parameter (existing callers keep their current
+      mode) and add one run, at interval 1, in attenuverter mode, whose
+      sequence flips `Metadata(source).restsAtZero` on a routed source after
+      the rig has settled and flips it back later, with no `Wake()`; the
+      `restsAtZero` mask red control must fail on that run. A guard whose removal leaves the
       test green is reported, with the event added to the sequence that would
       exercise it, or with the trace showing the guard is unreachable.
 - [ ] 2.3 Add `settled_parameters_retire_their_compute_until_written` (the
@@ -87,7 +92,8 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
 
 - [ ] 3.1 In frogg3rs `app/FroggersModulation.hpp`, add the test seam the
       proposal describes (`SetLaunchSaltForTests`, read only by the default
-      constructor).
+      constructor), and the noise-source seeding it describes (seeded
+      constructor only while `TestLaunchSalt()` is set).
       Check: task 3.2's determinism control.
 - [ ] 3.2 In frogg3rs `app/FroggersParameterModelTests.cpp`, add
       `froggers_compute_retirement_matches_full_compute`, the third spm-97
