@@ -690,3 +690,44 @@ WHEN JUCE-free system tests exercise an input-capable synth application, THE `Sy
 - **WHEN** a test attempts to inject a channel, frame, or block shape outside the rig's configured input dimensions
 - **THEN** the helper rejects the operation deterministically
 - **AND** no partial input mutation reaches the next processed block
+
+### Requirement: sar-42 — Data paths: a host that keeps no runtime configuration
+WHERE a host's runtime data paths name a patches root and no configuration file, THE engine SHALL load no runtime configuration, SHALL open no startup patch, and SHALL write no configuration file, at startup or after a patch command; a host whose configuration file is named but does not exist SHALL keep the startup behaviour of `sar-8` and `sar-18`.
+
+#### Scenario: No startup patch without a configuration file
+- **WHEN** the engine initializes, under a catalog that sets `patchCarriesMappings`, with a patches root holding a saved patch whose parameter values differ from the defaults and whose instrument section holds a controller, and with no configuration file named
+- **THEN** after initialization and one message-thread tick, every parameter holds its default value and the live instrument equals the application's initial instrument
+- Check: not yet delivered: NEW engine_initialize_without_a_configuration_file_opens_no_startup_patch in tests/engine_tests.cpp (frogg3rs task S1)
+
+#### Scenario: A named but missing configuration keeps startup loading
+- **WHEN** the engine initializes with a configuration file named but absent and a saved patch present
+- **THEN** the newest patch opens
+- Check: `tests/engine_tests.cpp`, `engine_initialize_treats_missing_runtime_config_as_defaults_and_still_loads_startup_patch`
+
+### Requirement: sar-43 — Audio: input opens only with record permission
+WHEN the JUCE runtime is about to open an audio input device, whether chosen on the Audio page or reapplied from a persisted selection at start, THE runtime SHALL first request the platform's record permission through `juce::RuntimePermissions`, SHALL open the input only when it is granted, and when it is refused SHALL keep the output device running and publish an Audio page status saying that microphone access was not granted.
+
+#### Scenario: Desktop platforms are unchanged
+- **WHEN** an input is chosen on macOS or Windows
+- **THEN** the permission callback grants at once and the input opens as before
+- Check: `juce/RuntimeShellSessionTests.cpp` input checks, run through `apps/miniapp`'s `test` target.
+
+#### Scenario: A refused permission keeps the output
+- **WHEN** an input is chosen on Android and the record permission is refused
+- **THEN** the output keeps running with no input opened
+- **AND** the Audio page status says microphone access was not granted
+- Check: the frogg3rs Android emulator check (`frogg3rs-android-app` task 4.9).
+
+### Requirement: sar-44 — Android: the audio thread runs on the faster cores
+WHEN the JUCE runtime runs on Android on a device whose cores do not all share one maximum frequency, THE runtime SHALL, the first time each audio thread runs its audio callback, restrict that thread to the cores whose maximum frequency is above the slowest core's, SHALL determine those cores off the audio thread, and SHALL leave placement to Android when fewer than two distinct maximum frequencies can be read, skipping any core whose frequency cannot be read.
+
+#### Scenario: A phone with slow and fast cores
+- **WHEN** the runtime starts audio on a Galaxy S20 FE (cores 0-3 at 1.8 GHz, 4-7 faster)
+- **THEN** the audio thread runs on cores 4-7 and, with the transport stopped and the default patch loaded, the DSP meter reads under 100%
+- Check: operator step — pass, 2026-10-01, the operator's Galaxy S20 FE (SM-G781W, Android 13), frogg3rs `frogg3rs_android` release at 5a36986: DSP no longer at 100% at rest, about 70%, where the previous release held it at 100%.
+
+#### Scenario: Uniform cores
+- **WHEN** every core reports the same maximum frequency
+- **THEN** the runtime does not change the audio thread's placement
+- Check: operator step — pass, 2026-10-01, Android emulator (API 35, four cores reporting one cpuinfo_max_freq): the app's audio threads kept Cpus_allowed_list 0-3, Android's own placement.
+

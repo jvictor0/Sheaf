@@ -415,7 +415,12 @@ struct ButterworthFilter {
 
     float Process(const Input& input) {
         SetCutoff(input.cutoff);
-        const float stage1 = m_biquad1.Process(input.value);
+        return Process(input.value);
+    }
+
+    // Fixed-coefficient processing for rate converters; configure once.
+    float Process(float value) {
+        const float stage1 = m_biquad1.Process(value);
         const float stage2 = m_biquad2.Process(stage1);
         const float stage3 = m_biquad3.Process(stage2);
         return m_biquad4.Process(stage3);
