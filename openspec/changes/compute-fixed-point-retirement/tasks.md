@@ -202,3 +202,52 @@ the finding named in each task before you start it. The same rules as tasks
       with a `boundary` stating that the partition is a ruled judgment checked
       by the native differentials and that the lite steps between Computes are
       not modelled. Fingerprints stay for the lead.
+
+## 6. Repair-audit fixes (ruled by the lead 2026-11-12 from `after/repair-audit.md`)
+
+Same rules as before. Read the finding named in each task.
+
+- [ ] 6.1 Every source index (F1). In the 64-modulator run, replace the two
+      fixed routes with a loop over every source index 0–63. For each index,
+      put a route on that source, settle, flip `connected`, then flip
+      `restsAtZero`, without `Wake()`, and remove the route. Red controls:
+      `% 32`, `% 63` and `< 8` in each mask must fail.
+- [ ] 6.2 Both voice skews (F2). Run the two-voice run in both directions.
+      Red controls: the voice-0-only bump and the last-voice-only bump must
+      both fail.
+- [ ] 6.3 Top-level computes (F3). Add `topLevelComputeCalls` to
+      `ParameterProcessingObserver`, incremented once per top-level
+      `ComputeAtDepth` that is not retired. In the 64-modulator idle window,
+      in Froggers' idle window, and in the settled seven-parameter test over
+      its 160 retired samples, the retiring rig's delta is exactly 0 and the
+      full rig's is greater than 0. If a retiring delta is not 0 on the
+      implementation as written, stop and report. Red controls: the
+      childless-compute mutant and the 24% throttle must fail in Sheaf.
+- [ ] 6.4 Skip-off means unskipped (F4). In every run where a rig has
+      `skipQuiescentParameters = false`, that rig's `topLevelQuiescentSkips`
+      is 0 at the end of the run. Red control: the mutant that ignores the
+      setting must fail.
+- [ ] 6.5 Lean (F5). Write `_root_.Nat.repeat` in the theorems and their pins.
+      Show that a `Sheaf.Nat.repeat` shadow now fails the build. `ComputeSplit`
+      stays unpinned: it is the ruled judgment, and its comment already says
+      so. Add "fields beyond key/carried/derived are not constrained" to the
+      contracts entry's `boundary`.
+- [ ] 6.6 Comments (F6, 5.1).
+      - Put the held-span note on both non-const overloads.
+      - Remove the sentence blaming spm-96; your own differential cleared it.
+      - Remove direct `ProcessSample` from the uncovered-writes lists.
+      - Say that direct `ProcessLite*` on a depth child affects only that
+        child's `Phase1Quiescent()` and `Phase2WouldChangeNothing()`.
+      - Change the test's "through every writer" to name the writers it
+        actually drives.
+      - Correct the Rig comment about the spm-96 tests.
+- [ ] 6.7 Test repetition (§3). Make the three identical ladder methods one
+      method taking the schedule. Make the retiring/full rig-pair
+      construction (5 found) one helper, and the settle-then-count idiom (3
+      found) one helper. Report each count found against each count changed,
+      and show that the counters program's output is unchanged.
+- [ ] 6.8 The `smoothTargetCenter` key component stays. Its impossibility
+      rests on a caller convention (`SnapCurrentToTarget` after
+      `ComputeAllParameters`), not on the data's origin. That is the same
+      ruling as the `CollectNeutralChildren` bump. Task 5.8's red control for
+      it is recorded as unmeetable. Edit nothing for this item.
