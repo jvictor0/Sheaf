@@ -179,10 +179,15 @@ the finding named in each task before you start it. The same rules as tasks
 - [ ] 5.6 Above 64 modulators (attack-B F3). On a 65-modulator rig at interval
       1, after 48000 settling samples, `topLevelRetiredComputes` is 0. Red
       control: `kRetirementMaskBits = 200` must fail.
-- [ ] 5.7 Retired means not computed (attack-B F4). In
-      `settled_parameters_retire_their_compute_until_written`, over the 160
-      retired samples, the delta of `localRecursiveComputeCalls` is 0. Red
-      control: attack-B's `counted_never_retires` mutant must fail this test.
+- [ ] 5.7 Retired means not computed (attack-B F4). Amended 2026-11-12: the
+      settled rig has no depth children, so the counter cannot move there.
+      Instead, extend task 5.4's 64-modulator run, whose routes give
+      parameters depth children, with 48000 samples of no writes after its
+      last flag flip, then 160 more. Over those 160 only: the retirement-off
+      rig's `localRecursiveComputeCalls` delta is greater than 0, and the
+      retirement-on rig's is exactly 0. If the retiring rig's delta is not 0
+      on the implementation as written, stop and report the numbers. Red
+      control: attack-B's `counted_never_retires` mutant must fail this run.
 - [ ] 5.8 Voices (attack-B F7). If `ParameterGroup` supports more than one
       voice, give `Rig` a voice-count parameter. Add a two-voice differential
       run in which the voices' depth smoothing differs, plus a
