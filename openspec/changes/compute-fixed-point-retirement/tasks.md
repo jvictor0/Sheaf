@@ -12,7 +12,7 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
 
 ## 0. Trace
 
-- [ ] 0.1 Confirm `proposal.md`'s trace table against `ComputeAtDepth` and
+- [x] 0.1 Confirm `proposal.md`'s trace table against `ComputeAtDepth` and
       everything it calls. Report every read the table does not cover, and
       every site that writes `modulationDepths_` or `assignedDepthCount_`,
       with whether it already calls `Wake()`. Stop on any uncovered read.
@@ -20,7 +20,7 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
 
 ## 1. Lean law
 
-- [ ] 1.1 Add `Sheaf.second_compute_fixed_point` and
+- [x] 1.1 Add `Sheaf.second_compute_fixed_point` and
       `Sheaf.retired_frames_match_full` to `formal/Sheaf/Behavior.lean`, stated
       as in `proposal.md` ("The law"), with `step k (t, p) = (g k t, h k (g k t))`
       over arbitrary types, with the key / carried / derived partition as a
@@ -39,7 +39,7 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
 
 ## 2. Retirement
 
-- [ ] 2.1 Implement "The C++" section of `proposal.md` exactly: write epoch
+- [x] 2.1 Implement "The C++" section of `proposal.md` exactly: write epoch
       (every listed site, including the local-only increments), epoch
       sampling, key, armed (including the early return), retirable, the group
       change, the 64-modulator bound, `retireFixedPointComputes`,
@@ -48,7 +48,7 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
       (`skipQuiescentParameters`) and `ParameterGroup::ProcessSamplePhase1` so
       they state the retired case.
       Check: tasks 2.2 and 2.3.
-- [ ] 2.2 Give `quiescence::Rig` constructor parameters for the compute
+- [x] 2.2 Give `quiescence::Rig` constructor parameters for the compute
       interval and for `retireFixedPointComputes`; existing callers keep
       interval 16 and retirement off, so the spm-96 tests still compare
       against full `Compute()`. "Compute-sample visits" below means
@@ -75,7 +75,7 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
       `restsAtZero` mask red control must fail on that run. A guard whose removal leaves the
       test green is reported, with the event added to the sequence that would
       exercise it, or with the trace showing the guard is unreachable.
-- [ ] 2.3 Add `settled_parameters_retire_their_compute_until_written` (the
+- [x] 2.3 Add `settled_parameters_retire_their_compute_until_written` (the
       second spm-97 scenario) on the seven-parameter rig at interval 1 with
       retirement on: after 48000 samples, 160 more samples retire all
       7 × 160 visits; after `RevertAllToDefault` on parameter 2, the next
@@ -85,17 +85,17 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
       retirement off, and `visits` on a rig with it on.
       Check: both pass; with the group change reverted, the retired count
       is 0 and the new assertions fail.
-- [ ] 2.4 Run every `projects/synth` test binary. Report each test that
+- [x] 2.4 Run every `projects/synth` test binary. Report each test that
       fails, with the observer counter or value it asserts. Do not edit it.
 
 ## 3. Froggers
 
-- [ ] 3.1 In frogg3rs `app/FroggersModulation.hpp`, add the test seam the
+- [x] 3.1 In frogg3rs `app/FroggersModulation.hpp`, add the test seam the
       proposal describes (`SetLaunchSaltForTests`, read only by the default
       constructor), and the noise-source seeding it describes (seeded
       constructor only while `TestLaunchSalt()` is set).
       Check: task 3.2's determinism control.
-- [ ] 3.2 In frogg3rs `app/FroggersParameterModelTests.cpp`, add
+- [x] 3.2 In frogg3rs `app/FroggersParameterModelTests.cpp`, add
       `froggers_compute_retirement_matches_full_compute`, the third spm-97
       scenario: set `FroggersModulationSlate::SetLaunchSaltForTests(0x5EED)`,
       build three `SynthRig<FroggersApp>` rigs (48 kHz, 256 frames, own
@@ -121,12 +121,12 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
       production it fails; with the group's retired branch calling
       `Parameter::ProcessSamplePhase1` instead of `ProcessLitePhase1` the
       idle-window assertion fails.
-- [ ] 3.3 Run every frogg3rs app test binary against this Sheaf tree. Report
+- [x] 3.3 Run every frogg3rs app test binary against this Sheaf tree. Report
       failures; do not edit them.
 
 ## 4. Fingerprints
 
-- [ ] 4.1 Do not refresh the `sources` fingerprints in
+- [x] 4.1 Do not refresh the `sources` fingerprints in
       `formal/requirements.json`. Report the gate's mismatch output; the lead
       refreshes them after the after-code audit reviews the three files.
 
@@ -137,7 +137,7 @@ The audit reports are in the lead's scratchpad: `after/diff-vs-proposal.md`,
 the finding named in each task before you start it. The same rules as tasks
 0–4 apply.
 
-- [ ] 5.1 Held depth-slot spans (attack-A F1). Do not change behaviour. First
+- [x] 5.1 Held depth-slot spans (attack-A F1). Do not change behaviour. First
       determine, by a differential in scratch, whether the spm-96 quiescent
       skip alone (retirement off) already misses a write through a
       `TargetDepthSlots`/`CurrentDepthSlots` span held across samples; report
@@ -148,11 +148,11 @@ the finding named in each task before you start it. The same rules as tasks
       `writeEpoch_` and `retireFixedPointComputes` comments, naming the held
       span and direct `ProcessLite*` calls on a depth child as the uncovered
       writes.
-- [ ] 5.2 Comments (diff-vs-proposal). `ComputeWouldChangeNothing` states that
+- [x] 5.2 Comments (diff-vs-proposal). `ComputeWouldChangeNothing` states that
       it is a sufficient condition, not an equivalence. Correct the Froggers
       test's "the one random input" comment and the comment above the slate's
       default constructor so that they name the noise seed.
-- [ ] 5.3 Repetition (repetition-coverage). Make the local-only epoch bump in
+- [x] 5.3 Repetition (repetition-coverage). Make the local-only epoch bump in
       `ReplaceCachedKnobValue` and `RestoreLastRawKnobValues` one private
       helper. Put the depth-child head shared by `RecordComputeForRetirement`
       and `ComputeWouldChangeNothing` into one predicate. Define
@@ -164,22 +164,22 @@ the finding named in each task before you start it. The same rules as tasks
       `SameState` with `CompareParameters`. Report each count found against
       each count changed. Show that every Rig-based test still passes, with
       the same counters as before the repair.
-- [ ] 5.4 Source indices beyond the rig's two (attack-B F1). Give `Rig` a
+- [x] 5.4 Source indices beyond the rig's two (attack-B F1). Give `Rig` a
       modulator-count constructor parameter; existing callers keep 2. Add a
       differential run at 64 modulators, interval 1, in attenuverter mode,
       with routes on sources 9 and 63. Flip `connected` and then `restsAtZero`
       on each of them after settling, without `Wake()`. Red controls:
       `if (sourceIx < 8)` in either mask, and `<< (sourceIx % 2)`; each must
       fail.
-- [ ] 5.5 Skip-off combination (attack-B F2). Add the run in which the
+- [x] 5.5 Skip-off combination (attack-B F2). Add the run in which the
       retiring group has `skipQuiescentParameters = false` and the full group
       has both features off, and the run in which both have the skip on and
       only the retiring group retires. Red control: attack-B's mutant that
       skips `ProcessLitePhase1` when the skip is off must fail.
-- [ ] 5.6 Above 64 modulators (attack-B F3). On a 65-modulator rig at interval
+- [x] 5.6 Above 64 modulators (attack-B F3). On a 65-modulator rig at interval
       1, after 48000 settling samples, `topLevelRetiredComputes` is 0. Red
       control: `kRetirementMaskBits = 200` must fail.
-- [ ] 5.7 Retired means not computed (attack-B F4). Amended 2026-11-12: the
+- [x] 5.7 Retired means not computed (attack-B F4). Amended 2026-11-12: the
       settled rig has no depth children, so the counter cannot move there.
       Instead, extend task 5.4's 64-modulator run, whose routes give
       parameters depth children, with 48000 samples of no writes after its
@@ -194,7 +194,7 @@ the finding named in each task before you start it. The same rules as tasks
       `smoothTargetCenter` run. Red controls: `epoch_lite_voice0_only`, and
       dropping the smoothing key component. If the group has one voice only,
       report that, with the trace.
-- [ ] 5.9 Lean (attack-B L1, L2). Restate the two theorems so that their
+- [x] 5.9 Lean (attack-B L1, L2). Restate the two theorems so that their
       pinned statements fix `step` and `frames` (for example by stating them
       over the explicit `fun` forms), and so that L2's two definition mutants,
       `frames` ignoring the step and `step` as the identity, fail the gate. Add
@@ -207,15 +207,15 @@ the finding named in each task before you start it. The same rules as tasks
 
 Same rules as before. Read the finding named in each task.
 
-- [ ] 6.1 Every source index (F1). In the 64-modulator run, replace the two
+- [x] 6.1 Every source index (F1). In the 64-modulator run, replace the two
       fixed routes with a loop over every source index 0–63. For each index,
       put a route on that source, settle, flip `connected`, then flip
       `restsAtZero`, without `Wake()`, and remove the route. Red controls:
       `% 32`, `% 63` and `< 8` in each mask must fail.
-- [ ] 6.2 Both voice skews (F2). Run the two-voice run in both directions.
+- [x] 6.2 Both voice skews (F2). Run the two-voice run in both directions.
       Red controls: the voice-0-only bump and the last-voice-only bump must
       both fail.
-- [ ] 6.3 Top-level computes (F3). Add `topLevelComputeCalls` to
+- [x] 6.3 Top-level computes (F3). Add `topLevelComputeCalls` to
       `ParameterProcessingObserver`, incremented once per top-level
       `ComputeAtDepth` that is not retired. In the 64-modulator idle window,
       in Froggers' idle window, and in the settled seven-parameter test over
@@ -223,16 +223,16 @@ Same rules as before. Read the finding named in each task.
       full rig's is greater than 0. If a retiring delta is not 0 on the
       implementation as written, stop and report. Red controls: the
       childless-compute mutant and the 24% throttle must fail in Sheaf.
-- [ ] 6.4 Skip-off means unskipped (F4). In every run where a rig has
+- [x] 6.4 Skip-off means unskipped (F4). In every run where a rig has
       `skipQuiescentParameters = false`, that rig's `topLevelQuiescentSkips`
       is 0 at the end of the run. Red control: the mutant that ignores the
       setting must fail.
-- [ ] 6.5 Lean (F5). Write `_root_.Nat.repeat` in the theorems and their pins.
+- [x] 6.5 Lean (F5). Write `_root_.Nat.repeat` in the theorems and their pins.
       Show that a `Sheaf.Nat.repeat` shadow now fails the build. `ComputeSplit`
       stays unpinned: it is the ruled judgment, and its comment already says
       so. Add "fields beyond key/carried/derived are not constrained" to the
       contracts entry's `boundary`.
-- [ ] 6.6 Comments (F6, 5.1).
+- [x] 6.6 Comments (F6, 5.1).
       - Put the held-span note on both non-const overloads.
       - Remove the sentence blaming spm-96; your own differential cleared it.
       - Remove direct `ProcessSample` from the uncovered-writes lists.
@@ -241,7 +241,7 @@ Same rules as before. Read the finding named in each task.
       - Change the test's "through every writer" to name the writers it
         actually drives.
       - Correct the Rig comment about the spm-96 tests.
-- [ ] 6.7 Test repetition (§3). Make the three identical ladder methods one
+- [x] 6.7 Test repetition (§3). Make the three identical ladder methods one
       method taking the schedule. Make the retiring/full rig-pair
       construction (5 found) one helper, and the settle-then-count idiom (3
       found) one helper. Report each count found against each count changed,
@@ -266,7 +266,7 @@ which strengthens a check.
 This round closes the change's test-strength loop. A later audit reports its
 findings to the lead; they are not chased in this change.
 
-- [ ] 7.1 Injective masks. Add one run on 64 modulators, at interval 1, in
+- [x] 7.1 Injective masks. Add one run on 64 modulators, at interval 1, in
       attenuverter mode, with a single parameter that has a route on every
       source 0–63 at once and every source's `connected` and `restsAtZero`
       true. Settle it. Then, for each source in turn, without `Wake()`: set
@@ -275,12 +275,12 @@ findings to the lead; they are not chased in this change.
       mapping of sources to bits that is not injective leaves a shared bit
       unchanged and must diverge. Red controls: `sourceIx & ~size_t{1}` and
       `% 61`, each in each mask, must fail. Keep 6.1's run.
-- [ ] 7.2 Phase-2 skips. Add `topLevelPhase2Skips` to
+- [x] 7.2 Phase-2 skips. Add `topLevelPhase2Skips` to
       `ParameterProcessingObserver`, counted where the phase-2 quiescent skip
       is taken. `RequireNoSkipsWhenSkipIsOff` also requires it to be 0. Red
       control: removing `config_.skipQuiescentParameters &&` from the phase-2
       skip condition must fail.
-- [ ] 7.3 Comments and repetition.
+- [x] 7.3 Comments and repetition.
       - Change the `retireFixedPointComputes` wording to "a write through a
         span held across two or more processed samples may be missed".
       - Make the `CurrentDepthSlots` note say that writes through it are

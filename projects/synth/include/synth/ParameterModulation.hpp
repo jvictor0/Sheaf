@@ -214,6 +214,19 @@ struct ParameterProcessingObserver {
     std::size_t scalarLeafCacheHits = 0;
     // spm-96: phase-1 visits the group skipped because the parameter was quiescent.
     std::size_t topLevelQuiescentSkips = 0;
+    // spm-97: compute-sample visits on which the group did not run Compute()
+    // because it was a fixed point (spm-96's skip then treats the visit as a
+    // non-compute sample).
+    std::size_t topLevelRetiredComputes = 0;
+    // spm-96: phase-2 visits the group skipped because the parameter's phase 2
+    // would change nothing. Always 0 in a group with skipQuiescentParameters
+    // false.
+    std::size_t topLevelPhase2Skips = 0;
+    // spm-97: ComputeAtDepth calls made at recursion depth 0, that is full
+    // Computes of a parameter as a root. A retired visit makes none, whether or
+    // not the parameter has depth children (localRecursiveComputeCalls counts
+    // only the depth children's).
+    std::size_t topLevelComputeCalls = 0;
 };
 
 enum class ModulationBlendMode {
@@ -234,8 +247,22 @@ struct ParameterGroupConfig {
     ModulationBlendMode modulationBlendMode = ModulationBlendMode::kCrossfade;
     // spm-96: skip a quiescent top-level parameter's per-sample lite steps in
     // ParameterGroup::ProcessSamplePhase1/2. Results are bit-identical either
-    // way; false runs every lite step, for tests that compare the two.
+    // way; false runs every lite step, for tests that compare the two. A
+    // compute sample on which spm-97 retires the parameter's Compute() counts
+    // as a non-compute sample here, so a quiescent parameter is skipped on it
+    // too.
     bool skipQuiescentParameters = true;
+    // spm-97: on a compute sample, do not run a top-level parameter's
+    // Compute() when it is provably a fixed point (Parameter::
+    // ComputeWouldChangeNothing). Results are bit-identical either way; false
+    // runs every Compute(), for tests that compare the two. A group with more
+    // than 64 modulators never retires. Bit-identical for every write the write
+    // epoch sees (see Parameter::writeEpoch_). A write through a span held
+    // across two or more processed samples may be missed (CurrentDepthSlots and
+    // TargetDepthSlots), and ProcessLite* called directly on a depth child
+    // changes only that child's Phase1Quiescent() and
+    // Phase2WouldChangeNothing().
+    bool retireFixedPointComputes = true;
 
     bool IsValid() const;
 };
@@ -413,6 +440,9 @@ public:
     void ProcessSamplePhase2();
     void ProcessSample(std::uint64_t sampleIndex);
     void SetProcessingObserverForTests(ParameterProcessingObserver* observer) { processingObserver_ = observer; }
+    // Runs the full-Compute path beside the retired one, including inside an
+    // application whose group config the test does not construct.
+    void SetRetireFixedPointComputesForTests(bool retire) { config_.retireFixedPointComputes = retire; }
 
 private:
     friend class Parameter;
@@ -443,6 +473,9 @@ private:
     std::size_t liveLocalParameterCount_ = 0;
     std::vector<Parameter*> topLevelParameters_;
     ParameterProcessingObserver* processingObserver_ = nullptr;
+    // spm-97: the retirement key holds one bit per modulator, so a group with
+    // more than 64 never retires. Decided once, at construction.
+    bool modulatorsFitRetirementMasks_ = false;
     std::vector<std::unique_ptr<Parameter>> parameters_;
     // The audio thread walks the batch chain through firstStorageBatch_ and
     // each batch's next pointer, both acquire-loaded; the message thread is
@@ -580,27 +613,37 @@ public:
 
     // spm-96: clears quiescence, so the group runs this parameter's next lite
     // steps in full. Called by every function that writes a value the lite
-    // steps read.
+    // steps read. spm-97: also advances the write epoch, so a retirement
+    // decision made before the write is void.
     void Wake() {
         phase1Quiescent_ = false;
         phase2Settled_ = false;
         scalarLeafPrepared_ = false;
+        ++writeEpoch_;
     }
     bool Phase1Quiescent() const { return phase1Quiescent_; }
     // spm-96: the skipped phase 1 of a quiescent parameter: the cached knob
     // values return to the raw values its last phase 1 computed, which an
     // application may have overwritten after phase 1 (ReplaceCachedKnobValue).
-    void RestoreLastRawKnobValues() {
-        scalarLeafPrepared_ = false;
-        for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
-            currentKnobValues_[voiceIx] = lastRawValues_[voiceIx];
-        }
-    }
+    // spm-97: on a local parameter it advances the write epoch, because a depth
+    // child's full Compute() reseeds the cached knob values this overwrites.
+    void RestoreLastRawKnobValues();
     // spm-96: phase 2 would change nothing: it last changed nothing, and the
     // knob values it would read are bitwise the ones it read then.
     bool Phase2WouldChangeNothing() const;
+    // This non-const overload Wake()s when it hands the span out, not when the
+    // span is written. The span is valid for writing only until the next
+    // processed sample: spm-97's retirement decides from state it last saw
+    // awake, so a write made through a span held past that sample is not seen. A
+    // later write must reacquire the span, which wakes the parameter again.
+    // Writes through it are currently re-seen through the lite step's epoch bump
+    // (ProcessLitePhase1 advances writeEpoch_ when it changes currentDepths_),
+    // so this is documented conservatively.
     std::span<float> CurrentDepthSlots(std::size_t voiceIx);
     std::span<const float> CurrentDepthSlots(std::size_t voiceIx) const;
+    // Same rule as the non-const CurrentDepthSlots: Wake()s when the span is
+    // handed out, so write only until the next processed sample and reacquire
+    // the span for a later write.
     std::span<float> TargetDepthSlots(std::size_t voiceIx);
     std::span<const float> TargetDepthSlots(std::size_t voiceIx) const;
     float CurrentDepthForSource(std::size_t voiceIx, std::size_t sourceIx) const;
@@ -642,6 +685,38 @@ private:
     void EnforceOneWayAmountFloor(std::size_t sceneIx);
     float ComputeRawCenter(const SceneState& scene) const;
     void ComputeAtDepth(const SceneState& scene, std::size_t recursionDepth, bool smoothTargetCenter);
+    // spm-97: the connected and restsAtZero flags of the active routes'
+    // sources, one bit per source: everything about modulator metadata that
+    // ComputeAtDepth reads.
+    struct ActiveRouteMasks {
+        std::uint64_t connected = 0;
+        std::uint64_t restsAtZero = 0;
+        bool operator==(const ActiveRouteMasks&) const = default;
+    };
+    // Must read exactly the modulator metadata fields ComputeAtDepth reads
+    // (today ModulatorMetadata::connected and ::restsAtZero, at the one-way
+    // amount and attenuverter branches). A field ComputeAtDepth starts to read
+    // must be added here, to ActiveRouteMasks and to the key, or a retired
+    // parameter silently ignores a change in it.
+    ActiveRouteMasks FreshActiveRouteMasks() const;
+    // spm-97: a depth child that stops its parent arming or retiring: not a
+    // local parameter, or one with an active route of its own.
+    bool BlocksParentRetirement() const;
+    // spm-97: a depth child's full Compute() reseeds its cached knob, while a
+    // top-level parameter's does not read it, so only a local's cached-knob
+    // overwrite voids a retirement decision.
+    void NoteCachedKnobOverwrite();
+    // spm-97: records the key and decides whether the call just made arms the
+    // parameter. Called as the last action of every ComputeAtDepth call.
+    void RecordComputeForRetirement(std::uint64_t epochAtStart, float targetCenterAtStart, float rawCenter,
+                                    std::size_t recursionDepth, bool smoothTargetCenter);
+    // spm-97: true only if a full Compute() now would leave every value it
+    // writes bit-identical (proposal.md "The C++": retirable). A sufficient
+    // condition, not an equivalence: it is false in many cases where Compute()
+    // would also change nothing, and it is sound only for the writes the write
+    // epoch sees (see writeEpoch_).
+    bool ComputeWouldChangeNothing(const SceneState& scene, std::size_t recursionDepth,
+                                   bool smoothTargetCenter) const;
     void SnapCurrentToTarget();
     void SeedCachedKnobAndUiDisplayState();
     bool WouldCreateCycle(const Parameter* candidate) const;
@@ -700,6 +775,25 @@ private:
     // true after a lite phase 2 that changed nothing. Cleared by Wake().
     bool phase1Quiescent_ = false;
     bool phase2Settled_ = false;
+    // spm-97. writeEpoch_ advances at the writers that name it: Wake(), the
+    // depth-slot assignment, clearing and collection functions,
+    // ProcessLitePhase1's change of currentDepths_, and a local's cached-knob
+    // overwrite. It does not see a write made through a depth-slot span held
+    // since before the last arming (the Wake() happened when the span was handed
+    // out), nor ProcessLitePhase1/2 or ProcessLite called directly on a depth
+    // child; those change only that child's Phase1Quiescent() and
+    // Phase2WouldChangeNothing(). The rest is the record of the last
+    // ComputeAtDepth call: the key it saw, the epoch it ended on, and whether it
+    // was a fixed point (armed).
+    std::uint64_t writeEpoch_ = 0;
+    bool computeRecorded_ = false;
+    bool computeArmed_ = false;
+    bool routeChangedDuringCompute_ = false;
+    std::uint64_t computeEpochAfter_ = 0;
+    std::uint32_t computeRawCenterBits_ = 0;
+    ActiveRouteMasks computeRouteMasks_;
+    std::size_t computeRecursionDepth_ = 0;
+    bool computeSmoothTargetCenter_ = false;
     std::span<Parameter*> modulationDepths_;
     std::span<float> sceneCenters_;
     std::span<float> gestureValues_;

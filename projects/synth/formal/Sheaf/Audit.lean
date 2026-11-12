@@ -37,6 +37,9 @@ import Sheaf.OutputFir
 #print axioms Sheaf.crispy_gets_global_only
 #print axioms Sheaf.ordinary_row_uses_warped_crispy
 #print axioms Sheaf.quiescence_preserves_step
+#print axioms Sheaf.compute_step_unfolds
+#print axioms Sheaf.second_compute_fixed_point
+#print axioms Sheaf.retired_frames_match_full
 #print axioms Sheaf.publication_finishes
 #print axioms Sheaf.settled_publication
 #print axioms Sheaf.stopped_sources_hold

@@ -35,6 +35,9 @@
     "Sheaf.crispy_gets_global_only",
     "Sheaf.ordinary_row_uses_warped_crispy",
     "Sheaf.quiescence_preserves_step",
+    "Sheaf.compute_step_unfolds",
+    "Sheaf.second_compute_fixed_point",
+    "Sheaf.retired_frames_match_full",
     "Sheaf.publication_finishes",
     "Sheaf.settled_publication",
     "Sheaf.stopped_sources_hold",
@@ -188,10 +191,10 @@
   ],
   "sources": {
     "include/synth/RateSeparatedParameters.hpp": "c9042338e0a6e1fbc4f0eac0a41028d2c83a86bbbaf3e45a55bac74ae07c9f2e",
-    "include/synth/ParameterModulation.hpp": "ee043ab4ebcf404eb8a5d0a84b9405e2d40d0471fbf6e80fde16fc030397af8c",
-    "src/ParameterModulation.cpp": "51a0ac367e3fd49bbf7b80afae4322f7fca7cf9938025ec6b6ee0c8f07fbb9e3",
+    "include/synth/ParameterModulation.hpp": "d59d29cc8ff6cecc08b07ce96811d104cbf01aebf250a065eb4f208205ae5df7",
+    "src/ParameterModulation.cpp": "cd0cda8a6735912ce87d3044740573a52af4827b730e85df6ecb12b10f3af733",
     "include/synth/DspFilters.hpp": "9f99e536fbda57c898d90be1a46ac34984b3052854c31483fc96f5363ac8da43",
-    "../../../../app/FroggersModulation.hpp": "89a30b4bfb926b425cc737a40640e501d7dd81d26fc463dd9636ea6c0ad9d23e",
+    "../../../../app/FroggersModulation.hpp": "27e1d05c07626d6f473821b7916fc1f21060d7c7281498827404a5dfb027a9b9",
     "include/synth/DspMath.hpp": "ea9bd21b615ae5b6d87f7d41a543eac589a9666690a27c3930c7b2ad1598b031",
     "formal/support/source_filter_coefficients.cpp": "aadbc78b86eeec98386f2e00374db2ff5335d1a97bbf6ff1eff3d293fce53c06",
     "include/synth/DspBuffers.hpp": "27f0be7187a2cbc7c67ff22b2e1514b76ff81a83aeb2e360ab824fd9f2d4a4f1",
@@ -514,6 +517,17 @@
         "Sheaf.root_publication_correction"
       ],
       "boundary": "Age resets on exact phase-zero target change; increments before eligibility, saturating4096. Post-filter exact target correction is at most1/50000 relative to clamped filtered publication. This is pointwise only, not a universal spectral bound or a guarantee arbitrary histories settle by4096. Native tests bind binary32 execution and Configure reset."
+    },
+    {
+      "behavior": "A top-level parameter's Compute() whose last call was a fixed point of ComputeAtDepth, with an unchanged key, may be retired: two consecutive calls with the same key and an unchanged carried state make the second a fixed point, and retiring every frame that shares the key gives the state running every Compute gives",
+      "source": "src/ParameterModulation.cpp",
+      "anchor": "parameter->ComputeWouldChangeNothing(manager_->Scene(), 0, true)",
+      "proofs": [
+        "Sheaf.compute_step_unfolds",
+        "Sheaf.second_compute_fixed_point",
+        "Sheaf.retired_frames_match_full"
+      ],
+      "boundary": "The partition of ComputeAtDepth's fields into key, carried and derived state (ComputeSplit) is a ruled judgment, checked by the native differentials (parameter_modulation_tests.cpp fixed_point_compute_retirement_matches_full_compute and the frogg3rs Froggers differential), not proved here; fields beyond key/carried/derived are not constrained. The lite steps that run between two Computes (ProcessLitePhase1 rewrites currentDepths_, part of the carried state) are not modelled; the write epoch is what accounts for them in the C++."
     }
   ],
   "statements": {
@@ -547,6 +561,9 @@
     "Sheaf.crispy_gets_global_only": "theorem crispy_gets_global_only {n : Nat} (globalWarp localWarp : Nat → Rat → Rat → Rat) (row : Nat) (crunchy : Rat) (bank : FuegoBank n) : (fuego globalWarp localWarp row crunchy bank).crispy = globalWarp row crunchy bank.crispy",
     "Sheaf.ordinary_row_uses_warped_crispy": "theorem ordinary_row_uses_warped_crispy {n : Nat} (globalWarp localWarp : Nat → Rat → Rat → Rat) (row : Nat) (crunchy : Rat) (bank : FuegoBank n) (i : Fin n) : (fuego globalWarp localWarp row crunchy bank).values i = localWarp i.val (globalWarp row crunchy bank.crispy) (globalWarp i.val crunchy (bank.values i))",
     "Sheaf.quiescence_preserves_step": "theorem quiescence_preserves_step {α : Type} (step : α → α) (state : α) (quiet : Bool) (h : quiet = true → step state = state) : retired step state quiet = step state",
+    "Sheaf.compute_step_unfolds": "theorem compute_step_unfolds {K T P : Type} (c : ComputeSplit K T P) (k : K) (s : T × P) : c.step k s = (c.carried k s.1, c.derived k (c.carried k s.1))",
+    "Sheaf.second_compute_fixed_point": "theorem second_compute_fixed_point {K T P : Type} (c : ComputeSplit K T P) (k : K) (s0 s1 : T × P) (h1 : s1 = (c.carried k s0.1, c.derived k (c.carried k s0.1))) (h2 : c.carried k s1.1 = s1.1) : (c.carried k s1.1, c.derived k (c.carried k s1.1)) = s1",
+    "Sheaf.retired_frames_match_full": "theorem retired_frames_match_full {K T P : Type} (c : ComputeSplit K T P) (k : K) (s : T × P) (h : (c.carried k s.1, c.derived k (c.carried k s.1)) = s) (n : Nat) : _root_.Nat.repeat (fun st => st) n s = _root_.Nat.repeat (fun x : T × P => (c.carried k x.1, c.derived k (c.carried k x.1))) n s",
     "Sheaf.publication_finishes": "theorem publication_finishes (previous target : Rat) : publish previous target ⟨3, by decide⟩ = target",
     "Sheaf.settled_publication": "theorem settled_publication (value : Rat) (phase : Fin 4) : publish value value phase = value",
     "Sheaf.stopped_sources_hold": "theorem stopped_sources_hold {State Input : Type} (filter : State → Input → State) (state : State) (input : Input) : sourceStep false filter state input = state",

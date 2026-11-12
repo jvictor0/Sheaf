@@ -3582,29 +3582,60 @@ TEST_CASE(group_process_sample_phases_visit_only_registered_roots) {
 
 namespace quiescence {
 
-// One group of seven parameters, optionally with spm-96's quiescent skip, so a
-// test can run the same sequence through both and compare them bit for bit.
+struct Rig;
+// One named write that the event ladders share; each ladder only chooses when
+// each write runs.
+using Writer = std::function<void(Rig&)>;
+struct Scheduled {
+    std::uint64_t sample;
+    Writer write;
+};
+
+// One group of seven parameters, optionally with spm-96's quiescent skip and
+// spm-97's compute retirement, so a test can run the same sequence through
+// several and compare them bit for bit. A Rig built with only `skip` has the
+// compute interval 16, retirement off, two modulators and one voice, so the
+// spm-96 tests that build it that way still compare against full Compute();
+// quiescent_parameters_skip_their_lite_step_until_woken also builds it with
+// retirement on, for the MODIFIED spm-96 scenario.
 struct Rig {
     synth::ParameterManager manager;
     synth::ParameterGroup* group = nullptr;
     std::vector<synth::Parameter*> parameters;
     float sourceA = 0.3f;
     float sourceB = 0.7f;
+    // Sources beyond A and B (and every voice but the first), each holding
+    // still at a value of its own so a route on it reads something distinct.
+    std::vector<float> otherSources;
 
-    explicit Rig(bool skip) {
+    explicit Rig(bool skip, std::size_t computeInterval = 16, bool retire = false,
+                 synth::ModulationBlendMode blendMode = synth::ModulationBlendMode::kCrossfade,
+                 std::size_t modulators = 2, std::size_t voices = 1, std::size_t maxParameters = 32) {
         REQUIRE_TRUE(manager.SetGestureCount(1));
         group = &manager.CreateGroup({
-            .numVoices = 1,
-            .numModulators = 2,
+            .numVoices = voices,
+            .numModulators = modulators,
             .numScenes = 2,
-            .maxParameters = 32,
-            .targetComputeIntervalSamples = 16,
+            .maxParameters = maxParameters,
+            .targetComputeIntervalSamples = computeInterval,
+            .modulationBlendMode = blendMode,
             .skipQuiescentParameters = skip,
+            .retireFixedPointComputes = retire,
         });
-        std::array<float*, 1> a{&sourceA};
-        std::array<float*, 1> b{&sourceB};
-        group->SetModulationSource(0, a, {.connected = true});
-        group->SetModulationSource(1, b, {.connected = true});
+        otherSources.assign(modulators * voices, 0.0f);
+        for (std::size_t modIx = 0; modIx < modulators; ++modIx) {
+            std::vector<float*> pointers(voices);
+            for (std::size_t voiceIx = 0; voiceIx < voices; ++voiceIx) {
+                if (modIx < 2 && voiceIx == 0) {
+                    pointers[voiceIx] = modIx == 0 ? &sourceA : &sourceB;
+                } else {
+                    float& source = otherSources[modIx * voices + voiceIx];
+                    source = 0.3f + 0.01f * static_cast<float>(modIx) + 0.15f * static_cast<float>(voiceIx);
+                    pointers[voiceIx] = &source;
+                }
+            }
+            group->SetModulationSource(modIx, pointers, {.connected = true});
+        }
         const float defaults[] = {0.2f, 0.35f, 0.5f, 0.65f, 0.8f, 0.1f, 0.9f};
         for (std::size_t ix = 0; ix < 7; ++ix) {
             parameters.push_back(&manager.CreateParameter(
@@ -3626,70 +3657,586 @@ struct Rig {
         group->ProcessSamplePhase2();
     }
 
-    void Event(std::uint64_t sampleIndex) {
-        switch (sampleIndex) {
-            case 2000:  // scene blend move
-                REQUIRE_TRUE(manager.SetSceneEndpoints(0, 1));
-                parameters[1]->SceneCenter(1) = 0.95f;
-                manager.SetSceneBlend(0.4f);
-                break;
-            case 4000:  // knob edit
-                parameters[2]->SceneCenter(0) = 0.15f;
-                parameters[2]->SceneCenter(1) = 0.15f;
-                break;
-            case 6000:  // a route added
-                parameters[3]->EnsureModulationDepth(0)->SceneCenter(0) = 0.9f;
-                parameters[3]->EnsureModulationDepth(0)->SceneCenter(1) = 0.9f;
-                break;
-            case 9000:  // the route returned to neutral; Compute prunes it
-                parameters[3]->EnsureModulationDepth(0)->SceneCenter(0) = 0.5f;  // the neutral depth centre (src kNeutralModulationDepthCenter)
-                parameters[3]->EnsureModulationDepth(0)->SceneCenter(1) = 0.5f;  // the neutral depth centre (src kNeutralModulationDepthCenter)
-                break;
-            case 11000:  // a top-level parameter assigned as another's depth
-                REQUIRE_TRUE(parameters[5]->AssignModulationDepth(1, parameters[6]));
-                parameters[6]->SceneCenter(0) = 0.85f;
-                parameters[6]->SceneCenter(1) = 0.85f;
-                break;
-            case 13000:  // a revert to default
-                parameters[1]->RevertToDefault(manager.Scene());
-                break;
-            case 15000:  // a revert of every value
-                parameters[2]->RevertAllToDefault();
-                break;
-            case 17000: {  // a JSON save and load
-                synth::JsonArena arena(1 << 16);
-                const synth::JSON saved = manager.ParameterValuesToJSON(arena);
-                parameters[4]->SceneCenter(0) = 0.05f;
-                REQUIRE_TRUE(manager.LoadParameterValuesFromJSON(saved));
-                break;
+    void Apply(const std::vector<Scheduled>& schedule, std::uint64_t sampleIndex) {
+        for (const Scheduled& entry : schedule) {
+            if (entry.sample == sampleIndex) {
+                entry.write(*this);
             }
-            case 19000:  // a compute-and-snap of every parameter
-                parameters[4]->SceneCenter(0) = 0.6f;
-                manager.ComputeAllParameters();
-                break;
-            case 21000:  // new processing timing
-                group->ConfigureProcessingTiming({
-                    .processLiteAlpha = 0.05f,
-                    .targetComputeIntervalSamples = 16,
-                    .uiDisplayCenterAlpha = 0.002f,
-                    .uiDisplaySpreadAlpha = 0.003f,
-                });
-                break;
-            default:
-                break;
         }
+    }
+
+    // The ladders. Event is spm-96's (the modulator values are never refreshed);
+    // RetirementEvent also moves source B for a while; RefreshedEvent runs any
+    // other schedule after refreshing the modulator values every sample, so a
+    // source that holds still and then moves is a real change to what a route
+    // reads.
+    void Event(std::uint64_t sampleIndex);
+    void RetirementEvent(std::uint64_t sampleIndex);
+    void RefreshedEvent(const std::vector<Scheduled>& schedule, std::uint64_t sampleIndex) {
+        group->UpdateModValues();
+        Apply(schedule, sampleIndex);
     }
 };
 
+// What a comparison calls once per sample on each rig before it processes the
+// sample.
+using Ladder = std::function<void(Rig&, std::uint64_t)>;
+Ladder Refreshed(const std::vector<Scheduled>& schedule) {
+    return [&schedule](Rig& rig, std::uint64_t sampleIndex) { rig.RefreshedEvent(schedule, sampleIndex); };
+}
+
+// The writers. Each is a named operation parameterized by what differs.
+namespace writers {
+
+void SetCenters(synth::Parameter& parameter, float value) {
+    parameter.SceneCenter(0) = value;
+    parameter.SceneCenter(1) = value;
+}
+
+Writer BlendMove() {
+    return [](Rig& rig) {
+        REQUIRE_TRUE(rig.manager.SetSceneEndpoints(0, 1));
+        rig.parameters[1]->SceneCenter(1) = 0.95f;
+        rig.manager.SetSceneBlend(0.4f);
+    };
+}
+// A knob edit with no Wake().
+Writer KnobEdit() { return [](Rig& rig) { SetCenters(*rig.parameters[2], 0.15f); }; }
+// A route to `source` on parameter `parameter`, whose depth centre is `centre`
+// (0.5 is the neutral depth centre, src kNeutralModulationDepthCenter).
+Writer SetRoute(std::size_t parameter, std::size_t source, float centre) {
+    return [=](Rig& rig) {
+        synth::Parameter* depth = rig.parameters[parameter]->EnsureModulationDepth(source);
+        REQUIRE_TRUE(depth != nullptr);  // the rig's storage is not exhausted
+        SetCenters(*depth, centre);
+    };
+}
+Writer AssignTopLevel() {
+    return [](Rig& rig) {
+        REQUIRE_TRUE(rig.parameters[5]->AssignModulationDepth(1, rig.parameters[6]));
+        SetCenters(*rig.parameters[6], 0.85f);
+    };
+}
+Writer RevertDefault(std::size_t parameter) {
+    return [=](Rig& rig) { rig.parameters[parameter]->RevertToDefault(rig.manager.Scene()); };
+}
+Writer RevertAll(std::size_t parameter) { return [=](Rig& rig) { rig.parameters[parameter]->RevertAllToDefault(); }; }
+Writer JsonRoundTrip() {
+    return [](Rig& rig) {
+        synth::JsonArena arena(1 << 16);
+        const synth::JSON saved = rig.manager.ParameterValuesToJSON(arena);
+        rig.parameters[4]->SceneCenter(0) = 0.05f;
+        REQUIRE_TRUE(rig.manager.LoadParameterValuesFromJSON(saved));
+    };
+}
+Writer ComputeAndSnap() {
+    return [](Rig& rig) {
+        rig.parameters[4]->SceneCenter(0) = 0.6f;
+        rig.manager.ComputeAllParameters();
+    };
+}
+// New processing timing, same compute interval.
+Writer TimingChange() {
+    return [](Rig& rig) {
+        rig.group->ConfigureProcessingTiming({
+            .processLiteAlpha = 0.05f,
+            .targetComputeIntervalSamples = rig.group->Config().targetComputeIntervalSamples,
+            .uiDisplayCenterAlpha = 0.002f,
+            .uiDisplaySpreadAlpha = 0.003f,
+        });
+    };
+}
+// A one-way-amount parameter with a live route on each of `sources`.
+Writer AddOneWayParameter(std::vector<std::size_t> sources) {
+    return [=](Rig& rig) {
+        rig.parameters.push_back(&rig.manager.CreateParameter(
+            *rig.group, {.name = "OneWay",
+                         .defaultValue = 0.4f,
+                         .modulationTargetKind = synth::ModulationTargetKind::kOneWayAmount}));
+        for (const std::size_t source : sources) {
+            SetCenters(*rig.parameters.back()->EnsureModulationDepth(source), 0.9f);
+        }
+    };
+}
+// A modulator's connected or restsAtZero flag, written with no Wake().
+Writer SetConnected(std::size_t source, bool value) {
+    return [=](Rig& rig) { rig.group->GetModulators().Metadata(source).connected = value; };
+}
+Writer SetRestsAtZero(std::size_t source, bool value) {
+    return [=](Rig& rig) { rig.group->GetModulators().Metadata(source).restsAtZero = value; };
+}
+Writer SetAllRestAtZero(bool value) {
+    return [=](Rig& rig) {
+        for (std::size_t source = 0; source < rig.group->Config().numModulators; ++source) {
+            rig.group->GetModulators().Metadata(source).restsAtZero = value;
+        }
+    };
+}
+// A route on every source of `parameter`, each with depth centre `centre`.
+Writer SetRoutesOnEverySource(std::size_t parameter, float centre) {
+    return [=](Rig& rig) {
+        for (std::size_t source = 0; source < rig.group->Config().numModulators; ++source) {
+            SetRoute(parameter, source, centre)(rig);
+        }
+    };
+}
+// A local depth child's cached knob overwritten.
+Writer OverwriteChildKnob() {
+    return [](Rig& rig) { rig.parameters[3]->ModulationDepthParameter(0)->ReplaceCachedKnobValue(0, 0.123f); };
+}
+// A depth child given a route of its own, on a source that holds still.
+Writer DepthWithOwnRoute() {
+    return [](Rig& rig) {
+        synth::Parameter& child = *rig.parameters[4]->EnsureModulationDepth(0);
+        SetCenters(child, 0.8f);
+        SetCenters(*child.EnsureModulationDepth(1), 0.9f);
+    };
+}
+// A local depth created on parameter 3 for source 1.
+Writer AddSharedLocal() { return SetRoute(3, 1, 0.85f); }
+// That local assigned as parameter 0's depth too.
+Writer AssignShared() {
+    return [](Rig& rig) {
+        REQUIRE_TRUE(rig.parameters[0]->AssignModulationDepth(1, rig.parameters[3]->ModulationDepthParameter(1)));
+    };
+}
+Writer ClearDepths(std::size_t parameter) {
+    return [=](Rig& rig) { rig.parameters[parameter]->ClearModulationDepths(); };
+}
+Writer CollectNeutral() { return [](Rig& rig) { (void)rig.manager.CollectNeutralLocalParameters(); }; }
+Writer DepthSlotWrite() {
+    return [](Rig& rig) {
+        rig.parameters[2]->TargetDepthSlots(0)[0] = 0.2f;
+        rig.parameters[2]->CurrentDepthSlots(0)[1] = 0.1f;
+    };
+}
+// The route on `source` of `parameter` has returned to neutral; its depth in
+// voice `restingVoice` is already at rest and in the other voice starts far
+// from it, so the voices' depth smoothing finishes at different samples.
+Writer SkewVoices(std::size_t parameter, std::size_t source, std::size_t restingVoice) {
+    return [=](Rig& rig) {
+        synth::Parameter& target = *rig.parameters[parameter];
+        SetCenters(*target.EnsureModulationDepth(source), 0.5f);
+        const std::size_t slot = target.RoutePositionForSource(source);
+        for (std::size_t voiceIx = 0; voiceIx < rig.group->Config().numVoices; ++voiceIx) {
+            target.CurrentDepthSlots(voiceIx)[slot] = voiceIx == restingVoice ? 0.0f : 5.0f;
+        }
+    };
+}
+
+}  // namespace writers
+
+const std::vector<Scheduled>& Spm96Schedule() {
+    static const std::vector<Scheduled> schedule = {
+        {2000, writers::BlendMove()},
+        {4000, writers::KnobEdit()},
+        {6000, writers::SetRoute(3, 0, 0.9f)},
+        {9000, writers::SetRoute(3, 0, 0.5f)},
+        {11000, writers::AssignTopLevel()},
+        {13000, writers::RevertDefault(1)},
+        {15000, writers::RevertAll(2)},
+        {17000, writers::JsonRoundTrip()},
+        {19000, writers::ComputeAndSnap()},
+        {21000, writers::TimingChange()},
+    };
+    return schedule;
+}
+
+// One event every 3000 samples.
+const std::vector<Scheduled>& RetirementSchedule() {
+    static const std::vector<Scheduled> schedule = {
+        {3000, writers::BlendMove()},
+        {6000, writers::KnobEdit()},
+        {9000, writers::SetRoute(3, 0, 0.9f)},
+        {12000, writers::AddOneWayParameter({0})},
+        {15000, writers::SetConnected(0, false)},
+        {18000, writers::SetConnected(0, true)},
+        {18000, writers::SetRestsAtZero(0, true)},
+        {21000, writers::SetRestsAtZero(0, false)},
+        {24000, writers::SetRoute(3, 0, 0.5f)},
+        {27000, writers::OverwriteChildKnob()},
+        {30000, writers::DepthWithOwnRoute()},
+        // (source 1 moves from sample 33000 to 34500, see RetirementEvent)
+        {36000, writers::AddSharedLocal()},
+        {39000, writers::AssignShared()},
+        {42000, writers::AssignTopLevel()},
+        {45000, writers::ClearDepths(0)},
+        {48000, writers::CollectNeutral()},
+        {51000, writers::RevertDefault(1)},
+        {54000, writers::RevertAll(2)},
+        {57000, writers::JsonRoundTrip()},
+        {60000, writers::ComputeAndSnap()},
+        {63000, writers::RevertDefault(3)},
+        {66000, writers::DepthSlotWrite()},
+        {69000, writers::TimingChange()},
+    };
+    return schedule;
+}
+
+// Attenuverter mode reads a routed source's restsAtZero flag, which the
+// crossfade sequence cannot reach: a route on source 0 is added and settles,
+// then the flag is flipped and, later, flipped back.
+const std::vector<Scheduled>& RestsAtZeroSchedule() {
+    static const std::vector<Scheduled> schedule = {
+        {3000, writers::SetRoute(3, 0, 0.9f)},
+        {6000, writers::SetRestsAtZero(0, true)},
+        {9000, writers::SetRestsAtZero(0, false)},
+    };
+    return schedule;
+}
+
+// Every source index of a 64-modulator group, one at a time, on a bipolar
+// parameter (restsAtZero is read) and a one-way-amount parameter (connected is
+// read): a route on the source, settle, flip `connected`, restore it, settle,
+// flip `restsAtZero`, restore it, settle, then the route back to neutral, settle,
+// the neutral children collected, settle. A route that has just been written
+// retires again about 120 samples later; the settles are over three times that.
+// A mask that read the wrong bit for a source needs a second route that shares
+// the bit (with one route, a flip on the source changes the mask however the
+// bit is chosen): so each source's turn also routes its alias under `% 32`
+// (the source plus 32, modulo 64) and, for sources 0 and 63, each other (the
+// alias under `% 63`). The alias hides a flip only when it already has the value
+// the flip would give the shared bit, so the aliases keep `connected` true while
+// the source's `connected` goes false, and have `restsAtZero` true while the
+// source's goes true. After the last source, routes on sources 9 and 63 stay,
+// so the parameters have depth children while the run idles.
+constexpr std::size_t kSourceLoopModulators = 64;
+constexpr std::size_t kSourceLoopOneWayParameter = 7;  // the parameter added first
+constexpr std::uint64_t kSourceLoopSettle = 400;
+constexpr std::uint64_t kSourceLoopHold = 100;
+constexpr std::uint64_t kSourceLoopStart = 1000;
+constexpr std::uint64_t kSourceLoopPerSource = 6 * kSourceLoopSettle + 2 * kSourceLoopHold;
+constexpr std::uint64_t kSourceLoopFinalRoutes = kSourceLoopStart + kSourceLoopModulators * kSourceLoopPerSource;
+constexpr std::uint64_t kSourceLoopEnd = kSourceLoopFinalRoutes + kSourceLoopSettle;
+
+const std::vector<Scheduled>& AllSourcesSchedule() {
+    static const std::vector<Scheduled> schedule = [] {
+        std::vector<Scheduled> entries;
+        entries.push_back({100, writers::AddOneWayParameter({})});
+        std::uint64_t sample = kSourceLoopStart;
+        const auto at = [&](std::uint64_t when, Writer write) { entries.push_back({when, std::move(write)}); };
+        const auto route = [&](std::size_t source, float centre) {
+            at(sample, writers::SetRoute(3, source, centre));
+            at(sample, writers::SetRoute(kSourceLoopOneWayParameter, source, centre));
+        };
+        for (std::size_t source = 0; source < kSourceLoopModulators; ++source) {
+            std::vector<std::size_t> routed = {source, (source + kSourceLoopModulators / 2) % kSourceLoopModulators};
+            if (source == 0 || source == kSourceLoopModulators - 1) {
+                routed.push_back(kSourceLoopModulators - 1 - source);
+            }
+            for (const std::size_t routedSource : routed) {
+                route(routedSource, 0.9f);
+            }
+            sample += kSourceLoopSettle;
+            at(sample, writers::SetConnected(source, false));
+            at(sample + kSourceLoopHold, writers::SetConnected(source, true));
+            sample += kSourceLoopHold + kSourceLoopSettle;
+            for (std::size_t alias = 1; alias < routed.size(); ++alias) {
+                at(sample, writers::SetRestsAtZero(routed[alias], true));
+            }
+            sample += kSourceLoopSettle;
+            at(sample, writers::SetRestsAtZero(source, true));
+            for (std::size_t alias = 0; alias < routed.size(); ++alias) {
+                at(sample + kSourceLoopHold, writers::SetRestsAtZero(routed[alias], false));
+            }
+            sample += kSourceLoopHold + kSourceLoopSettle;
+            for (const std::size_t routedSource : routed) {
+                route(routedSource, 0.5f);
+            }
+            sample += kSourceLoopSettle;
+            at(sample, writers::CollectNeutral());
+            sample += kSourceLoopSettle;
+        }
+        route(9, 0.9f);
+        route(63, 0.9f);
+        return entries;
+    }();
+    return schedule;
+}
+
+// One bipolar parameter and one one-way-amount parameter, each with a route on
+// every source 0-63 at once, and every source's `connected` and `restsAtZero`
+// true (see the test for why two parameters). After settling, for each source in
+// turn and with no Wake(): `connected` false, settle, restored, settle; then the
+// same with `restsAtZero`. Every other source holds true, so a mask that maps two
+// sources to one bit keeps that bit set when one of them flips, and the retiring
+// group, not seeing the change, diverges from the full one. The routes' depth
+// centre is close to neutral so that 64 of them do not saturate the range.
+constexpr std::uint64_t kInjectiveSettle = 400;
+constexpr std::uint64_t kInjectiveStart = 8300;
+constexpr std::uint64_t kInjectiveEnd = kInjectiveStart + kSourceLoopModulators * 4 * kInjectiveSettle;
+constexpr std::size_t kInjectiveBipolarParameter = 3;
+constexpr std::size_t kInjectiveOneWayParameter = 7;  // the parameter added first
+
+const std::vector<Scheduled>& InjectiveMasksSchedule() {
+    static const std::vector<Scheduled> schedule = [] {
+        std::vector<Scheduled> entries;
+        entries.push_back({100, writers::AddOneWayParameter({})});
+        entries.push_back({200, writers::SetAllRestAtZero(true)});
+        entries.push_back({300, writers::SetRoutesOnEverySource(kInjectiveBipolarParameter, 0.52f)});
+        entries.push_back({300, writers::SetRoutesOnEverySource(kInjectiveOneWayParameter, 0.52f)});
+        std::uint64_t sample = kInjectiveStart;
+        for (std::size_t source = 0; source < kSourceLoopModulators; ++source) {
+            entries.push_back({sample, writers::SetConnected(source, false)});
+            entries.push_back({sample + kInjectiveSettle, writers::SetConnected(source, true)});
+            entries.push_back({sample + 2 * kInjectiveSettle, writers::SetRestsAtZero(source, false)});
+            entries.push_back({sample + 3 * kInjectiveSettle, writers::SetRestsAtZero(source, true)});
+            sample += 4 * kInjectiveSettle;
+        }
+        return entries;
+    }();
+    return schedule;
+}
+
+// Two voices whose depth smoothing finishes at different samples, then a
+// compute-and-snap, which is the one caller that computes with
+// smoothTargetCenter false. `restingVoice` is the voice whose depth is already
+// at rest when the route returns to neutral.
+const std::vector<Scheduled>& VoiceSchedule(std::size_t restingVoice) {
+    static const std::vector<Scheduled> schedules[2] = {
+        {
+            {3000, writers::SetRoute(3, 0, 0.9f)},
+            {6000, writers::SkewVoices(3, 0, 0)},
+            {9000, writers::KnobEdit()},
+            {9000, writers::ComputeAndSnap()},
+        },
+        {
+            {3000, writers::SetRoute(3, 0, 0.9f)},
+            {6000, writers::SkewVoices(3, 0, 1)},
+            {9000, writers::KnobEdit()},
+            {9000, writers::ComputeAndSnap()},
+        },
+    };
+    return schedules[restingVoice];
+}
+
+inline void Rig::Event(std::uint64_t sampleIndex) { Apply(Spm96Schedule(), sampleIndex); }
+
+inline void Rig::RetirementEvent(std::uint64_t sampleIndex) {
+    if (sampleIndex >= 33000 && sampleIndex < 34500) {
+        sourceB = 0.7f + 0.2f * std::sin(static_cast<float>(sampleIndex) * 0.013f);
+    } else if (sampleIndex == 34500) {
+        sourceB = 0.7f;
+    }
+    RefreshedEvent(RetirementSchedule(), sampleIndex);
+}
+
 std::uint32_t Bits(float value) { return std::bit_cast<std::uint32_t>(value); }
 
-bool SameState(const synth::Parameter& a, const synth::Parameter& b) {
-    return Bits(a.CachedKnobValue(0)) == Bits(b.CachedKnobValue(0)) && Bits(a.GetRaw(0)) == Bits(b.GetRaw(0)) &&
-           Bits(a.CurrentCenter()) == Bits(b.CurrentCenter()) &&
-           Bits(a.CurrentCenterScale(0)) == Bits(b.CurrentCenterScale(0)) &&
-           Bits(a.CurrentNormalizationOffset(0)) == Bits(b.CurrentNormalizationOffset(0)) &&
-           Bits(a.UIDisplayCenter(0)) == Bits(b.UIDisplayCenter(0)) &&
-           Bits(a.UIDisplaySpread(0)) == Bits(b.UIDisplaySpread(0));
+// spm-97: the first value on which two parameters, and every depth child
+// reachable from them, differ across every public const accessor; empty when
+// they agree bit for bit.
+struct Difference {
+    explicit Difference(const synth::ParameterGroupConfig& config, std::size_t gestures)
+        : stateA(config.numVoices, config.numModulators, gestures),
+          stateB(config.numVoices, config.numModulators, gestures) {}
+
+    void Note(const std::string& what) {
+        if (first.empty()) {
+            first = what;
+        }
+    }
+    void Float(const std::string& what, float a, float b) {
+        if (Bits(a) != Bits(b)) {
+            Note(what + " " + std::to_string(a) + " vs " + std::to_string(b));
+        }
+    }
+    template <class T>
+    void Equal(const std::string& what, const T& a, const T& b) {
+        if (!(a == b)) {
+            Note(what);
+        }
+    }
+
+    std::string first;
+    synth::Parameter::UIState stateA;
+    synth::Parameter::UIState stateB;
+};
+
+void CompareParameters(Difference& d, const std::string& path, const synth::Parameter& a, const synth::Parameter& b) {
+    const synth::ParameterGroupConfig& config = a.Group().Config();
+    d.Equal(path + ".Id", a.Id(), b.Id());
+    d.Equal(path + ".Name", a.Name(), b.Name());
+    d.Equal(path + ".ShortName", a.ShortName(), b.ShortName());
+    d.Equal(path + ".Range", a.Range(), b.Range());
+    d.Equal(path + ".TargetKind", a.TargetKind(), b.TargetKind());
+    d.Equal(path + ".BaseColor", a.BaseColor(), b.BaseColor());
+    d.Equal(path + ".SwitchValues", a.SwitchValues(), b.SwitchValues());
+    d.Equal(path + ".IsSwitch", a.IsSwitch(), b.IsSwitch());
+    d.Equal(path + ".GesturesAffectingMask", a.GesturesAffectingMask(), b.GesturesAffectingMask());
+    d.Equal(path + ".ActiveRouteCount", a.ActiveRouteCount(), b.ActiveRouteCount());
+    d.Equal(path + ".RecursionDepth", a.RecursionDepth(), b.RecursionDepth());
+    d.Equal(path + ".Phase1Quiescent", a.Phase1Quiescent(), b.Phase1Quiescent());
+    d.Equal(path + ".Phase2WouldChangeNothing", a.Phase2WouldChangeNothing(), b.Phase2WouldChangeNothing());
+    d.Float(path + ".CurrentCenter", a.CurrentCenter(), b.CurrentCenter());
+    d.Float(path + ".TargetCenter", a.TargetCenter(), b.TargetCenter());
+    for (std::size_t sourceIx = 0; sourceIx < config.numModulators; ++sourceIx) {
+        d.Equal(path + ".RouteSourceIndex", a.RouteSourceIndex(sourceIx), b.RouteSourceIndex(sourceIx));
+        d.Equal(path + ".RoutePositionForSource", a.RoutePositionForSource(sourceIx), b.RoutePositionForSource(sourceIx));
+    }
+    d.Equal(path + ".ActiveRouteSourceIndices",
+            std::vector<std::size_t>(a.ActiveRouteSourceIndices().begin(), a.ActiveRouteSourceIndices().end()),
+            std::vector<std::size_t>(b.ActiveRouteSourceIndices().begin(), b.ActiveRouteSourceIndices().end()));
+    for (std::size_t sceneIx = 0; sceneIx < config.numScenes; ++sceneIx) {
+        d.Float(path + ".SceneCenter", a.SceneCenter(sceneIx), b.SceneCenter(sceneIx));
+        for (std::size_t gestureIx = 0; gestureIx < a.Group().GestureCount(); ++gestureIx) {
+            d.Float(path + ".GestureValue", a.GestureValue(sceneIx, gestureIx), b.GestureValue(sceneIx, gestureIx));
+            d.Equal(path + ".GestureActive", a.GestureActive(sceneIx, gestureIx), b.GestureActive(sceneIx, gestureIx));
+        }
+    }
+    for (std::size_t voiceIx = 0; voiceIx < config.numVoices; ++voiceIx) {
+        d.Float(path + ".GetRaw", a.GetRaw(voiceIx), b.GetRaw(voiceIx));
+        d.Float(path + ".CachedKnobValue", a.CachedKnobValue(voiceIx), b.CachedKnobValue(voiceIx));
+        d.Float(path + ".UIDisplayCenter", a.UIDisplayCenter(voiceIx), b.UIDisplayCenter(voiceIx));
+        d.Float(path + ".UIDisplaySpread", a.UIDisplaySpread(voiceIx), b.UIDisplaySpread(voiceIx));
+        d.Equal(path + ".GetSwitchVal", a.GetSwitchVal(voiceIx), b.GetSwitchVal(voiceIx));
+        d.Float(path + ".CurrentCenterScale", a.CurrentCenterScale(voiceIx), b.CurrentCenterScale(voiceIx));
+        d.Float(path + ".TargetCenterScale", a.TargetCenterScale(voiceIx), b.TargetCenterScale(voiceIx));
+        d.Float(path + ".CurrentNormalizationOffset", a.CurrentNormalizationOffset(voiceIx),
+                b.CurrentNormalizationOffset(voiceIx));
+        d.Float(path + ".TargetNormalizationOffset", a.TargetNormalizationOffset(voiceIx),
+                b.TargetNormalizationOffset(voiceIx));
+        d.Equal(path + ".IndicatorColor", a.IndicatorColor(voiceIx), b.IndicatorColor(voiceIx));
+        const std::span<const float> currentA = a.CurrentDepthSlots(voiceIx);
+        const std::span<const float> currentB = b.CurrentDepthSlots(voiceIx);
+        const std::span<const float> targetA = a.TargetDepthSlots(voiceIx);
+        const std::span<const float> targetB = b.TargetDepthSlots(voiceIx);
+        for (std::size_t sourceIx = 0; sourceIx < config.numModulators; ++sourceIx) {
+            d.Float(path + ".CurrentDepthSlots", currentA[sourceIx], currentB[sourceIx]);
+            d.Float(path + ".TargetDepthSlots", targetA[sourceIx], targetB[sourceIx]);
+            d.Float(path + ".CurrentDepthForSource", a.CurrentDepthForSource(voiceIx, sourceIx),
+                    b.CurrentDepthForSource(voiceIx, sourceIx));
+            d.Float(path + ".TargetDepthForSource", a.TargetDepthForSource(voiceIx, sourceIx),
+                    b.TargetDepthForSource(voiceIx, sourceIx));
+        }
+    }
+    // The UI snapshot is where the current minimums and maximums become visible.
+    a.PopulateUIState(d.stateA);
+    b.PopulateUIState(d.stateB);
+    d.Equal(path + ".UIState.connected", d.stateA.connected.load(), d.stateB.connected.load());
+    d.Equal(path + ".UIState.bipolar", d.stateA.bipolar.load(), d.stateB.bipolar.load());
+    d.Equal(path + ".UIState.modulatorsAffectingMask", d.stateA.modulatorsAffectingMask.load(),
+            d.stateB.modulatorsAffectingMask.load());
+    d.Equal(path + ".UIState.gesturesAffectingMask", d.stateA.gesturesAffectingMask.load(),
+            d.stateB.gesturesAffectingMask.load());
+    d.Float(path + ".UIState.rawKnobValue", d.stateA.rawKnobValue.load(), d.stateB.rawKnobValue.load());
+    for (std::size_t voiceIx = 0; voiceIx < config.numVoices; ++voiceIx) {
+        d.Float(path + ".UIState.values", d.stateA.values[voiceIx].load(), d.stateB.values[voiceIx].load());
+        d.Float(path + ".UIState.spreadValues", d.stateA.spreadValues[voiceIx].load(),
+                d.stateB.spreadValues[voiceIx].load());
+        d.Float(path + ".UIState.minValues", d.stateA.minValues[voiceIx].load(), d.stateB.minValues[voiceIx].load());
+        d.Float(path + ".UIState.maxValues", d.stateA.maxValues[voiceIx].load(), d.stateB.maxValues[voiceIx].load());
+    }
+    // ToValueJSON repeats the scene centres and gestures compared above and adds
+    // the depth tree's shape.
+    synth::JsonArena arenaA(1 << 14);
+    synth::JsonArena arenaB(1 << 14);
+    d.Equal(path + ".ToValueJSON", JsonToString(a.ToValueJSON(arenaA)), JsonToString(b.ToValueJSON(arenaB)));
+    for (std::size_t modIx = 0; modIx < config.numModulators; ++modIx) {
+        const synth::Parameter* childA = a.ModulationDepthParameter(modIx);
+        const synth::Parameter* childB = b.ModulationDepthParameter(modIx);
+        d.Equal(path + "/" + std::to_string(modIx) + " present", childA != nullptr, childB != nullptr);
+        if (childA != nullptr && childB != nullptr) {
+            CompareParameters(d, path + "/" + std::to_string(modIx), *childA, *childB);
+        }
+    }
+}
+
+// A group whose spm-96 skip is off never skips a visit. Without this check a
+// comparison against such a rig would silently be against a skipping group, and
+// the skip, being value-neutral, would not show.
+void RequireNoSkipsWhenSkipIsOff(const char* label, const Rig& rig, const synth::ParameterProcessingObserver& work) {
+    if (!rig.group->Config().skipQuiescentParameters &&
+        (work.topLevelQuiescentSkips != 0 || work.topLevelPhase2Skips != 0)) {
+        std::cerr << label << ": a group with skipQuiescentParameters false skipped " << work.topLevelQuiescentSkips
+                  << " phase-1 visits and " << work.topLevelPhase2Skips << " phase-2 visits\n";
+        REQUIRE_TRUE(false);
+    }
+}
+
+// Runs two rigs through the same ladder and compares every public const accessor
+// of every parameter and depth child after every sample; returns the first
+// rig's observer counts. Stops at the first difference, naming sample and
+// parameter. A rig whose group has the skip off must end the run with no skips.
+synth::ParameterProcessingObserver CompareRigs(const char* label, Rig& first, Rig& second, std::uint64_t samples,
+                                               const Ladder& ladder) {
+    synth::ParameterProcessingObserver work{};
+    synth::ParameterProcessingObserver secondWork{};
+    first.group->SetProcessingObserverForTests(&work);
+    second.group->SetProcessingObserverForTests(&secondWork);
+    Difference difference(first.group->Config(), first.manager.GestureCount());
+    for (std::uint64_t sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
+        ladder(first, sampleIndex);
+        ladder(second, sampleIndex);
+        first.Sample(sampleIndex);
+        second.Sample(sampleIndex);
+        REQUIRE_TRUE(first.parameters.size() == second.parameters.size());
+        for (std::size_t ix = 0; ix < first.parameters.size(); ++ix) {
+            difference.first.clear();
+            CompareParameters(difference, "P" + std::to_string(ix), *first.parameters[ix], *second.parameters[ix]);
+            if (!difference.first.empty()) {
+                std::cerr << label << " diverged at sample " << sampleIndex << ", parameter " << ix << ": "
+                          << difference.first << "\n";
+                REQUIRE_TRUE(false);
+            }
+        }
+    }
+    first.group->SetProcessingObserverForTests(nullptr);
+    second.group->SetProcessingObserverForTests(nullptr);
+    RequireNoSkipsWhenSkipIsOff(label, first, work);
+    RequireNoSkipsWhenSkipIsOff(label, second, secondWork);
+    return work;
+}
+
+// The two rigs most comparisons run: a group that retires Computes (and, unless
+// told otherwise, skips quiescent parameters) and a group with both features off.
+struct RigPair {
+    Rig retiring;
+    Rig full;
+    explicit RigPair(std::size_t computeInterval,
+                     synth::ModulationBlendMode blendMode = synth::ModulationBlendMode::kCrossfade,
+                     std::size_t modulators = 2, std::size_t voices = 1, bool retiringSkips = true,
+                     bool fullSkips = false, std::size_t maxParameters = 32)
+        : retiring(retiringSkips, computeInterval, true, blendMode, modulators, voices, maxParameters),
+          full(fullSkips, computeInterval, false, blendMode, modulators, voices, maxParameters) {}
+};
+
+// Runs `rig` through `settle` samples with no writes and then `window` more with
+// `work` attached; `work` stays attached on return.
+void SettleThenCount(Rig& rig, synth::ParameterProcessingObserver& work, std::uint64_t settle = 48000,
+                     std::uint64_t window = 160) {
+    for (std::uint64_t sampleIndex = 0; sampleIndex < settle; ++sampleIndex) {
+        rig.group->ProcessSample(sampleIndex);
+    }
+    rig.group->SetProcessingObserverForTests(&work);
+    for (std::uint64_t sampleIndex = settle; sampleIndex < settle + window; ++sampleIndex) {
+        rig.group->ProcessSample(sampleIndex);
+    }
+}
+
+// Positive control: compute-sample visits were retired, so agreement means the
+// retired path ran.
+void RequireRetiredMoreThanHalf(const char* label, const synth::ParameterProcessingObserver& work,
+                                std::size_t computeVisits) {
+    if (!(work.topLevelRetiredComputes * 2 > computeVisits)) {
+        std::cerr << label << ": " << work.topLevelRetiredComputes << " retired of " << computeVisits
+                  << " compute-sample visits\n";
+    }
+    REQUIRE_TRUE(work.topLevelRetiredComputes * 2 > computeVisits);
+}
+
+// Retired means not computed, including for a parameter with no depth children
+// (localRecursiveComputeCalls only counts depth children's Computes): over a
+// window in which nothing is written, the group that retires makes no top-level
+// Compute and the group that never retires makes some.
+void RequireNoTopLevelComputesWhileRetiring(const char* label, const synth::ParameterProcessingObserver& retiringWork,
+                                            const synth::ParameterProcessingObserver& fullWork) {
+    if (!(fullWork.topLevelComputeCalls > 0 && retiringWork.topLevelComputeCalls == 0)) {
+        std::cerr << label << ": top-level Computes over the window: retirement off " << fullWork.topLevelComputeCalls
+                  << ", retirement on " << retiringWork.topLevelComputeCalls << "\n";
+    }
+    REQUIRE_TRUE(fullWork.topLevelComputeCalls > 0);
+    REQUIRE_TRUE(retiringWork.topLevelComputeCalls == 0);
 }
 
 }  // namespace quiescence
@@ -3699,45 +4246,213 @@ bool SameState(const synth::Parameter& a, const synth::Parameter& b) {
 TEST_CASE(quiescent_skip_matches_unskipped_processing) {
     quiescence::Rig skipped(true);
     quiescence::Rig unskipped(false);
-    synth::ParameterProcessingObserver work{};
-    skipped.group->SetProcessingObserverForTests(&work);
-    for (std::uint64_t sampleIndex = 0; sampleIndex < 26000; ++sampleIndex) {
-        skipped.Event(sampleIndex);
-        unskipped.Event(sampleIndex);
-        skipped.Sample(sampleIndex);
-        unskipped.Sample(sampleIndex);
-        for (std::size_t ix = 0; ix < skipped.parameters.size(); ++ix) {
-            if (!quiescence::SameState(*skipped.parameters[ix], *unskipped.parameters[ix])) {
-                std::cerr << "diverged at sample " << sampleIndex << ", parameter " << ix << "\n";
-                REQUIRE_TRUE(false);
-            }
-        }
-    }
+    const synth::ParameterProcessingObserver work =
+        quiescence::CompareRigs("spm-96", skipped, unskipped, 26000, &quiescence::Rig::Event);
     // Positive control: the skip actually happened, so agreement means something.
     REQUIRE_TRUE(work.topLevelQuiescentSkips > 26000);
 }
 
 // spm-96: once settled with no route, a parameter's phase-1 visits are skipped
-// except one per compute interval, and a wake brings back the full step.
+// except one per compute interval, and a wake brings back the full step. With
+// spm-97's retirement on, the compute sample is skipped too: every visit.
 TEST_CASE(quiescent_parameters_skip_their_lite_step_until_woken) {
-    quiescence::Rig rig(true);
-    for (std::uint64_t sampleIndex = 0; sampleIndex < 48000; ++sampleIndex) {
-        rig.group->ProcessSample(sampleIndex);
-    }
-    synth::ParameterProcessingObserver work{};
-    rig.group->SetProcessingObserverForTests(&work);
-    for (std::uint64_t sampleIndex = 48000; sampleIndex < 48160; ++sampleIndex) {
-        rig.group->ProcessSample(sampleIndex);
-    }
-    const std::size_t visits = 7 * 160;
-    REQUIRE_TRUE(work.topLevelProcessLiteCalls == visits);
-    REQUIRE_TRUE(work.topLevelQuiescentSkips == visits - 7 * 10);  // one compute sample in 16
+    for (const bool retire : {false, true}) {
+        quiescence::Rig rig(true, 16, retire);
+        synth::ParameterProcessingObserver work{};
+        quiescence::SettleThenCount(rig, work);
+        const std::size_t visits = 7 * 160;
+        REQUIRE_TRUE(work.topLevelProcessLiteCalls == visits);
+        // one compute sample in 16 without retirement, none with it
+        REQUIRE_TRUE(work.topLevelQuiescentSkips == (retire ? visits : visits - 7 * 10));
 
-    rig.parameters[2]->RevertAllToDefault();  // a writer wakes it
+        rig.parameters[2]->RevertAllToDefault();  // a writer wakes it
+        synth::ParameterProcessingObserver afterWake{};
+        rig.group->SetProcessingObserverForTests(&afterWake);
+        rig.group->ProcessSample(48161);
+        REQUIRE_TRUE(afterWake.topLevelQuiescentSkips == 6);
+    }
+}
+
+// spm-97: at compute interval 1 every sample is a compute sample, and a settled
+// group retires every one of them without making a Compute of its own; a
+// writer's wake un-retires only its parameter. The group that never retires
+// computes them.
+TEST_CASE(settled_parameters_retire_their_compute_until_written) {
+    quiescence::RigPair rigs(1);
+    synth::ParameterProcessingObserver work{};
+    synth::ParameterProcessingObserver fullWork{};
+    quiescence::SettleThenCount(rigs.retiring, work);
+    quiescence::SettleThenCount(rigs.full, fullWork);
+    REQUIRE_TRUE(work.topLevelProcessLiteCalls == 7 * 160);
+    REQUIRE_TRUE(work.topLevelRetiredComputes == 7 * 160);
+    quiescence::RequireNoTopLevelComputesWhileRetiring("settled seven parameters", work, fullWork);
+    quiescence::RequireNoSkipsWhenSkipIsOff("settled seven parameters, full group", rigs.full, fullWork);
+
+    // With spm-96's skip off, a retired visit is never a skipped one, so the
+    // group's retired branch runs for every visit (with the skip on, a settled
+    // parameter is skipped before that branch is reached): it must still make no
+    // Compute, whether or not the parameter has depth children.
+    quiescence::Rig retiringWithoutSkip(false, 1, true);
+    synth::ParameterProcessingObserver noSkipWork{};
+    quiescence::SettleThenCount(retiringWithoutSkip, noSkipWork);
+    REQUIRE_TRUE(noSkipWork.topLevelRetiredComputes == 7 * 160);
+    quiescence::RequireNoTopLevelComputesWhileRetiring("settled seven parameters, retiring group without the skip",
+                                                       noSkipWork, fullWork);
+    quiescence::RequireNoSkipsWhenSkipIsOff("settled seven parameters, retiring group without the skip",
+                                            retiringWithoutSkip, noSkipWork);
+
+    rigs.retiring.parameters[2]->RevertAllToDefault();  // a writer wakes it
     synth::ParameterProcessingObserver afterWake{};
-    rig.group->SetProcessingObserverForTests(&afterWake);
-    rig.group->ProcessSample(48161);
-    REQUIRE_TRUE(afterWake.topLevelQuiescentSkips == 6);
+    rigs.retiring.group->SetProcessingObserverForTests(&afterWake);
+    rigs.retiring.group->ProcessSample(48160);
+    REQUIRE_TRUE(afterWake.topLevelRetiredComputes == 6);
+}
+
+// spm-97: the retiring group and the group that runs every Compute() agree bit
+// for bit at every sample, at compute intervals 1 and 16, through the writers
+// RetirementSchedule drives: a scene blend move, a knob edit written straight
+// into SceneCenter, routes made with EnsureModulationDepth and returned to
+// neutral, a one-way-amount parameter, a source's connected and restsAtZero
+// flags, a depth child's cached knob overwritten, a depth child given a route
+// of its own, a local and a top-level parameter assigned with
+// AssignModulationDepth, ClearModulationDepths, CollectNeutralLocalParameters,
+// RevertToDefault, RevertAllToDefault, a JSON load, ComputeAllParameters,
+// writes through freshly acquired CurrentDepthSlots/TargetDepthSlots spans, and
+// ConfigureProcessingTiming, plus what Rig::Sample does every sample (an
+// application overwrite of a cached knob after phase 1) and a source that moves.
+TEST_CASE(fixed_point_compute_retirement_matches_full_compute) {
+    for (const std::size_t interval : {std::size_t{1}, std::size_t{16}}) {
+        quiescence::RigPair rigs(interval);
+        const std::string label = "interval " + std::to_string(interval);
+        const auto work = quiescence::CompareRigs(label.c_str(), rigs.retiring, rigs.full, 75000,
+                                                  &quiescence::Rig::RetirementEvent);
+        quiescence::RequireRetiredMoreThanHalf(label.c_str(), work, work.topLevelProcessLiteCalls / interval);
+    }
+
+    // The same comparison in attenuverter mode, at interval 1, through a
+    // restsAtZero flip on a routed source and its return.
+    quiescence::RigPair rigs(1, synth::ModulationBlendMode::kAttenuverter);
+    const auto work = quiescence::CompareRigs("attenuverter", rigs.retiring, rigs.full, 12000,
+                                              quiescence::Refreshed(quiescence::RestsAtZeroSchedule()));
+    quiescence::RequireRetiredMoreThanHalf("attenuverter", work, work.topLevelProcessLiteCalls);
+}
+
+// spm-97: the key's masks cover every source index: 64 modulators, attenuverter
+// mode, interval 1, and for each source index in turn (see AllSourcesSchedule) a
+// route, settling, a flip of `connected` and of `restsAtZero` with no Wake(), and
+// the route removed. Then retired means not computed: the routes give
+// parameters depth children, and over windows with no writes the retiring group
+// makes no Compute at the top level or in a depth child, and the group that
+// never retires makes some.
+TEST_CASE(fixed_point_compute_retirement_covers_every_source_index) {
+    quiescence::RigPair rigs(1, synth::ModulationBlendMode::kAttenuverter, quiescence::kSourceLoopModulators);
+    const quiescence::Ladder ladder = quiescence::Refreshed(quiescence::AllSourcesSchedule());
+    const auto work = quiescence::CompareRigs("64 modulators", rigs.retiring, rigs.full, quiescence::kSourceLoopEnd, ladder);
+    quiescence::RequireRetiredMoreThanHalf("64 modulators", work, work.topLevelProcessLiteCalls);
+
+    // Windows with no writes: a long one, to see a retirement that holds back
+    // some of the time, then the 160 samples after 48000 of settling. Nothing is
+    // written after the loop except the cached-knob overwrite of parameter 0 in
+    // Rig::Sample (the ladder only refreshes the modulator values).
+    constexpr std::uint64_t kLongWindowStart = quiescence::kSourceLoopEnd + 8000;
+    constexpr std::uint64_t kShortWindowStart = quiescence::kSourceLoopEnd + 48000;
+    constexpr std::uint64_t kEnd = kShortWindowStart + 160;
+    synth::ParameterProcessingObserver retiringLong{};
+    synth::ParameterProcessingObserver fullLong{};
+    synth::ParameterProcessingObserver retiringShort{};
+    synth::ParameterProcessingObserver fullShort{};
+    for (std::uint64_t sampleIndex = quiescence::kSourceLoopEnd; sampleIndex < kEnd; ++sampleIndex) {
+        if (sampleIndex == kLongWindowStart) {
+            rigs.retiring.group->SetProcessingObserverForTests(&retiringLong);
+            rigs.full.group->SetProcessingObserverForTests(&fullLong);
+        } else if (sampleIndex == kShortWindowStart) {
+            rigs.retiring.group->SetProcessingObserverForTests(&retiringShort);
+            rigs.full.group->SetProcessingObserverForTests(&fullShort);
+        }
+        ladder(rigs.retiring, sampleIndex);
+        ladder(rigs.full, sampleIndex);
+        rigs.retiring.Sample(sampleIndex);
+        rigs.full.Sample(sampleIndex);
+    }
+    rigs.retiring.group->SetProcessingObserverForTests(nullptr);
+    rigs.full.group->SetProcessingObserverForTests(nullptr);
+    const struct {
+        const char* label;
+        const synth::ParameterProcessingObserver& retiring;
+        const synth::ParameterProcessingObserver& full;
+    } windows[] = {{"64 modulators, long idle window", retiringLong, fullLong},
+                   {"64 modulators, 160 samples after 48000 idle", retiringShort, fullShort}};
+    for (const auto& window : windows) {
+        if (!(window.full.localRecursiveComputeCalls > 0 && window.retiring.localRecursiveComputeCalls == 0)) {
+            std::cerr << window.label << ": depth-child Computes: retirement off "
+                      << window.full.localRecursiveComputeCalls << ", retirement on "
+                      << window.retiring.localRecursiveComputeCalls << "\n";
+        }
+        REQUIRE_TRUE(window.full.localRecursiveComputeCalls > 0);
+        REQUIRE_TRUE(window.retiring.localRecursiveComputeCalls == 0);
+        quiescence::RequireNoTopLevelComputesWhileRetiring(window.label, window.retiring, window.full);
+        quiescence::RequireNoSkipsWhenSkipIsOff(window.label, rigs.full, window.full);
+    }
+}
+
+// spm-97: the masks are injective. One parameter of each kind carries a route on
+// all 64 sources at once (the bipolar one reads `restsAtZero` in attenuverter
+// mode and the one-way one reads `connected`, and neither reads the other flag,
+// so one parameter cannot show both masks), every source's flags are true, and
+// each flag of each source flips and returns with no Wake() while the other 63
+// hold true (see InjectiveMasksSchedule).
+TEST_CASE(fixed_point_compute_retirement_masks_are_injective) {
+    quiescence::RigPair rigs(1, synth::ModulationBlendMode::kAttenuverter, quiescence::kSourceLoopModulators, 1,
+                             true, false, 160);
+    const auto work = quiescence::CompareRigs("injective masks", rigs.retiring, rigs.full, quiescence::kInjectiveEnd,
+                                              quiescence::Refreshed(quiescence::InjectiveMasksSchedule()));
+    quiescence::RequireRetiredMoreThanHalf("injective masks", work, work.topLevelProcessLiteCalls);
+}
+
+// spm-97: retirement agrees with full Compute() whichever of the two features
+// is on in the full group: the retiring group without spm-96's skip against a
+// group with both off, and both groups with the skip on and only one retiring.
+TEST_CASE(fixed_point_compute_retirement_matches_full_compute_with_the_skip_off_and_on) {
+    const struct {
+        const char* label;
+        bool retiringSkip;
+        bool fullSkip;
+    } combinations[] = {{"retire, skip off, against both off", false, false},
+                        {"retire against skip, both skip on", true, true}};
+    for (const auto& combination : combinations) {
+        quiescence::RigPair rigs(1, synth::ModulationBlendMode::kCrossfade, 2, 1, combination.retiringSkip,
+                                 combination.fullSkip);
+        const auto work = quiescence::CompareRigs(combination.label, rigs.retiring, rigs.full, 75000,
+                                                  &quiescence::Rig::RetirementEvent);
+        quiescence::RequireRetiredMoreThanHalf(combination.label, work, work.topLevelProcessLiteCalls);
+    }
+}
+
+// spm-97: a group with more than 64 modulators never retires, since the key
+// holds one bit per modulator. The same rig with 64 modulators does retire
+// every visit, so the setup could have produced a retirement.
+TEST_CASE(a_group_above_64_modulators_never_retires) {
+    for (const std::size_t modulators : {std::size_t{64}, std::size_t{65}}) {
+        quiescence::Rig rig(true, 1, true, synth::ModulationBlendMode::kCrossfade, modulators);
+        synth::ParameterProcessingObserver work{};
+        quiescence::SettleThenCount(rig, work);
+        REQUIRE_TRUE(work.topLevelProcessLiteCalls == 7 * 160);
+        REQUIRE_TRUE(work.topLevelRetiredComputes == (modulators == 64 ? 7 * 160 : 0));
+    }
+}
+
+// spm-97: with two voices whose depth smoothing finishes at different samples,
+// in either direction (voice 0 at rest and voice 1 smoothing, then the other
+// way round), and through a compute-and-snap, retirement agrees with full
+// Compute().
+TEST_CASE(fixed_point_compute_retirement_matches_full_compute_with_two_voices) {
+    for (const std::size_t restingVoice : {std::size_t{0}, std::size_t{1}}) {
+        quiescence::RigPair rigs(1, synth::ModulationBlendMode::kCrossfade, 2, 2);
+        const std::string label = "two voices, voice " + std::to_string(restingVoice) + " at rest";
+        const auto work = quiescence::CompareRigs(label.c_str(), rigs.retiring, rigs.full, 12000,
+                                                  quiescence::Refreshed(quiescence::VoiceSchedule(restingVoice)));
+        quiescence::RequireRetiredMoreThanHalf(label.c_str(), work, work.topLevelProcessLiteCalls);
+    }
 }
 
 // spm-96: every writer of a value the lite steps read wakes the parameter it

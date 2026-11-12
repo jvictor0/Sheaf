@@ -255,6 +255,8 @@ namespace {
 // Local modulation-depth controls are intentionally not addressable through ParameterManager::ParameterById.
 constexpr ParameterId kLocalParameterId = std::numeric_limits<ParameterId>::max();
 constexpr float kModulationNeutralTolerance = 0.000001f;
+// spm-97: the retirement key holds one bit per modulator in a std::uint64_t.
+constexpr std::size_t kRetirementMaskBits = std::numeric_limits<std::uint64_t>::digits;
 // A local depth is a normalized bipolar control, so its standard zero-depth value is the knob center.
 constexpr float kNeutralModulationDepthCenter = 0.5f;
 
@@ -714,6 +716,7 @@ ParameterGroup::ParameterGroup(ParameterGroupConfig config, ParameterManager& ma
       modulators_(config.numVoices, config.numModulators),
       parameterCount_(0),
       storageLowWatermark_(config.numModulators * 2) {
+    modulatorsFitRetirementMasks_ = config_.numModulators <= kRetirementMaskBits;
     parameters_.reserve(config_.maxParameters);
     topLevelParameters_.reserve(config_.maxParameters);
     recycledLocalSlots_.reserve(config_.maxParameters);
@@ -936,14 +939,25 @@ void ParameterGroup::ConfigureProcessingTiming(const ParameterProcessingTiming& 
 
 void ParameterGroup::ProcessSamplePhase1(std::uint64_t sampleIndex) {
     // spm-96: a quiescent parameter skips its lite phase 1, except on a
-    // compute sample (Compute() wakes it and the full step runs).
+    // compute sample, where Compute() wakes it and the full step runs.
+    // spm-97: unless that Compute() is retired because it would change nothing;
+    // the sample is then a non-compute sample for that parameter, so the skip
+    // applies, and otherwise only the lite step runs.
     const bool computeSample = sampleIndex % config_.targetComputeIntervalSamples == 0;
+    const bool mayRetire = computeSample && config_.retireFixedPointComputes && modulatorsFitRetirementMasks_;
     for (Parameter* parameter : topLevelParameters_) {
-        if (config_.skipQuiescentParameters && !computeSample && parameter->Phase1Quiescent()) {
+        const bool retired = mayRetire && parameter->ComputeWouldChangeNothing(manager_->Scene(), 0, true);
+        const bool computeDue = computeSample && !retired;
+        if (retired && processingObserver_ != nullptr) {
+            ++processingObserver_->topLevelRetiredComputes;
+        }
+        if (config_.skipQuiescentParameters && !computeDue && parameter->Phase1Quiescent()) {
             parameter->RestoreLastRawKnobValues();
             if (processingObserver_ != nullptr) {
                 ++processingObserver_->topLevelQuiescentSkips;
             }
+        } else if (retired) {
+            parameter->ProcessLitePhase1();
         } else {
             parameter->ProcessSamplePhase1(sampleIndex);
         }
@@ -958,6 +972,9 @@ void ParameterGroup::ProcessSamplePhase2() {
     // parameter woken during this sample's phase 1 still runs its phase 2.
     for (Parameter* parameter : topLevelParameters_) {
         if (config_.skipQuiescentParameters && parameter->Phase2WouldChangeNothing()) {
+            if (processingObserver_ != nullptr) {
+                ++processingObserver_->topLevelPhase2Skips;
+            }
             continue;
         }
         parameter->ProcessSamplePhase2();
@@ -1198,6 +1215,7 @@ std::size_t Parameter::CollectNeutralChildren() {
         modulationDepths_[sourceIx] = nullptr;
         --assignedDepthCount_;
         scalarLeafPrepared_ = false;
+        ++writeEpoch_;  // spm-97
         group_.RecycleLocalParameter(*child);
         ++collected;
     }
@@ -1568,7 +1586,10 @@ void Parameter::ProcessLitePhase1() {
     for (std::size_t voiceIx = 0; voiceIx < group_.Config().numVoices; ++voiceIx) {
         for (std::size_t routeSlot = 0; routeSlot < activeRouteCount_; ++routeSlot) {
             const std::size_t ix = VoiceRouteIndex(voiceIx, routeSlot);
-            currentDepths_[ix] += alpha * (targetDepths_[ix] - currentDepths_[ix]);
+            // spm-97: ComputeAtDepth reads currentDepths_ of active routes.
+            if (SmoothAndReportChange(currentDepths_[ix], targetDepths_[ix], alpha)) {
+                ++writeEpoch_;
+            }
             if (group_.processingObserver_ != nullptr) {
                 ++group_.processingObserver_->activeRouteVisits;
             }
@@ -1587,7 +1608,26 @@ void Parameter::ReplaceCachedKnobValue(std::size_t voiceIx, float normalizedValu
         throw std::out_of_range("parameter cached knob voice index out of range");
     }
     scalarLeafPrepared_ = false;
+    NoteCachedKnobOverwrite();
     currentKnobValues_[voiceIx] = std::clamp(normalizedValue, 0.0f, 1.0f);
+}
+
+void Parameter::NoteCachedKnobOverwrite() {
+    if (id_ == kLocalParameterId) {
+        ++writeEpoch_;
+    }
+}
+
+bool Parameter::BlocksParentRetirement() const {
+    return id_ != kLocalParameterId || activeRouteCount_ != 0;
+}
+
+void Parameter::RestoreLastRawKnobValues() {
+    scalarLeafPrepared_ = false;
+    NoteCachedKnobOverwrite();
+    for (std::size_t voiceIx = 0; voiceIx < currentKnobValues_.size(); ++voiceIx) {
+        currentKnobValues_[voiceIx] = lastRawValues_[voiceIx];
+    }
 }
 
 void Parameter::ProcessLitePhase2() {
@@ -1979,6 +2019,7 @@ bool Parameter::AssignModulationDepth(std::size_t modIx, Parameter* parameter) {
     if (modulationDepths_[modIx] != nullptr) --assignedDepthCount_;
     if (parameter != nullptr) ++assignedDepthCount_;
     scalarLeafPrepared_ = false;
+    ++writeEpoch_;  // spm-97
     modulationDepths_[modIx] = parameter;
     return true;
 }
@@ -2017,6 +2058,7 @@ void Parameter::ClearModulationDepths() {
     std::fill(modulationDepths_.begin(), modulationDepths_.end(), nullptr);
     assignedDepthCount_ = 0;
     scalarLeafPrepared_ = false;
+    ++writeEpoch_;  // spm-97
 }
 
 Parameter* Parameter::ModulationDepthParameter(std::size_t modIx) const {
@@ -2210,6 +2252,7 @@ void Parameter::EnsureRouteActive(std::size_t sourceIx) {
     if (routeSlot < activeRouteCount_) {
         return;
     }
+    routeChangedDuringCompute_ = true;  // spm-97
 
     const std::size_t destination = activeRouteCount_;
     if (routeSlot != destination) {
@@ -2233,6 +2276,7 @@ void Parameter::RemoveActiveRoute(std::size_t routeSlot) {
     if (routeSlot >= activeRouteCount_) {
         throw std::out_of_range("active parameter route slot out of range");
     }
+    routeChangedDuringCompute_ = true;  // spm-97
     const std::size_t lastActive = activeRouteCount_ - 1;
     if (routeSlot != lastActive) {
         for (std::size_t voiceIx = 0; voiceIx < group_.Config().numVoices; ++voiceIx) {
@@ -2386,11 +2430,21 @@ float Parameter::ComputeRawCenter(const SceneState& scene) const {
 }
 
 void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDepth, bool smoothTargetCenter) {
+    // spm-97: the epoch is read before this call's own Wake(), so a write by
+    // anyone else since the last call shows as a difference from that call's
+    // closing epoch.
+    const std::uint64_t epochAtStart = writeEpoch_;
+    const float targetCenterAtStart = targetCenter_;
+    routeChangedDuringCompute_ = false;
     const bool scalarWasPrepared = scalarLeafPrepared_;
     Wake();  // spm-96
     recursionDepth_ = recursionDepth;
-    if (recursionDepth > 0 && group_.processingObserver_ != nullptr) {
-        ++group_.processingObserver_->localRecursiveComputeCalls;
+    if (group_.processingObserver_ != nullptr) {
+        if (recursionDepth > 0) {
+            ++group_.processingObserver_->localRecursiveComputeCalls;
+        } else {
+            ++group_.processingObserver_->topLevelComputeCalls;  // spm-97
+        }
     }
     const float rawCenter = ClampToRange(ComputeRawCenter(scene), config_.range);
     // A scalar depth leaf has no source dependencies. Direct scene/gesture
@@ -2400,6 +2454,7 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
         activeRouteCount_ == 0 && SameBits(rawCenter, currentCenter_)) {
         scalarLeafPrepared_ = true;
         if (group_.processingObserver_ != nullptr) ++group_.processingObserver_->scalarLeafCacheHits;
+        RecordComputeForRetirement(epochAtStart, targetCenterAtStart, rawCenter, recursionDepth, smoothTargetCenter);
         return;
     }
     if (smoothTargetCenter && recursionDepth == 0) {
@@ -2557,6 +2612,74 @@ void Parameter::ComputeAtDepth(const SceneState& scene, std::size_t recursionDep
     scalarLeafPrepared_ = recursionDepth > 0 && assignedDepthCount_ == 0 && activeRouteCount_ == 0;
     if (scalarLeafPrepared_)
         preparedScalarDepthTarget_ = ModulationDepthTargetForKind(config_.modulationTargetKind, GetRaw(0));
+    RecordComputeForRetirement(epochAtStart, targetCenterAtStart, rawCenter, recursionDepth, smoothTargetCenter);
+}
+
+// Must read exactly the modulator metadata fields ComputeAtDepth reads: today
+// `connected` (one-way amount targets) and `restsAtZero` (attenuverter blend).
+// A third field read there has to be added here, to ActiveRouteMasks and to the
+// key, or retirement stops seeing changes in it.
+Parameter::ActiveRouteMasks Parameter::FreshActiveRouteMasks() const {
+    ActiveRouteMasks masks;
+    for (std::size_t routeSlot = 0; routeSlot < activeRouteCount_; ++routeSlot) {
+        const std::size_t sourceIx = routeSourceIndices_[routeSlot];
+        const ModulatorMetadata& metadata = group_.GetModulators().Metadata(sourceIx);
+        masks.connected |= std::uint64_t{metadata.connected} << sourceIx;
+        masks.restsAtZero |= std::uint64_t{metadata.restsAtZero} << sourceIx;
+    }
+    return masks;
+}
+
+void Parameter::RecordComputeForRetirement(std::uint64_t epochAtStart, float targetCenterAtStart, float rawCenter,
+                                           std::size_t recursionDepth, bool smoothTargetCenter) {
+    if (!group_.modulatorsFitRetirementMasks_) {
+        computeRecorded_ = false;
+        computeArmed_ = false;
+        return;
+    }
+    const std::uint32_t rawCenterBits = std::bit_cast<std::uint32_t>(rawCenter);
+    const ActiveRouteMasks masks = FreshActiveRouteMasks();
+    bool armed = computeRecorded_ && epochAtStart == computeEpochAfter_ && rawCenterBits == computeRawCenterBits_ &&
+                 masks == computeRouteMasks_ && recursionDepth == computeRecursionDepth_ &&
+                 smoothTargetCenter == computeSmoothTargetCenter_ && SameBits(targetCenter_, targetCenterAtStart) &&
+                 !routeChangedDuringCompute_;
+    if (armed) {
+        for (const Parameter* depthParameter : modulationDepths_) {
+            if (depthParameter != nullptr &&
+                (depthParameter->BlocksParentRetirement() || !depthParameter->computeArmed_)) {
+                armed = false;
+                break;
+            }
+        }
+    }
+    computeRawCenterBits_ = rawCenterBits;
+    computeRouteMasks_ = masks;
+    computeRecursionDepth_ = recursionDepth;
+    computeSmoothTargetCenter_ = smoothTargetCenter;
+    computeArmed_ = armed;
+    computeRecorded_ = true;
+    computeEpochAfter_ = writeEpoch_;
+}
+
+bool Parameter::ComputeWouldChangeNothing(const SceneState& scene, std::size_t recursionDepth,
+                                          bool smoothTargetCenter) const {
+    if (!computeArmed_ || writeEpoch_ != computeEpochAfter_ || recursionDepth != computeRecursionDepth_ ||
+        smoothTargetCenter != computeSmoothTargetCenter_) {
+        return false;
+    }
+    if (std::bit_cast<std::uint32_t>(ClampToRange(ComputeRawCenter(scene), config_.range)) !=
+            computeRawCenterBits_ ||
+        FreshActiveRouteMasks() != computeRouteMasks_) {
+        return false;
+    }
+    for (const Parameter* depthParameter : modulationDepths_) {
+        if (depthParameter != nullptr &&
+            (depthParameter->BlocksParentRetirement() ||
+             !depthParameter->ComputeWouldChangeNothing(scene, recursionDepth + 1, smoothTargetCenter))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void Parameter::SnapCurrentToTarget() {

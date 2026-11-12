@@ -155,6 +155,71 @@ theorem quiescence_preserves_step {α : Type} (step : α → α) (state : α)
     retired step state quiet = step state := by
   cases quiet <;> simp_all [retired]
 
+-- JUDGMENT, not a theorem: which C++ fields of Parameter::ComputeAtDepth are
+-- the key k, the carried state t and the derived state p. Ruled by the lead on
+-- 2026-11-11 from the trace table in openspec/changes/compute-fixed-point-retirement/
+-- proposal.md, and checked against the code by the native differential tests
+-- (parameter_modulation_tests.cpp fixed_point_compute_retirement_matches_full_compute
+-- and frogg3rs app/FroggersParameterModelTests.cpp
+-- froggers_compute_retirement_matches_full_compute), never by this file.
+--   K (key): everything one call reads and does not write: the clamped fresh raw
+--     centre, the connected and restsAtZero flags of the active routes' sources,
+--     the write epoch, and the recursionDepth and smoothTargetCenter arguments.
+--   T (carried): what one call both reads and writes: targetCenter_, the route
+--     structure (activeRouteCount_, routeSourceIndices_, sourceRoutePositions_)
+--     and currentDepths_.
+--   P (derived): everything else one call writes, a function of the key and the
+--     new carried state alone (targetDepths_, target scales, offsets, minimums,
+--     maximums, a depth child's cached knob and UI display state).
+-- `carried` is g and `derived` is h in `step k (t, p) = (g k t, h k (g k t))`.
+structure ComputeSplit (K T P : Type) where
+  carried : K → T → T
+  derived : K → T → P
+
+def ComputeSplit.step {K T P : Type} (c : ComputeSplit K T P) (k : K) (s : T × P) : T × P :=
+  (c.carried k s.1, c.derived k (c.carried k s.1))
+
+-- Pins the definition of `step`: a change to it breaks this proof, and a change
+-- to this statement breaks its manifest pin.
+theorem compute_step_unfolds {K T P : Type} (c : ComputeSplit K T P) (k : K) (s : T × P) :
+    c.step k s = (c.carried k s.1, c.derived k (c.carried k s.1)) := rfl
+
+-- Two consecutive calls with the same key and nothing written between them, the
+-- second leaving the carried state unchanged, make the second a fixed point.
+-- Given the ComputeSplit judgment, no component of the derived state is compared.
+-- Stated over the explicit step, so the pinned statement fixes what a call does.
+theorem second_compute_fixed_point {K T P : Type} (c : ComputeSplit K T P) (k : K)
+    (s0 s1 : T × P) (h1 : s1 = (c.carried k s0.1, c.derived k (c.carried k s0.1)))
+    (h2 : c.carried k s1.1 = s1.1) :
+    (c.carried k s1.1, c.derived k (c.carried k s1.1)) = s1 := by
+  subst h1
+  simp only at h2 ⊢
+  rw [h2]
+
+-- A fixed point of the step stays one, so retiring every one of n frames that
+-- share the key (a retired frame leaves the state as it is) gives the state that
+-- running all n steps gives. Stated over core `_root_.Nat.repeat` (a
+-- `Sheaf.Nat.repeat` cannot stand in for it) and the explicit step, so the
+-- pinned statement fixes both the frames and the step.
+theorem retired_frames_match_full {K T P : Type} (c : ComputeSplit K T P) (k : K)
+    (s : T × P) (h : (c.carried k s.1, c.derived k (c.carried k s.1)) = s) (n : Nat) :
+    _root_.Nat.repeat (fun st => st) n s =
+      _root_.Nat.repeat (fun x : T × P => (c.carried k x.1, c.derived k (c.carried k x.1))) n s := by
+  have hl : ∀ m, _root_.Nat.repeat (fun st : T × P => st) m s = s := by
+    intro m
+    induction m with
+    | zero => rfl
+    | succ m ih => simpa [_root_.Nat.repeat] using ih
+  have hr : ∀ m, _root_.Nat.repeat (fun x : T × P => (c.carried k x.1, c.derived k (c.carried k x.1))) m s = s := by
+    intro m
+    induction m with
+    | zero => rfl
+    | succ m ih =>
+      simp only [_root_.Nat.repeat]
+      rw [ih]
+      exact h
+  rw [hl, hr]
+
 -- PRE-FILTER interpolation weights: 1/4, 1/2, 3/4, 1. The previous
 -- matrix target is kept for this frame. These identities do not describe the
 -- filtered/clamped DSP cache: phase four reaches the target before filtering.
