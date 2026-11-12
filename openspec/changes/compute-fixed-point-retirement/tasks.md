@@ -260,3 +260,32 @@ which strengthens a check.
   periodic throttle cannot hide between windows.
 - 6.3 adds a retiring rig with the skip off to the settled test. With the skip
   on, a settled parameter never reaches the retired branch.
+
+## 7. Round-5 audit fixes (ruled by the lead 2026-11-12)
+
+This round closes the change's test-strength loop. A later audit reports its
+findings to the lead; they are not chased in this change.
+
+- [ ] 7.1 Injective masks. Add one run on 64 modulators, at interval 1, in
+      attenuverter mode, with a single parameter that has a route on every
+      source 0–63 at once and every source's `connected` and `restsAtZero`
+      true. Settle it. Then, for each source in turn, without `Wake()`: set
+      that source's `connected` false, settle, restore it, settle; then do the
+      same with its `restsAtZero`. Because every other source holds true, any
+      mapping of sources to bits that is not injective leaves a shared bit
+      unchanged and must diverge. Red controls: `sourceIx & ~size_t{1}` and
+      `% 61`, each in each mask, must fail. Keep 6.1's run.
+- [ ] 7.2 Phase-2 skips. Add `topLevelPhase2Skips` to
+      `ParameterProcessingObserver`, counted where the phase-2 quiescent skip
+      is taken. `RequireNoSkipsWhenSkipIsOff` also requires it to be 0. Red
+      control: removing `config_.skipQuiescentParameters &&` from the phase-2
+      skip condition must fail.
+- [ ] 7.3 Comments and repetition.
+      - Change the `retireFixedPointComputes` wording to "a write through a
+        span held across two or more processed samples may be missed".
+      - Make the `CurrentDepthSlots` note say that writes through it are
+        currently re-seen through the lite step's epoch bump, and that it is
+        documented conservatively.
+      - Make the test's "Nothing is written after the loop" comment name the
+        cached-knob overwrite of parameter 0 in `Rig::Sample`.
+      - Make `Rig::RetirementEvent` use `RefreshedEvent` for its shared body.
