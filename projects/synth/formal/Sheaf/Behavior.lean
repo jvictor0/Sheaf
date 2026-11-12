@@ -155,8 +155,9 @@ theorem quiescence_preserves_step {α : Type} (step : α → α) (state : α)
     retired step state quiet = step state := by
   cases quiet <;> simp_all [retired]
 
--- Same publication weights as Smart Grid: 1/4, 1/2, 3/4, 1, with the
--- previous output kept for all four samples of this host frame.
+-- PRE-FILTER interpolation weights: 1/4, 1/2, 3/4, 1. The previous
+-- matrix target is kept for this frame. These identities do not describe the
+-- filtered/clamped DSP cache: phase four reaches the target before filtering.
 def publish (previous target : Rat) (phase : Fin 4) : Rat :=
   previous + (target - previous) * ((phase.val + 1 : Nat) : Rat) / 4
 
@@ -185,6 +186,40 @@ def controlFrame {v : Nat} (state : Runtime v) (evaluate seam : (Fin v → Rat) 
   { previous := state.target, target := seam (evaluate state.target),
     matrixFrames := state.matrixFrames + 1, engineSamples := state.engineSamples + 4 }
 
+-- Post-filter publication policy, separate from the linear response model.
+-- The native binary32 tolerance 2e-5f is no greater than this rational bound.
+def targetAge (age : Nat) (changed : Bool) : Nat :=
+  min 4096 ((if changed then 0 else age) + 1)
+
+def settledFiltered (raw target : Rat) (age : Nat) : Rat :=
+  if 4096 ≤ age ∧ magnitude (raw-target) ≤ 1/50000 then target else raw
+
+def rootPublication (raw target : Rat) (age : Nat) : Rat :=
+  clamp01 (settledFiltered raw target age)
+
+theorem changed_target_age_one (age : Nat) : targetAge age true = 1 := by
+  simp [targetAge]
+
+theorem no_early_settlement (raw target : Rat) (age : Nat) (h : age < 4096) :
+    rootPublication raw target age = clamp01 raw := by
+  simp [rootPublication, settledFiltered, Nat.not_le.mpr h]
+
+theorem eligible_target_exact (raw target : Rat) (age : Nat)
+    (ha : 4096 ≤ age) (he : magnitude (raw-target) ≤ 1/50000)
+    (ht : Unit target) : rootPublication raw target age = target := by
+  unfold rootPublication settledFiltered
+  simp only [ha, he, and_self, if_true]
+  unfold clamp01 Unit at *
+  split <;> (try split) <;> grind
+
+-- A pointwise correction bound, never a spectral attenuation theorem.
+theorem root_publication_correction (raw target : Rat) (age : Nat) :
+    -1/50000 ≤ rootPublication raw target age - clamp01 raw ∧
+    rootPublication raw target age - clamp01 raw ≤ 1/50000 := by
+  unfold rootPublication settledFiltered magnitude clamp01
+  split <;> (try split) <;> (try split) <;> (try split) <;> (try split) <;> grind
+
+-- Fresh pre-filter matrix target; subsequent filter publication is native-tested.
 theorem current_frame_uses_fresh_evaluation {v : Nat} (state : Runtime v)
     (eval seam : (Fin v → Rat) → (Fin v → Rat)) :
     (controlFrame state eval seam).target = seam (eval state.target) := rfl

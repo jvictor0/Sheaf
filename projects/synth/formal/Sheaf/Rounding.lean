@@ -1,4 +1,5 @@
 import Sheaf.FilterState
+import Sheaf.ResponseCore
 import Mathlib.Algebra.Order.Round
 import Mathlib.Analysis.SpecialFunctions.Log.Base
 import Mathlib.Data.Fin.VecNotation
@@ -65,12 +66,11 @@ theorem finite_binary32_rounding_error (x : ℝ) (hx : |x| ≤ 8) :
 noncomputable def smallestNormal : ℝ := (2:ℝ)^(-126:ℤ)
 noncomputable def coefficientList (s : Biquad) : List ℝ := [s.b0,s.b1,s.b2,s.a1,s.a2]
 
-theorem actual_source_coefficients_normal_and_bounded :
-    (∀ c ∈ coefficientList section0, smallestNormal ≤ |c| ∧ |c| ≤ 2) ∧
-    (∀ c ∈ coefficientList section1, smallestNormal ≤ |c| ∧ |c| ≤ 2) ∧
-    (∀ c ∈ coefficientList section2, smallestNormal ≤ |c| ∧ |c| ≤ 2) ∧
-    (∀ c ∈ coefficientList section3, smallestNormal ≤ |c| ∧ |c| ≤ 2) := by
-  norm_num [coefficientList, section0, section1, section2, section3, smallestNormal]
+theorem actual_source_coefficients_zero_or_normal_and_bounded :
+    ∀ s ∈ Sheaf.Aliasing.actualSections, ∀ c ∈ coefficientList s,
+      (c = 0 ∨ smallestNormal ≤ |c|) ∧ |c| ≤ 2 := by
+  norm_num [Sheaf.Aliasing.actualSections, coefficientList, section0, section1,
+    section2, section3, section4, section5, smallestNormal]
 
 noncomputable def flushSubnormal (x : ℝ) := if |x| < smallestNormal then 0 else x
 noncomputable def binary32RoundFtz (x : ℝ) := flushSubnormal (binary32Round x)
@@ -223,7 +223,7 @@ theorem executed_binary32_local_bound (s : Biquad) (input x1 x2 y1 y2 : ℝ)
   exact rounded_operation_residual s input x1 x2 y1 y2 _ bound
 
 -- Five products can each lose at most 2*smallestNormal to DAZ with
--- normal coefficients of magnitude at most two, plus one FTZ result.
+-- zero or normal coefficients of magnitude at most two, plus one FTZ result.
 -- Four add/subtract results each add one FTZ result allowance.
 theorem nine_operation_ftz_daz_residual (s : Biquad) (input x1 x2 y1 y2 ε : ℝ)
     (e : Fin 9 → ℝ)

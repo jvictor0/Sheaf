@@ -1,7 +1,9 @@
 # State, arithmetic, and composition contracts
 
 These models complement the fixed-frequency bounds in [ALIASING.md](ALIASING.md).
-They use the implementation's freshly exported binary32 coefficients and taps.
+The actual response and coefficient assertions use freshly exported binary32
+coefficients; the state stability budgets below are conditional generic algebra.
+The output FIR uses the actual exported taps.
 The claims are mathematical contracts with explicit finite-operand and state
 preconditions. They are not a compiler/hardware refinement proof or a proof
 that every possible Froggers patch stays inside every arithmetic guard.
@@ -14,8 +16,8 @@ Two executions receiving the same two new samples have identical input histories
 their remaining output difference follows a second-order recurrence, with
 rounding/upstream differences represented as a disturbance.
 
-For each of the four actual exported sections, the kernel verifies a positive
-energy form
+For a hypothetical biquad satisfying `FilterState.Certificate`, the kernel
+verifies a positive energy form
 
     E(x,y) = x² + a1*x*y + a2*y²
 
@@ -24,10 +26,12 @@ An unforced update satisfies **E(next,x) = a2*E(x,y)** exactly. Thus initial out
 history is forgotten exponentially, energy tends to zero, and after 512 aligned,
 unforced samples energy is at most `10^-49` of its initial value.
 
-This 512-sample theorem is about a single section's homogeneous error, after
-input histories agree. It is not a claim that the whole rounded cascade becomes
-exactly settled after its 512 priming calls. The native suite separately checks
-actual four-section DC priming against the rounded-coefficient steady response.
+This 512-sample theorem is conditional on that Certificate and concerns one
+section's homogeneous error after input histories agree. No delivered six-section
+stability instances are asserted. In particular the first-order section has
+a2=0 and does not satisfy this positive-definite two-state energy certificate.
+Actual Reset uses double DC-equilibrium calculations with float histories; it
+does not run 512 priming calls. Native tests cover initialization and settling.
 
 For arbitrary, possibly adversarial disturbances `|d[n]| ≤ η`, the model proves
 
@@ -61,16 +65,17 @@ The source biquad's five products and four add/subtract operations have an
 explicit operation trace. Its local residual is bounded by nine primitive-error
 allowances. Flush-to-zero (FTZ) and denormals-are-zero (DAZ) are modeled too:
 flushing changes a value by at most the smallest normal, `2^-126` for binary32.
-The actual source coefficients are proved normal and have magnitude at most two.
+All 30 actual source coefficients are proved zero or normal, with magnitude at
+most two. DAZ product bounds also apply to zero coefficients.
 With FTZ/DAZ, the nine-operation budget is
 
     9*2^-21 + 19*2^-126.
 
 The VST uses `juce::ScopedNoDenormals`; gradual and FTZ models are both available.
-The residual bound feeds the state-energy theorem, giving an accumulated-error
-bound, not just a one-operation estimate. Its uniform constants are conservative:
-they do not upgrade the earlier exact-real 60 dB frequency theorem into a 60 dB
-claim for every rounded trajectory or nonlinear patch.
+The residual bound feeds the state-energy theorem only under its explicit
+Certificate hypothesis. It supplies no actual six-section accumulated-error
+certificate and does not upgrade the exact-real 90 dB transfer theorem into a
+rounded-trajectory or nonlinear-patch guarantee.
 
 ## Actual output FIR and final clamp
 
@@ -120,8 +125,8 @@ create harmonics; that property does not establish spectral transparency.
 
 ## Negative controls and remaining boundary
 
-An unstable exported-section coefficient fails the stability certificate. A
-one-bit FIR snapshot mismatch fails the native coefficient gate. A native
+There are no concrete exported-section stability instances. A one-bit source or
+FIR snapshot mismatch fails the native coefficient gate. A native
 FE_TOWARDZERO run fails the nearest-even test. The Fuego bypass is the positive
 control for its discontinuity test.
 
@@ -130,3 +135,13 @@ time-varying effects, nonlinear spectral behavior, arbitrary nonfinite inputs,
 compiler lowering, and deadlines are not verified by these contracts. The model
 now makes the state/arithmetic/composition assumptions explicit rather than
 silently assuming all stages inherit a linear filter's guarantee.
+
+Root publication additionally restores an exact normalized matrix target after
+4096 unchanged-target engine samples, only within binary32 `2e-5f` of the
+unconditionally advanced raw filter. Exact phase-zero target changes reset age;
+Configure resets age to zero, and increment precedes eligibility. The rational
+publication model bounds correction relative to clamped filtered publication by
+1/50000 pointwise. This nonlinear policy has no universal 90 dB spectral claim;
+the unchanged linear certificate excludes settlement and limiting. Arbitrary
+histories are not guaranteed eligible by sample4096. Native boundary/reset,
+live-history and moving-image tests separately exercise the implementation.

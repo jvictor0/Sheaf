@@ -22,7 +22,7 @@ The model includes arbitrary scene/voice/gesture counts, normalized leaf edits,
 configured reset defaults with immediate current reset, signed crossfade sums, attenuverter rest conventions,
 one-way disconnected amounts and blend-mode override, optional gesture slots,
 view-pinned storage, conditional quiescence, the application Fuego seam and the
-four-to-one control/engine publication contract. These extend the fixed scene/lane
+four-to-one cadence and pre-filter interpolation contract. These extend the fixed scene/lane
 Smart Grid model and its single crossfade law. The schedule theorem is retained
 as a reusable result; this integration uses Sheaf's recursive evaluator with reuse of unchanged scalar depth leaves.
 
@@ -39,7 +39,10 @@ full UI command routing. The manifest states each correspondence boundary.
 At 48 kHz host cadence, the integrated Froggers engine runs at 192 kHz. Other
 host rates retain the ratio. Targets and the Fuego/UI seam advance at host cadence;
 Low-pass-filtered modulation sources and audio DSP advance at engine cadence. Root
-publication weights are 1/4, 1/2, 3/4 and 1. Filter history persists across callbacks and holds exactly while source advancement is disabled by stopped transport.
+pre-filter FOH weights are 1/4, 1/2, 3/4 and 1; a six-section low-pass then
+feeds normalized DSP publication. The fourth pre-filter value equals the matrix
+target, while the filtered cache need not. Source histories hold while stopped;
+root filters continue advancing for edits. Histories persist across callbacks.
 
 The Froggers integration models density quartiles over the number of target
 parameters receiving modulation, independently of source count per selected target.
@@ -64,3 +67,13 @@ concrete stability and initial-history decay, nearest-even binary32/binary64
 rounding with FTZ/DAZ, accumulated disturbances, the actual 287-tap output FIR,
 and nonlinear cell/jump contracts. Its guards and compiler-correspondence limits
 are explicit; it does not claim whole-instrument alias freedom.
+
+Root publication additionally restores an exact normalized matrix target after
+4096 unchanged-target engine samples, only within binary32 `2e-5f` of the
+unconditionally advanced raw filter. Exact phase-zero target changes reset age;
+Configure resets age to zero, and increment precedes eligibility. The rational
+publication model bounds correction relative to clamped filtered publication by
+1/50000 pointwise. This nonlinear policy has no universal 90 dB spectral claim;
+the unchanged linear certificate excludes settlement and limiting. Arbitrary
+histories are not guaranteed eligible by sample4096. Native boundary/reset,
+live-history and moving-image tests separately exercise the implementation.

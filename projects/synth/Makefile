@@ -123,7 +123,7 @@ $(BUILD_DIR)/MasterClock.o: src/MasterClock.cpp include/synth/MasterClock.hpp in
 $(LIB): $(OBJ)
 	ar rcs $@ $^
 
-$(TEST_BIN): tests/parameter_modulation_tests.cpp include/synth/RateSeparatedParameters.hpp include/synth/DspFilters.hpp include/synth/ParameterModulation.hpp include/synth/Json.hpp include/synth/PatchPersistence.hpp include/synth/MasterClock.hpp $(LIB)
+$(TEST_BIN): tests/parameter_modulation_tests.cpp include/synth/RateSeparatedParameters.hpp include/synth/DspRateConversion.hpp include/synth/DspFilters.hpp include/synth/ParameterModulation.hpp include/synth/Json.hpp include/synth/PatchPersistence.hpp include/synth/MasterClock.hpp $(LIB)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
 $(BUTTON_GRID_TEST_BIN): tests/button_grid_tests.cpp include/synth/ButtonGrid.hpp include/synth/AtomicColor.hpp include/synth/Color.hpp $(LIB)

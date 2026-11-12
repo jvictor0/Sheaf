@@ -30,10 +30,7 @@ structure Certificate (s : Biquad) : Prop where
   coercivity : 0 ≤ 4*(999/1000)*(s.a2-1/1000)-s.a1^2
   discriminant : 0 ≤ 4*s.a2-s.a1^2
 
-theorem section0_stability : Certificate section0 := by constructor <;> norm_num [section0]
-theorem section1_stability : Certificate section1 := by constructor <;> norm_num [section1]
-theorem section2_stability : Certificate section2 := by constructor <;> norm_num [section2]
-theorem section3_stability : Certificate section3 := by constructor <;> norm_num [section3]
+-- Conditional energy certificates below are not instances for the delivered six sections.
 
 theorem energy_coercive {s : Biquad} (h : Certificate s) (x y : ℝ) :
     (x^2+y^2)/1000 ≤ energy s x y := by

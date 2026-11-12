@@ -21,8 +21,8 @@ with tempfile.TemporaryDirectory(prefix='sheaf-alias-coefficients-') as director
         str(root / 'formal/support/source_filter_coefficients.cpp'), '-o', str(binary)], check=True)
     actual = json.loads(subprocess.check_output([str(binary)], text=True))
     fir_actual = json.loads(subprocess.check_output([str(binary), "fir"], text=True))
-if len(actual) != 4 or any(len(section) != 5 for section in actual):
-    raise SystemExit('Expected four five-coefficient source-filter sections')
+if len(actual) != 6 or any(len(section) != 5 for section in actual):
+    raise SystemExit('Expected six five-coefficient source-filter sections')
 
 snapshot = root / 'formal/source-filter-coefficients.json'
 model = root / 'formal/Sheaf/SourceFilterCoefficients.lean'
@@ -47,7 +47,7 @@ else:
         raise SystemExit('Source-filter coefficients changed; review the alias proof before refreshing the snapshot')
     if model.read_text() != expected_model:
         raise SystemExit('Lean source-filter coefficients differ from the exact C++ export')
-print('Verified 20 exact binary32 source-filter coefficients')
+print('Verified 30 exact binary32 source-filter coefficients')
 
 if len(fir_actual) != 287:
     raise SystemExit('Expected 287 output FIR coefficients')

@@ -16567,6 +16567,7 @@ TEST_CASE(rate_separated_parameters_interpolate_post_seam_once_per_frame) {
     auto& root = manager.CreateParameter(group, {.name = "root", .defaultValue = 0.2f});
     synth::RateSeparatedParameters bridge;
     bridge.Configure(group);
+    std::array<synth::RateConversionLowPass, 2> expected{ synth::RateConversionLowPass(.2f), synth::RateConversionLowPass(.2f) };
     int seams = 0;
     for (std::size_t phase = 0; phase < 4; ++phase) {
         bridge.ProcessSample(group, 0, phase, [&] {
@@ -16574,8 +16575,8 @@ TEST_CASE(rate_separated_parameters_interpolate_post_seam_once_per_frame) {
             root.ReplaceCachedKnobValue(0, 0.8f);
             root.ReplaceCachedKnobValue(1, 0.6f);
         });
-        REQUIRE_NEAR(root.CachedKnobValue(0), 0.2f + 0.6f * (phase + 1) / 4.0f, 1e-6f);
-        REQUIRE_NEAR(root.CachedKnobValue(1), 0.2f + 0.4f * (phase + 1) / 4.0f, 1e-6f);
+        REQUIRE_NEAR(root.CachedKnobValue(0), expected[0].Process(0.2f + 0.6f * (phase + 1) / 4.0f), 1e-6f);
+        REQUIRE_NEAR(root.CachedKnobValue(1), expected[1].Process(0.2f + 0.4f * (phase + 1) / 4.0f), 1e-6f);
     }
     REQUIRE_TRUE(seams == 1);
     REQUIRE_TRUE(bridge.MatrixFrames() == 1);
@@ -16585,37 +16586,110 @@ TEST_CASE(rate_separated_parameters_interpolate_post_seam_once_per_frame) {
             root.ReplaceCachedKnobValue(0, 0.8f);
             root.ReplaceCachedKnobValue(1, 0.6f);
         });
-    REQUIRE_NEAR(root.CachedKnobValue(0), 0.8f, 1e-6f);
+    for (std::size_t i = 8; i < 4104; ++i)
+        bridge.ProcessSample(group, i / 4, i % 4, [&] {
+            root.ReplaceCachedKnobValue(0, .8f);
+            root.ReplaceCachedKnobValue(1, .6f);
+        });
+    REQUIRE_NEAR(root.CachedKnobValue(0), 0.8f, 2e-5f);
     bridge.Configure(group);
     REQUIRE_TRUE(bridge.MatrixFrames() == 0);
     REQUIRE_TRUE(bridge.EngineSamples() == 0);
 }
 
-TEST_CASE(source_filter_state_decay_and_512_sample_priming_match_model) {
-    synth::RateSeparatedParameters::SourceFilter filter;
-    filter.SetCutoff(synth::RateSeparatedParameters::kSourceCutoff);
-    for (const auto* section : {&filter.m_biquad1, &filter.m_biquad2, &filter.m_biquad3, &filter.m_biquad4}) {
-        const double a1 = section->m_a1, a2 = section->m_a2;
-        const auto energy = [&](double x, double y) { return x*x+a1*x*y+a2*y*y; };
-        for (const auto initial : {std::array<double,2>{1,-1}, {0.25,0.75}, {-1,-1}}) {
-            double x = initial[0], y = initial[1];
-            const double initialEnergy = energy(x,y);
-            REQUIRE_TRUE(initialEnergy >= (x*x+y*y)/1000.0);
-            for (int n = 0; n < 512; ++n) {
-                const double next = -a1*x-a2*y;
-                REQUIRE_NEAR(energy(next,x), a2*energy(x,y), 1e-12);
-                y = x; x = next;
+// Diego's exact static controls require publication at sample 4096, while
+// every earlier sample and reactivated modulation must retain live filter history.
+TEST_CASE(rate_separated_exact_settlement_boundary_reset_and_live_history) {
+    for (float initial : {0.f,.25f,.5f,.75f,1.f}) {
+        synth::ParameterManager manager;
+        auto& group=manager.CreateGroup({.numVoices=1,.numModulators=0,.numScenes=2,.maxParameters=1});
+        auto& root=manager.CreateParameter(group,{.name="static root",.defaultValue=initial});
+        synth::RateSeparatedParameters bridge;
+        bridge.Configure(group);
+        synth::RateConversionLowPass oracle(initial);
+        float prior=initial;
+        std::size_t sample=0;
+        bool nonexactBoundary=false;
+        for (float target : {initial,0.f,.25f,.5f,.75f,1.f,0.f}) {
+            for (std::size_t n=0;n<4100;++n,++sample) {
+                const float input=n<4 ? prior+(target-prior)*float(n%4+1)/4 : target;
+                const float raw=oracle.Process(input);
+                bridge.ProcessSample(group,sample/4,sample%4,[&]{root.ReplaceCachedKnobValue(0,target);});
+                const float expected=n+1>=4096 && std::abs(double(raw)-double(target))<=2e-5f
+                    ? target : std::clamp(raw,0.f,1.f);
+                REQUIRE_TRUE(root.CachedKnobValue(0)==expected);
+                if(n==4094 && std::clamp(raw,0.f,1.f)!=target) nonexactBoundary=true;
+                if(n==4095) REQUIRE_TRUE(root.CachedKnobValue(0)==target);
             }
-            REQUIRE_TRUE(energy(x,y) <= initialEnergy*1e-49);
+            prior=target;
+        }
+        REQUIRE_TRUE(nonexactBoundary);
+        root.ReplaceCachedKnobValue(0,.75f);
+        bridge.Configure(group);
+        synth::RateConversionLowPass resetOracle(.75f);
+        for(std::size_t n=0;n<4096;++n) {
+            const float raw=resetOracle.Process(.75f);
+            bridge.ProcessSample(group,n/4,n%4,[&]{root.ReplaceCachedKnobValue(0,.75f);});
+            REQUIRE_TRUE(root.CachedKnobValue(0)==(n==4095?.75f:std::clamp(raw,0.f,1.f)));
         }
     }
-    constexpr float input = 0.5625f;
-    double dc = input;
-    for (const auto* section : {&filter.m_biquad1, &filter.m_biquad2, &filter.m_biquad3, &filter.m_biquad4})
-        dc *= (double(section->m_b0)+section->m_b1+section->m_b2)/(1.0+section->m_a1+section->m_a2);
-    float output = 0;
-    for (int n = 0; n < 512; ++n) output = filter.Process(input);
-    REQUIRE_NEAR(output, dc, 5e-6);
+}
+
+TEST_CASE(rate_separated_tiny_target_changes_revoke_settlement) {
+    synth::ParameterManager manager;
+    auto& group=manager.CreateGroup({.numVoices=1,.numModulators=0,.numScenes=2,.maxParameters=1});
+    auto& root=manager.CreateParameter(group,{.name="tiny modulation",.defaultValue=.5f});
+    synth::RateSeparatedParameters bridge;
+    bridge.Configure(group);
+    synth::RateConversionLowPass oracle(.5f);
+    for(std::size_t n=0;n<4096;++n) {
+        oracle.Process(.5f);
+        bridge.ProcessSample(group,n/4,n%4,[&]{root.ReplaceCachedKnobValue(0,.5f);});
+    }
+    float prior=.5f,target=.5f;
+    std::size_t nonexact=0;
+    for(std::size_t n=4096;n<4608;++n) {
+        if(n%4==0) target=std::nextafter(target,1.f);
+        const float raw=oracle.Process(prior+(target-prior)*float(n%4+1)/4);
+        bridge.ProcessSample(group,n/4,n%4,[&]{root.ReplaceCachedKnobValue(0,target);});
+        nonexact+=raw!=target;
+        REQUIRE_TRUE(root.CachedKnobValue(0)==std::clamp(raw,0.f,1.f));
+        if(n%4==3) prior=target;
+    }
+    REQUIRE_TRUE(nonexact>0);
+    std::cout << "  [tiny target raw witness] nonexact="<<nonexact<<"\n";
+}
+
+TEST_CASE(rate_separated_exact_settlement_finite_target_sweep) {
+    for(float initial : {0.f,1.f}) {
+        synth::ParameterManager manager;
+        auto& group=manager.CreateGroup({.numVoices=1,.numModulators=0,.numScenes=2,.maxParameters=1});
+        auto& root=manager.CreateParameter(group,{.name="sweep root",.defaultValue=initial});
+        synth::RateSeparatedParameters bridge;
+        std::size_t cases=0;
+        for(int k=0;k<=1024;++k) {
+            root.ReplaceCachedKnobValue(0,initial);
+            bridge.Configure(group);
+            const float target=float(k)/1024;
+            for(std::size_t n=0;n<4096;++n)
+                bridge.ProcessSample(group,n/4,n%4,[&]{root.ReplaceCachedKnobValue(0,target);});
+            REQUIRE_TRUE(root.CachedKnobValue(0)==target);
+            ++cases;
+        }
+        std::cout << "  [settlement finite sweep] initial="<<initial<<" exact_cases="<<cases<<"\n";
+    }
+}
+
+TEST_CASE(source_filter_dc_equilibrium_and_settled_endpoints) {
+    for (float initial : {0.0f, .25f, .5f, .75f, 1.0f}) {
+        synth::RateConversionLowPass filter(initial);
+        REQUIRE_NEAR(filter.Process(initial), initial, 2e-5);
+        for (float target : {0.0f, .25f, .5f, .75f, 1.0f}) {
+            float output = 0;
+            for (int n = 0; n < 4096; ++n) output = filter.Process(target);
+            REQUIRE_NEAR(output, target, 2e-5);
+        }
+    }
 }
 
 TEST_CASE(source_filter_native_rounding_residual_fits_state_disturbance_budget) {
@@ -16623,23 +16697,23 @@ TEST_CASE(source_filter_native_rounding_residual_fits_state_disturbance_budget) 
     REQUIRE_TRUE(std::numeric_limits<float>::digits == 24);
     REQUIRE_TRUE(std::fegetround() == FE_TONEAREST);
     synth::RateSeparatedParameters::SourceFilter filter;
-    filter.SetCutoff(synth::RateSeparatedParameters::kSourceCutoff);
+    auto sections = filter.Sections();
     double maximumResidual = 0;
     for (int n = 0; n < 20000; ++n) {
         float value = n < 512 ? 0.5625f : n % 4 == 0 ? 1.0f : n % 4 == 1 ? -1.0f :
             static_cast<float>(std::sin(0.071*n));
-        for (auto* section : {&filter.m_biquad1, &filter.m_biquad2, &filter.m_biquad3, &filter.m_biquad4}) {
-            const std::array<double,5> products{double(section->m_b0)*value,
-                double(section->m_b1)*section->m_x1, double(section->m_b2)*section->m_x2,
-                double(section->m_a1)*section->m_y1, double(section->m_a2)*section->m_y2};
+        for (auto& section : sections) {
+            const std::array<double,5> products{double(section.m_b0)*value,
+                double(section.m_b1)*section.m_x1, double(section.m_b2)*section.m_x2,
+                double(section.m_a1)*section.m_y1, double(section.m_a2)*section.m_y2};
             double absoluteProducts = 0;
             for (double product : products) absoluteProducts += std::abs(product);
             REQUIRE_TRUE(absoluteProducts+9.0/2097152.0 <= 8.0); // all partial sums, including prior rounding, fit the finite region
             const double exact = products[0]+products[1]+products[2]-products[3]-products[4];
-            const float oldInput = section->m_x1, oldOutput = section->m_y1;
-            const float actual = section->Process(value);
-            REQUIRE_TRUE(section->m_x1 == value && section->m_x2 == oldInput);
-            REQUIRE_TRUE(section->m_y1 == actual && section->m_y2 == oldOutput);
+            const float oldInput = section.m_x1, oldOutput = section.m_y1;
+            const float actual = section.Process(value);
+            REQUIRE_TRUE(section.m_x1 == value && section.m_x2 == oldInput);
+            REQUIRE_TRUE(section.m_y1 == actual && section.m_y2 == oldOutput);
             const double residual = std::abs(double(actual)-exact);
             REQUIRE_TRUE(std::isfinite(actual));
             REQUIRE_TRUE(residual <= 9.0/2097152.0+19.0*std::numeric_limits<float>::min());
@@ -16698,31 +16772,30 @@ TEST_CASE(binary32_native_ties_and_subnormal_handling_fit_rounding_model) {
     }
 }
 
-TEST_CASE(rate_separated_source_filter_matches_proved_response_band_bounds) {
+TEST_CASE(rate_separated_source_filter_dense_response_band_bounds) {
     synth::RateSeparatedParameters::SourceFilter filter;
-    filter.SetCutoff(synth::RateSeparatedParameters::kSourceCutoff);
     const auto power = [&](double frequency) {
         const double angle = 2.0 * std::numbers::pi * frequency / 192000.0;
         const double c = std::cos(angle), sn = std::sin(angle);
         const double c2 = std::cos(2*angle), s2 = std::sin(2*angle);
         double cascade = 1;
-        for (const auto* section : {&filter.m_biquad1, &filter.m_biquad2,
-                                    &filter.m_biquad3, &filter.m_biquad4}) {
-            const double nr = section->m_b0 + section->m_b1*c + section->m_b2*c2;
-            const double ni = section->m_b1*sn + section->m_b2*s2;
-            const double dr = 1 + section->m_a1*c + section->m_a2*c2;
-            const double di = section->m_a1*sn + section->m_a2*s2;
+        for (const auto& section : filter.Sections()) {
+            const double nr = section.m_b0 + section.m_b1*c + section.m_b2*c2;
+            const double ni = section.m_b1*sn + section.m_b2*s2;
+            const double dr = 1 + section.m_a1*c + section.m_a2*c2;
+            const double di = section.m_a1*sn + section.m_a2*s2;
             const double denominator = dr*dr + di*di;
             REQUIRE_TRUE(denominator > 0);
             cascade *= (nr*nr + ni*ni) / denominator;
         }
         return cascade;
     };
-    // Numerical cross-check of the formal continuous-band inequalities.
+    // Sampled numerical check; full continuous-band proof is a separate gate.
     // Existing time-domain tests independently exercise binary32 processing.
     for (int i = 0; i <= 8192; ++i) {
-        REQUIRE_TRUE(power(47000.0 + 49000.0 * i / 8192.0) <= 1.0/4000000.0);
-        REQUIRE_TRUE(power(1000.0 * i / 8192.0) >= 0.5);
+        REQUIRE_TRUE(power(24000.0 + 72000.0 * i / 8192.0) <= 1e-9);
+        REQUIRE_TRUE(power(20000.0 * i / 8192.0) >= 0.981);
+        REQUIRE_TRUE(power(20000.0 * i / 8192.0) <= 1.0001);
     }
     REQUIRE_TRUE(power(47000.0) <= power(1000.0) / 1000000.0);
 }
@@ -16755,6 +16828,212 @@ TEST_CASE(rate_separated_sources_reject_aliases_before_matrix_evaluation) {
     const double ultrasonic = measure(47000.0);
     REQUIRE_TRUE(audible > 0.27 && audible < 0.29);
     REQUIRE_TRUE(ultrasonic < audible * 0.001);
+}
+
+
+// Paired phases keep the 24k seam probe observable at matrix Nyquist.
+TEST_CASE(rate_separated_source_seam_paired_pass_stop_probes) {
+    // Stop probes span the whole claimed 24-96 kHz band, including the 48-96 kHz half.
+    for (double hz : {125., 1000., 10000., 18000., 20000., 24000., 25000., 28000., 30000., 36000., 40000.,
+                      47000., 48000., 55000., 60000., 72000., 84000., 96000.}) {
+        double inputEnergy = 0, outputEnergy = 0;
+        for (double offset : {0., std::numbers::pi / 2}) {
+            synth::ParameterManager manager;
+            auto& group = manager.CreateGroup({.numVoices=1, .numModulators=1,
+                .numScenes=2, .maxParameters=1});
+            float source = .5f;
+            std::array<float*,1> pointer{&source};
+            group.SetModulationSource(0, pointer, {.connected=true});
+            synth::RateSeparatedParameters bridge;
+            bridge.Configure(group);
+            for (std::size_t n=0; n<65536+98304; ++n) {
+                source = .5f + .4f*std::sin(2*std::numbers::pi*hz*n/192000 + offset);
+                bridge.ProcessSample(group,n/4,n%4,[&] {
+                    if (n >= 65536) {
+                        inputEnergy += std::pow(double(source)-.5,2);
+                        outputEnergy += std::pow(double(group.GetModulators().Value(0,0))-.5,2);
+                    }
+                });
+            }
+        }
+        REQUIRE_TRUE(inputEnergy > 1000);
+        const double db = 10*std::log10(outputEnergy/inputEnergy);
+        std::cout << "  [source seam] hz=" << hz << " db=" << db << "\n";
+        if (hz <= 20000) REQUIRE_TRUE(db >= -.1 && db <= .1);
+        else REQUIRE_TRUE(db <= -90);
+    }
+}
+
+// Each voice/modulator source owns one filter history, starts at its own DC
+// equilibrium (no startup dip), and freezes that history while sources are held.
+TEST_CASE(rate_separated_source_histories_independent_dc_started_and_frozen_while_held) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices=2, .numModulators=2,
+        .numScenes=2, .maxParameters=1});
+    std::array<float,4> sources{.3f, .7f, .15f, .9f}; // index = voice*2+mod
+    std::array<float*,2> mod0{&sources[0], &sources[2]}, mod1{&sources[1], &sources[3]};
+    group.SetModulationSource(0, mod0, {.connected=true});
+    group.SetModulationSource(1, mod1, {.connected=true});
+    synth::RateSeparatedParameters bridge;
+    bridge.Configure(group);
+    std::array<synth::RateConversionLowPass,4> oracle{
+        synth::RateConversionLowPass(sources[0]), synth::RateConversionLowPass(sources[1]),
+        synth::RateConversionLowPass(sources[2]), synth::RateConversionLowPass(sources[3])};
+    std::array<float,4> expected = sources;
+    const std::array<float,4> centre = sources;
+    const std::array<double,4> hz{700., 2300., 5100., 11000.};
+    std::size_t heldSteps = 0, movedWhileHeld = 0;
+    double startDeviation = 0;
+    for (std::size_t n = 0; n < 4096; ++n) {
+        const bool advance = n < 1024 || n >= 2048;
+        for (std::size_t i = 0; i < 4; ++i)
+            sources[i] = centre[i] + .08f * float(std::sin(2*std::numbers::pi*hz[i]*n/192000.0));
+        if (advance)
+            for (std::size_t i = 0; i < 4; ++i) expected[i] = oracle[i].Process(sources[i]);
+        bridge.ProcessSample(group, n/4, n%4, [] {}, advance);
+        for (std::size_t voice = 0; voice < 2; ++voice)
+            for (std::size_t mod = 0; mod < 2; ++mod)
+                REQUIRE_TRUE(group.GetModulators().Value(voice, mod) == expected[voice*2+mod]);
+        if (n < 8)
+            for (std::size_t i = 0; i < 4; ++i)
+                startDeviation = std::max(startDeviation, std::abs(double(expected[i]) - centre[i]));
+        if (!advance) {
+            ++heldSteps;
+            movedWhileHeld += sources[0] != expected[0];
+        }
+    }
+    // Positive controls: inputs moved during the hold, and the four sources differ.
+    REQUIRE_TRUE(heldSteps == 1024 && movedWhileHeld > 1000);
+    REQUIRE_TRUE(startDeviation < .01); // a zero-started filter would sit ~centre away
+    std::cout << "  [source histories] start_deviation=" << startDeviation << "\n";
+}
+
+TEST_CASE(rate_separated_root_prelimit_publication_steps_and_source_hold) {
+    synth::ParameterManager manager;
+    auto& group = manager.CreateGroup({.numVoices=2, .numModulators=1,
+        .numScenes=2, .maxParameters=1});
+    auto& root = manager.CreateParameter(group, {.name="root", .defaultValue=0.f});
+    float source0=.3f, source1=.7f;
+    std::array<float*,2> pointers{&source0,&source1};
+    group.SetModulationSource(0,pointers,{.connected=true});
+    synth::RateSeparatedParameters bridge;
+    bridge.Configure(group);
+    std::array<synth::RateConversionLowPass,2> expected;
+    double maxExcess=0, maxContribution=0;
+    std::size_t limitCount=0;
+    float held0=0,held1=0;
+    for (std::size_t n=0; n<3*8192; ++n) {
+        const float target=n<8192?1.f:0.f;
+        const float previous=n<4?0.f:n<8192?1.f:n<8196?1.f:0.f;
+        const float interpolated=previous+(target-previous)*float(n%4+1)/4;
+        const float before=expected[0].Process(interpolated);
+        const float other=expected[1].Process(.25f*interpolated);
+        bridge.ProcessSample(group,n/4,n%4,[&] {
+            root.ReplaceCachedKnobValue(0,target);
+            root.ReplaceCachedKnobValue(1,.25f*target);
+        }, n<64);
+        if(n==63) { held0=group.GetModulators().Value(0,0); held1=group.GetModulators().Value(1,0); }
+        if(n>=64) {
+            REQUIRE_TRUE(group.GetModulators().Value(0,0)==held0);
+            REQUIRE_TRUE(group.GetModulators().Value(1,0)==held1);
+        }
+        const float published=root.CachedKnobValue(0);
+        REQUIRE_TRUE(published>=0 && published<=1);
+        const std::size_t age=n<8192?n+1:n-8192+1;
+        const auto publication=[&](float raw,float value) {
+            return age>=4096 && std::abs(double(raw)-double(value))<=2e-5f
+                ? value : std::clamp(raw,0.f,1.f);
+        };
+        REQUIRE_TRUE(published==publication(before,target));
+        REQUIRE_TRUE(root.CachedKnobValue(1)==publication(other,.25f*target));
+        const double excess=std::max({0.,-double(before),double(before)-1});
+        limitCount+=excess>0;
+        maxExcess=std::max(maxExcess,excess);
+        maxContribution=std::max(maxContribution,std::abs(double(before)-published));
+        if(n==4095 || n==8192+4095) REQUIRE_NEAR(published,target,2e-5);
+    }
+    REQUIRE_TRUE(limitCount>0 && maxExcess>.01); // deliberate steps activate the limiter
+    std::cout << "  [root step] hits="<<limitCount<<" excess="<<maxExcess<<" contribution="<<maxContribution<<"\n";
+}
+
+
+TEST_CASE(rate_separated_root_filtered_foh_preserves_baseband_rejects_images) {
+    for (double hz : {125.,1000.,10000.,18000.,20000.}) {
+        synth::ParameterManager manager;
+        auto& group=manager.CreateGroup({.numVoices=1,.numModulators=0,.numScenes=2,.maxParameters=1});
+        auto& root=manager.CreateParameter(group,{.name="spectral root",.defaultValue=.5f});
+        synth::RateSeparatedParameters bridge;
+        bridge.Configure(group);
+        synth::RateConversionLowPass reference(.5f);
+        float previous=.5f,target=.5f;
+        std::array<double,4> rawSin{},rawCos{},beforeSin{},beforeCos{},publishedSin{},publishedCos{};
+        const std::array<double,4> lines{hz,48000-hz,48000+hz,96000-hz};
+        std::size_t hits=0;
+        double excess=0;
+        for(std::size_t n=0;n<65536+98304;++n) {
+            if(n%4==0) { previous=target; target=.5f+.4f*std::sin(2*std::numbers::pi*hz*n/192000); }
+            const float raw=previous+(target-previous)*float(n%4+1)/4;
+            const float before=reference.Process(raw);
+            bridge.ProcessSample(group,n/4,n%4,[&]{root.ReplaceCachedKnobValue(0,target);});
+            const float published=root.CachedKnobValue(0);
+            REQUIRE_TRUE(std::isfinite(before) && before>0.f && before<1.f);
+            REQUIRE_TRUE(published==before);
+            if(n<65536) continue;
+            const double contribution=std::abs(double(before)-published);
+            hits+=contribution>0;excess=std::max(excess,contribution);
+            for(std::size_t k=0;k<4;++k) {
+                const double angle=2*std::numbers::pi*lines[k]*n/192000;
+                const double sn=std::sin(angle),cs=std::cos(angle);
+                rawSin[k]+=(raw-.5)*sn;rawCos[k]+=(raw-.5)*cs;
+                beforeSin[k]+=(before-.5)*sn;beforeCos[k]+=(before-.5)*cs;
+                publishedSin[k]+=(published-.5)*sn;publishedCos[k]+=(published-.5)*cs;
+            }
+        }
+        std::array<double,4> raw{},before{},published{};
+        for(std::size_t k=0;k<4;++k) {
+            raw[k]=2*std::hypot(rawSin[k],rawCos[k])/98304;
+            before[k]=2*std::hypot(beforeSin[k],beforeCos[k])/98304;
+            published[k]=2*std::hypot(publishedSin[k],publishedCos[k])/98304;
+            REQUIRE_TRUE(std::isfinite(raw[k]) && std::isfinite(before[k]) && std::isfinite(published[k]));
+        }
+        REQUIRE_TRUE(raw[0]>.1 && before[0]>.1 && published[0]>.1);
+        const double gainDb=20*std::log10(before[0]/raw[0]);
+        REQUIRE_TRUE(gainDb>=-.1 && gainDb<=.1);
+        REQUIRE_TRUE(hits==0 && excess==0);
+        for(std::size_t k=0;k<4;++k) {
+            std::cout<<"  [root FOH] hz="<<hz<<" line="<<lines[k]<<" raw="<<raw[k]
+                <<" replay="<<before[k]<<" published="<<published[k]
+                <<" replay_dBc="<<20*std::log10(before[k]/before[0])
+                <<" published_dBc="<<20*std::log10(published[k]/published[0])
+                <<" gain_db="<<gainDb<<" hits="<<hits<<" excess="<<excess<<"\n";
+            if(k) {
+                REQUIRE_TRUE(raw[k]>1e-7);
+                REQUIRE_TRUE(before[k]/before[0]<=std::pow(10.,-90./20));
+                REQUIRE_TRUE(published[k]/published[0]<=std::pow(10.,-90./20));
+            }
+        }
+    }
+}
+
+TEST_CASE(rate_conversion_full_scale_steady_limit_contribution) {
+    for(double hz : {125.,1000.,10000.,18000.,20000.}) {
+        synth::RateConversionLowPass filter(.5f);
+        double maxExcess=0, sumContribution=0;
+        std::size_t hits=0;
+        for(std::size_t n=0;n<65536+98304;++n) {
+            const float input=.5f+.5f*std::sin(2*std::numbers::pi*hz*n/192000);
+            const float before=filter.Process(input);
+            if(n<65536) continue;
+            const double contribution=std::abs(double(before)-std::clamp(before,0.f,1.f));
+            hits+=contribution>0;
+            maxExcess=std::max(maxExcess,contribution);
+            sumContribution+=contribution;
+        }
+        // Twice mean absolute limiting contribution bounds every added line amplitude.
+        const double lineBound=2*sumContribution/98304;
+        std::cout<<"  [steady limit] hz="<<hz<<" hits="<<hits<<" excess="<<maxExcess<<" line_bound="<<lineBound<<"\n";
+        REQUIRE_TRUE(lineBound<=1e-5);
+    }
 }
 
 TEST_CASE(invalid_indices_throw) {
@@ -17533,4 +17812,58 @@ int main() {
         }
     }
     return failed == 0 ? 0 : 1;
+}
+
+TEST_CASE(rate_conversion_batch_matches_independent_biquad_oracle) {
+    synth::RateConversionLowPassBatch batch;
+    for (std::size_t count : {0u,1u,4u,15u,91u,15u,0u}) {
+        for (int epoch=0; epoch<2; ++epoch) {
+            std::vector<float> values(count), initials(count);
+            std::vector<synth::RateConversionLowPass> scalar;
+            std::vector<std::array<synth::BiquadSection,6>> oracle(count);
+            for(std::size_t lane=0;lane<count;++lane) {
+                initials[lane]=.1f+.7f*float(lane+epoch+1)/float(count+2);
+                scalar.emplace_back(initials[lane]);
+                float stage=initials[lane];
+                for(std::size_t i=0;i<6;++i) {
+                    const auto& c=synth::RateConversionLowPass::kCoefficients[i];
+                    auto& section=oracle[lane][i];
+                    section.m_b0=c.b0; section.m_b1=c.b1; section.m_b2=c.b2;
+                    section.m_a1=c.a1; section.m_a2=c.a2;
+                    const float output=static_cast<float>(double(stage)*((double(c.b0)+c.b1+c.b2)/(1.0+c.a1+c.a2)));
+                    section.m_x1=section.m_x2=stage;
+                    section.m_y1=section.m_y2=output;
+                    stage=output;
+                }
+            }
+            batch.Configure(initials);
+            REQUIRE_TRUE(batch.Size()==count);
+            for(std::size_t wrong : {count+1, count ? count-1 : count+2}) {
+                std::vector<float> bad(wrong);
+                bool rejected=false;
+                try { batch.Process(bad); } catch(const std::invalid_argument&) { rejected=true; }
+                REQUIRE_TRUE(rejected);
+            }
+            std::size_t perturbations=0;
+            for(std::size_t n=0;n<8192;++n) {
+                for(std::size_t lane=0;lane<count;++lane)
+                    values[lane]=.5f+.4f*std::sin(float(n)*.013f*float(count-lane)+float(lane));
+                if(n%127==0) std::reverse(values.begin(),values.end());
+                auto expected=values;
+                for(std::size_t lane=0;lane<count;++lane) {
+                    for(auto& section:oracle[lane]) expected[lane]=section.Process(expected[lane]);
+                    const float result=scalar[lane].Process(values[lane]);
+                    REQUIRE_TRUE(std::bit_cast<std::uint32_t>(result)==std::bit_cast<std::uint32_t>(expected[lane]));
+                }
+                batch.Process(values);
+                for(std::size_t lane=0;lane<count;++lane)
+                    REQUIRE_TRUE(std::bit_cast<std::uint32_t>(values[lane])==std::bit_cast<std::uint32_t>(expected[lane]));
+                if(n==4000 && count) {
+                    values.back()+=.001f;
+                    perturbations+=std::bit_cast<std::uint32_t>(values.back())!=std::bit_cast<std::uint32_t>(expected.back());
+                }
+            }
+            REQUIRE_TRUE(perturbations==(count?1u:0u));
+        }
+    }
 }
