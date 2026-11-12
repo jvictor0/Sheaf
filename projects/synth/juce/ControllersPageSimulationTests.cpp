@@ -60,7 +60,7 @@ std::string Describe(const synth::ui::Action& action)
     return action.name + "(" + action.value + ")";
 }
 
-// sru-48's structural criteria over the RESOLVED portable tree (task 6.3).
+// Structural criteria over the RESOLVED portable tree.
 // This is JUCE's half of the criteria: bounds are in the tree, so containment,
 // sibling overlap and spacing conformance are assertable without rendering,
 // and the simulation walks 250 randomly chosen states of the surface rather
@@ -75,11 +75,12 @@ bool EndsWith(const std::string& value, const std::string& suffix)
            value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-// The one node class the Controllers page positions out of flow: each row's
+// The Controllers page positions one node class out of flow: each row's
 // status dots are an explicitly bounded Draw hand-centred inside its cell, so
 // they consume no stacking space and a gap measured against them is
-// meaningless. Matched by suffix rather than enumerated because the simulation
-// adds and removes controllers, so the id set changes every step.
+// meaningless; matched by suffix because the simulation adds and removes
+// controllers, so that id set changes every step. The legend row's own
+// dot/word pairs are ordinary in-flow Row children and carry no exemption.
 std::set<std::string> OutOfFlowIds(const synth::ui::NodeTree& tree)
 {
     std::set<std::string> ids;
@@ -101,17 +102,17 @@ std::set<std::string> OutOfFlowIds(const synth::ui::NodeTree& tree)
 // that basis, not as a residual.
 //
 // The rest are the residual: controller-row endpoint selectors, the rename and
-// add fields, the variant selector, and the wizard's message/argument cells all
+// add fields, all
 // carry their only identifying string in a field neither backend renders
-// (design.md OQ5 retired `ComboBox::label`; `TextField::label` was never
+// (`ComboBox::label` was retired; `TextField::label` was never
 // rendered), and their tables have no column headings. Each is a recorded
-// Task 17 appearance question (tasks.md 6.5b), not a licence: a NEW uncaptioned
+// appearance question, not a licence: a NEW uncaptioned
 // control anywhere else on the page fails.
-// The simulation adds, removes, renames and blacklists controllers, so the id
+// The simulation adds, removes, and renames controllers, so the id
 // set changes every step and cannot be written out once. It is still derived
 // control by control rather than by suffix: for each controller row the
 // simulation has produced, the four cell ids that row is known to publish are
-// named through `NodeIds`, and the wizard's are enumerated per button. A
+// named through `NodeIds`. A
 // control that is NOT one of those -- a new field, a renamed one, anything the
 // page grows -- is examined and must carry a caption.
 //
@@ -128,24 +129,18 @@ std::map<std::string, std::string> UncaptionedResiduals(const synth::ui::NodeTre
         return FindNode(tree, synth::ui::NodeId(id)) != nullptr;
     };
 
-    if (present(synth::runtime_ui::NodeIds::kAddName))
-    {
-        except(synth::runtime_ui::NodeIds::kAddName,
-               "add-row name field; the add row publishes no column headings");
-    }
-    if (present(synth::runtime_ui::NodeIds::kAddKind))
-    {
-        except(synth::runtime_ui::NodeIds::kAddKind,
-               "add-row kind selector; same, via the retired ComboBox::label");
-    }
+    // The add row's Preset combo carries its own visible caption ("Preset"),
+    // so unlike the old bare name field and the retired-ComboBox::label kind
+    // selector it needs no exception here.
     for (std::size_t ix = 0; present(synth::runtime_ui::NodeIds::ControllerRow(ix)); ++ix)
     {
         const std::string row = "controller row " + std::to_string(ix);
+        // The rename draft moved into the expanded editor and carries its own
+        // visible caption ("Name") there, so it is not listed alongside the
+        // header's endpoint selectors below.
         for (const auto& [id, what] :
              {std::pair{synth::runtime_ui::NodeIds::ControllerInput(ix), "MIDI input selector"},
-              std::pair{synth::runtime_ui::NodeIds::ControllerOutput(ix), "MIDI output selector"},
-              std::pair{synth::runtime_ui::NodeIds::ControllerVariant(ix), "profile variant selector"},
-              std::pair{synth::runtime_ui::NodeIds::ControllerRenameDraft(ix), "rename field"}})
+              std::pair{synth::runtime_ui::NodeIds::ControllerOutput(ix), "MIDI output selector"}})
         {
             if (present(id))
             {
@@ -183,10 +178,9 @@ std::map<std::string, std::string> UncaptionedResiduals(const synth::ui::NodeTre
     return exceptions;
 }
 
-// The Controllers page and its wizard draw spacing from two named tables plus
-// the library's own. `TwisterFormLayout`'s 8 and 16 are restated rather than
-// named because that table is private to `src/ControllerWizard.cpp`; task 7.1
-// deletes it as the producer-side arithmetic sru-53 bans.
+// The Controllers page draws spacing from two named tables plus the
+// library's own. The last two values, 8 and 16, are restated as literals
+// with no named constant of their own.
 const std::vector<float>& ControllersPageSpacing()
 {
     static const std::vector<float> values{0.0f,
@@ -210,10 +204,10 @@ const std::vector<float>& ControllersPageSpacing()
 // rather than a convenience: **the Controllers page has no conforming form
 // control at all.** Every combo box, text field and toggle it renders -- the
 // row endpoint selectors, the rename field, the add row, and every mapping cell
-// -- is one of the named uncaptioned exceptions under tasks.md 6.5b. Requiring
+// -- is one of the named uncaptioned exceptions. Requiring
 // one examined control would not be a stricter test, it would be a permanently
-// red one, and the page passing it is the product decision task 6.5 exists to
-// make. (Asserting it was how this was established: the requirement was added,
+// red one, and the page passing it is the product decision still waiting to
+// be made. (Asserting it was how this was established: the requirement was added,
 // the whole 250-step run reported zero, and that is not a defect in the walk.)
 //
 // So the guard is on SUBJECTS instead of on conformers. `formControlsSeen`
@@ -362,7 +356,6 @@ std::vector<synth::ui::Action> CollectActions(const synth::ui::NodeTree& tree, i
             }
             synth::ui::Action dispatched = action;
             if (action.name == synth::runtime_ui::Actions::kEndpointSelect ||
-                action.name == synth::runtime_ui::Actions::kVariantSelect ||
                 action.name == synth::runtime_ui::Actions::kMappingFieldCommit)
             {
                 dispatched.value = action.value + ":" + option.id;
@@ -607,18 +600,20 @@ void RunGridSimulation()
                 double xMax = 0.0;
                 Require(surface.ViewModel().RowFieldValue(1, synth::MidiConfigSection::SystemMessages, rowIx,
                                                            synth::MidiMappingRowVM::Field::GridXMin, xMin),
-                        "grid simulation reads x min");
+                        "grid simulation reads start x");
                 Require(surface.ViewModel().RowFieldValue(1, synth::MidiConfigSection::SystemMessages, rowIx,
                                                            synth::MidiMappingRowVM::Field::GridXMax, xMax),
-                        "grid simulation reads x max");
+                        "grid simulation reads last x");
                 const int beforeInvalid = fixture.state.commits;
                 const std::string prefix = "1:system_messages:" + std::to_string(rowIx) + ":" +
                                            synth::runtime_ui::ControllersLayout::FieldToken(
                                                synth::MidiMappingRowVM::Field::GridXMax) +
                                            ":";
+                // A last x one below the block's own start x is below it (a
+                // last x AT the start is now a valid one-column block).
                 surface.DispatchAction(synth::ui::Action::WithValue(
                     synth::runtime_ui::Actions::kMappingFieldCommit,
-                    prefix + std::to_string(static_cast<int>(xMin))));
+                    prefix + std::to_string(static_cast<int>(xMin) - 1)));
                 Require(fixture.state.commits == beforeInvalid, "invalid grid rectangle committed");
                 surface.DispatchAction(synth::ui::Action::WithValue(
                     synth::runtime_ui::Actions::kMappingFieldCommit,
@@ -680,7 +675,7 @@ void RunGridSimulation()
 }
 
 // ---------------------------------------------------------------------------
-// Controller wizard parity (plan Task 16 / sru-33)
+// Add-row and lifecycle parity
 //
 // These cases drive the same stable node ids the Playwright acceptance suite
 // drives, but through JUCE components, and compare the rendered ids, labels,
@@ -690,64 +685,14 @@ void RunGridSimulation()
 // tests.
 // ---------------------------------------------------------------------------
 
-constexpr const char* kTwisterWizardId = "com.sheaf.midi-fighter-twister";
-constexpr const char* kTwisterDisplayName = "MIDI Fighter Twister";
-constexpr const char* kTwisterFormPrefix = "controller-wizard.twister.";
-
-// scw-3: the closed set of supported choices, in the order the form offers
-// them. Indexes into this array are what SelectOption() below selects.
-const std::array<const char*, 16> kTwisterChoiceLabels = {"Toggle Reset",
-                                                          "Hold Reset",
-                                                          "Toggle Random",
-                                                          "Hold Random",
-                                                          "Toggle Random Mod",
-                                                          "Hold Random Mod",
-                                                          "Toggle Gesture Select",
-                                                          "Hold Gesture Select",
-                                                          "Bank Select",
-                                                          "Next Bank",
-                                                          "Previous Bank",
-                                                          "Start",
-                                                          "Continue",
-                                                          "Stop",
-                                                          "Clock",
-                                                          "Scene Select"};
-
-const std::array<const char*, 6> kTwisterDefaultLabels = {
-    "Hold Reset", "Hold Random", "Hold Random Mod", "Next Bank", "Start", "Previous Bank"};
-
-constexpr const char* kEncoderSlotId = "controller-wizard.twister.encoder-slot";
-
-std::string TwisterButtonField(std::size_t buttonIx, const char* field)
-{
-    return std::string(kTwisterFormPrefix) + "button." + std::to_string(buttonIx) + "." + field;
-}
-
 juce::Rectangle<int> SurfaceBoundsOf(const juce::Component& surface, const juce::Component& child)
 {
     return surface.getLocalArea(&child, child.getLocalBounds());
 }
 
-std::string RenderedLabelText(const juce::Component& component)
-{
-    const auto* label = dynamic_cast<const juce::Label*>(&component);
-    return label != nullptr ? label->getText().toStdString() : std::string();
-}
-
-std::string RequireLabelText(synth_juce::PortableComponent& renderer,
-                             const std::string& id,
-                             const std::string& step)
-{
-    juce::Component* component = renderer.FindByNodeId(id);
-    Require(component != nullptr, step + ": " + id + " is not a rendered label");
-    Require(dynamic_cast<juce::Label*>(component) != nullptr,
-            step + ": " + id + " is not rendered as a Label");
-    return RenderedLabelText(*component);
-}
-
-// Generic portable/JUCE comparison run after every wizard step: every semantic
-// node is rendered, and its label, text, options, selected option, checked
-// state, enabled state, and declared size survive into JUCE unchanged.
+// Generic portable/JUCE comparison run after every simulation step: every
+// semantic node is rendered, and its label, text, options, selected option,
+// checked state, enabled state, and declared size survive into JUCE unchanged.
 void VerifyRendererParity(const synth::ui::NodeTree& tree,
                           synth_juce::PortableComponent& renderer,
                           const std::string& step)
@@ -835,21 +780,6 @@ void VerifyRendererParity(const synth::ui::NodeTree& tree,
     }
 }
 
-std::size_t CountNodes(const synth::ui::NodeTree& tree, const std::string& suffix)
-{
-    std::size_t count = 0;
-    for (const synth::ui::Node& node : tree.nodes)
-    {
-        if (node.id.value.rfind(kTwisterFormPrefix, 0) == 0 &&
-            node.id.value.size() >= suffix.size() &&
-            node.id.value.compare(node.id.value.size() - suffix.size(), suffix.size(), suffix) == 0)
-        {
-            ++count;
-        }
-    }
-    return count;
-}
-
 juce::TextButton& RequireButton(synth_juce::PortableComponent& renderer,
                                 const std::string& id,
                                 const std::string& step)
@@ -857,15 +787,6 @@ juce::TextButton& RequireButton(synth_juce::PortableComponent& renderer,
     auto* button = dynamic_cast<juce::TextButton*>(renderer.FindByNodeId(id));
     Require(button != nullptr, step + ": " + id + " is not a rendered button");
     return *button;
-}
-
-juce::TextEditor& RequireEditor(synth_juce::PortableComponent& renderer,
-                                const std::string& id,
-                                const std::string& step)
-{
-    auto* editor = dynamic_cast<juce::TextEditor*>(renderer.FindByNodeId(id));
-    Require(editor != nullptr, step + ": " + id + " is not a rendered text editor");
-    return *editor;
 }
 
 juce::ComboBox& RequireCombo(synth_juce::PortableComponent& renderer,
@@ -905,14 +826,6 @@ public:
         Tick(step);
     }
 
-    void TypeInto(const std::string& id, const std::string& text, const std::string& step)
-    {
-        juce::TextEditor& editor = RequireEditor(renderer_, id, step);
-        editor.setText(text, true);
-        editor.onReturnKey();
-        Tick(step);
-    }
-
     void SelectOption(const std::string& id, int optionIndex, const std::string& step)
     {
         RequireCombo(renderer_, id, step).setSelectedItemIndex(optionIndex, juce::sendNotificationSync);
@@ -926,101 +839,6 @@ private:
     synth_juce::PortableComponent renderer_;
 };
 
-void VerifyTwisterFormDefaults(WizardParityFixture& fixture, const std::string& expectedSlot,
-                               const std::string& step)
-{
-    const synth::ui::NodeTree tree = fixture.Harness().Surface().BuildTree();
-    Require(CountNodes(tree, "encoder-slot") == 1, step + ": expected exactly one Encoder Slot");
-    Require(CountNodes(tree, ".message") == 6, step + ": expected exactly six message controls");
-    Require(CountNodes(tree, ".argument") == 6, step + ": expected exactly six argument controls");
-    Require(RequireEditor(fixture.Renderer(), kEncoderSlotId, step).getText().toStdString() ==
-                expectedSlot,
-            step + ": Encoder Slot value mismatch");
-
-    // scw-3 / D8: the form names its own controls. The column headings state the
-    // physical CC range and each row names its side button with the same
-    // one-based wording Validate() uses when it refuses a field.
-    Require(RequireLabelText(fixture.Renderer(),
-                             std::string(kTwisterFormPrefix) + "column.0.heading", step) ==
-                "Left (CC 8-10)",
-            step + ": left column heading mismatch");
-    Require(RequireLabelText(fixture.Renderer(),
-                             std::string(kTwisterFormPrefix) + "column.1.heading", step) ==
-                "Right (CC 11-13)",
-            step + ": right column heading mismatch");
-
-    for (std::size_t buttonIx = 0; buttonIx < 6; ++buttonIx)
-    {
-        Require(RequireLabelText(fixture.Renderer(), TwisterButtonField(buttonIx, "label"), step) ==
-                    "Button " + std::to_string(buttonIx + 1),
-                step + ": button label mismatch for button " + std::to_string(buttonIx));
-        juce::ComboBox& message =
-            RequireCombo(fixture.Renderer(), TwisterButtonField(buttonIx, "message"), step);
-        Require(message.getNumItems() == static_cast<int>(kTwisterChoiceLabels.size()),
-                step + ": message choice count mismatch");
-        for (int optionIx = 0; optionIx < static_cast<int>(kTwisterChoiceLabels.size()); ++optionIx)
-        {
-            Require(message.getItemText(optionIx).toStdString() ==
-                        kTwisterChoiceLabels[static_cast<std::size_t>(optionIx)],
-                    step + ": message choice label mismatch");
-        }
-        Require(message.getText().toStdString() == kTwisterDefaultLabels[buttonIx],
-                step + ": default message mismatch for button " + std::to_string(buttonIx));
-        Require(!RequireEditor(fixture.Renderer(), TwisterButtonField(buttonIx, "argument"), step)
-                     .isEnabled(),
-                step + ": default argument should be disabled for button " + std::to_string(buttonIx));
-    }
-}
-
-// scw-3 / sru-32: buttons 0-2 render in the first column and 3-5 in the second,
-// mirroring the browser acceptance suite's bounding-box assertions.
-void VerifyTwisterColumnGeometry(WizardParityFixture& fixture, const std::string& step)
-{
-    std::array<juce::Rectangle<int>, 6> boxes{};
-    for (std::size_t buttonIx = 0; buttonIx < boxes.size(); ++buttonIx)
-    {
-        juce::ComboBox& message =
-            RequireCombo(fixture.Renderer(), TwisterButtonField(buttonIx, "message"), step);
-        boxes[buttonIx] = SurfaceBoundsOf(fixture.Renderer(), message);
-    }
-    for (std::size_t row = 1; row < 3; ++row)
-    {
-        Require(boxes[row].getX() == boxes[0].getX(), step + ": left column is not x-aligned");
-        Require(boxes[3 + row].getX() == boxes[3].getX(), step + ": right column is not x-aligned");
-        Require(boxes[row].getY() > boxes[row - 1].getY(), step + ": left column rows do not stack");
-        Require(boxes[3 + row].getY() > boxes[2 + row].getY(),
-                step + ": right column rows do not stack");
-    }
-    for (std::size_t row = 0; row < 3; ++row)
-    {
-        Require(boxes[3 + row].getX() >= boxes[row].getRight(),
-                step + ": right column overlaps the left column");
-        Require(boxes[3 + row].getY() == boxes[row].getY(),
-                step + ": paired column rows are not aligned");
-    }
-
-    // sru-33: BuildWizardFormTree() places the page's own chrome below the
-    // height the form reports, so the form's columns must not overlap it.
-    int columnsBottom = 0;
-    for (std::size_t column = 0; column < 2; ++column)
-    {
-        const std::string columnId =
-            std::string(kTwisterFormPrefix) + "column." + std::to_string(column);
-        juce::Component* section = fixture.Renderer().FindByNodeId(columnId);
-        Require(section != nullptr, step + ": " + columnId + " is not rendered");
-        columnsBottom = std::max(columnsBottom, SurfaceBoundsOf(fixture.Renderer(), *section).getBottom());
-    }
-    for (const char* chromeId : {synth::runtime_ui::NodeIds::kWizardBack,
-                                 synth::runtime_ui::NodeIds::kWizardCancel,
-                                 synth::runtime_ui::NodeIds::kWizardSubmit})
-    {
-        Require(SurfaceBoundsOf(fixture.Renderer(),
-                                RequireButton(fixture.Renderer(), chromeId, step))
-                        .getY() >= columnsBottom,
-                step + ": page chrome overlaps the form");
-    }
-}
-
 const synth::MidiControllerSlot& RequireController(
     const synth_runtime::test::TwisterWizardHarness& harness,
     std::size_t index,
@@ -1031,323 +849,127 @@ const synth::MidiControllerSlot& RequireController(
     return harness.Instrument().controllers[index];
 }
 
-void RunControllerWizardParitySimulation()
-{
-    namespace NodeIds = synth::runtime_ui::NodeIds;
-
-    WizardParityFixture fixture;
-    auto& harness = fixture.Harness();
-
-    // sru-32: no candidate leaves Configuration Wizard visible but disabled and
-    // explains why, and the disabled action dispatches nothing.
-    Require(!RequireButton(fixture.Renderer(), NodeIds::kWizardLaunch, "no candidate").isEnabled(),
-            "no candidate leaves Configuration Wizard disabled");
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::kAvailableEmpty, "no candidate") ==
-                "No recognized unconfigured controller pair is present",
-            "no candidate explains the disabled action");
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::kAvailableHeading, "no candidate") ==
-                "Available controllers",
-            "the available controllers area renders its heading");
-    fixture.Click(NodeIds::kWizardLaunch, "disabled launch");
-    Require(fixture.Exists(NodeIds::kWizardLaunch) && !fixture.Exists(kEncoderSlotId),
-            "a disabled Configuration Wizard opens no session");
-
-    // scw-2 / sru-32: one recognized unclaimed pair is available and opens its
-    // form directly.
-    harness.AddTwisterPair(1);
-    fixture.Tick("one candidate");
-    Require(RequireButton(fixture.Renderer(), NodeIds::kWizardLaunch, "one candidate").isEnabled(),
-            "one candidate enables Configuration Wizard");
-    // D8: the row names the recognized controller by its registry descriptor and
-    // its paired endpoints by their device names, in two separate rendered
-    // nodes. Both hosts are pinned to the same two strings.
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::AvailableName(0), "one candidate") ==
-                kTwisterDisplayName,
-            "the available row names the recognized controller");
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::AvailableRow(0) + ".endpoints",
-                             "one candidate")
-                .find(synth_runtime::test::kTwisterDeviceName) != std::string::npos,
-            "the available row names the recognized pair's endpoints");
-
-    fixture.Click(NodeIds::kWizardLaunch, "unique candidate opens");
-    Require(!fixture.Exists(NodeIds::kWizardChooser), "a unique candidate skips the chooser");
-    Require(!fixture.Exists(NodeIds::kWizardLaunch), "an open form exposes no second launch action");
-    VerifyTwisterFormDefaults(fixture, "0", "unique candidate form");
-    VerifyTwisterColumnGeometry(fixture, "unique candidate form");
-    Require(fixture.Exists(NodeIds::kWizardIgnore), "the fast path still exposes Ignore");
-
-    // sru-34: a disabled argument control mutates no form state.
-    juce::TextEditor& disabledArgument =
-        RequireEditor(fixture.Renderer(), TwisterButtonField(0, "argument"), "disabled argument");
-    disabledArgument.setText("42", true);
-    disabledArgument.onReturnKey();
-    fixture.Tick("disabled argument");
-    Require(RequireEditor(fixture.Renderer(), TwisterButtonField(0, "argument"), "disabled argument")
-                    .getText() == juce::String("0"),
-            "a disabled argument control does not mutate form state");
-
-    // Retained JUCE controls must follow the portable tree, not their own last
-    // user input: cancelling and relaunching opens a fresh form whose selected
-    // options and text come back to the defaults on the same components.
-    fixture.TypeInto(kEncoderSlotId, "9", "cancelled form edits slot");
-    fixture.SelectOption(TwisterButtonField(0, "message"), 8, "cancelled form edits message");
-    fixture.Click(NodeIds::kWizardCancel, "cancel form");
-    Require(harness.Commits() == 0, "Cancel commits nothing");
-    fixture.Click(NodeIds::kWizardLaunch, "relaunch after cancel");
-    VerifyTwisterFormDefaults(fixture, "0", "relaunched form");
-
-    fixture.Click(NodeIds::kWizardSubmit, "unique candidate submit");
-    Require(harness.Commits() == 1 && harness.Saves() == 1,
-            "an accepted Submit commits once and requests one save");
-    {
-        const synth::MidiControllerSlot& installed = RequireController(harness, 0, "submitted record");
-        Require(installed.disposition == synth::MidiControllerDisposition::Active,
-                "Submit installs an Active record");
-        Require(installed.name == kTwisterDisplayName, "Submit uses the descriptor display name");
-        Require(installed.wizardId.has_value() && *installed.wizardId == kTwisterWizardId,
-                "Submit persists the descriptor wizard id");
-        Require(installed.input.identifier == "twister-in-1" &&
-                    installed.output.identifier == "twister-out-1",
-                "Submit assigns both discovered endpoints");
-    }
-    Require(harness.Status() == std::string("Configured ") + kTwisterDisplayName,
-            "an accepted Submit reports the configured controller through the host status callback");
-    Require(harness.Cache().Discovery().available.empty(),
-            "the configured pair is no longer an available candidate");
-    Require(fixture.Exists(NodeIds::ControllerReconfigure(0)) &&
-                fixture.Exists(NodeIds::ControllerBlacklist(0)),
-            "a resolved wizard id offers Reconfigure and Blacklist");
-
-    // scw-4: Reconfigure preserves record identity and offers no Ignore.
-    fixture.Click(NodeIds::ControllerReconfigure(0), "reconfigure opens");
-    VerifyTwisterFormDefaults(fixture, "0", "reconfigure seeds exact shape");
-    Require(!fixture.Exists(NodeIds::kWizardIgnore), "reconfiguration offers no Ignore");
-    fixture.TypeInto(kEncoderSlotId, "4", "reconfigure edits slot");
-    fixture.Click(NodeIds::kWizardSubmit, "reconfigure submit");
-    {
-        const synth::MidiControllerSlot& reconfigured =
-            RequireController(harness, 0, "reconfigured record");
-        Require(harness.Instrument().controllers.size() == 1,
-                "reconfiguration keeps one record in the same position");
-        Require(reconfigured.name == kTwisterDisplayName &&
-                    reconfigured.wizardId.has_value() &&
-                    reconfigured.input.identifier == "twister-in-1" &&
-                    reconfigured.output.identifier == "twister-out-1",
-                "reconfiguration preserves name, endpoints, and wizard id");
-    }
-
-    // sru-4 / D6: blacklisting retains the profile as dormant seed data and the
-    // row loses its live endpoint and mapping controls.
-    fixture.Click(NodeIds::ControllerBlacklist(0), "blacklist");
-    {
-        const synth::MidiControllerSlot& blacklisted =
-            RequireController(harness, 0, "blacklisted record");
-        Require(blacklisted.disposition == synth::MidiControllerDisposition::Blacklisted,
-                "Blacklist changes the disposition");
-        Require(blacklisted.dormantConfig.has_value(),
-                "Blacklist retains the prior profile as dormant seed data");
-    }
-    Require(!fixture.Exists(NodeIds::ControllerInput(0)) &&
-                !fixture.Exists(NodeIds::ControllerOutput(0)) &&
-                !fixture.Exists(NodeIds::ControllerDisclosure(0)),
-            "a blacklisted row exposes no live endpoint selectors or mapping disclosure");
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::ControllerBadge(0), "blacklist")
-                .find("Blacklisted") != std::string::npos,
-            "a blacklisted row shows its badge");
-
-    // The dormant profile is observable through Configure seeding slot 4.
-    fixture.Click(NodeIds::ControllerConfigure(0), "blacklisted configure");
-    VerifyTwisterFormDefaults(fixture, "4", "blacklisted configure seeds dormant slot");
-    fixture.Click(NodeIds::kWizardSubmit, "blacklisted configure submit");
-    Require(RequireController(harness, 0, "reactivated record").disposition ==
-                synth::MidiControllerDisposition::Active,
-            "Configure returns a blacklisted record to Active");
-
-    // D8: rename is an inline draft plus a commit action; delete is immediate.
-    fixture.TypeInto(NodeIds::ControllerRenameDraft(0), "Studio Twister", "rename draft");
-    fixture.Click(NodeIds::ControllerRename(0), "rename commit");
-    Require(RequireController(harness, 0, "renamed record").name == "Studio Twister",
-            "rename commits the inline draft");
-    fixture.Click(NodeIds::ControllerDelete(0), "delete");
-    Require(harness.Instrument().controllers.empty(), "delete removes the record immediately");
-    Require(harness.Cache().Discovery().available.size() == 1,
-            "deleting the record restores the available candidate");
-
-    // sru-4: Ignore persists an inert record without an active profile, and
-    // removing it returns the pair to Available controllers.
-    fixture.Click(NodeIds::AvailableIgnore(0), "ignore available row");
-    {
-        const synth::MidiControllerSlot& ignored = RequireController(harness, 0, "ignored record");
-        Require(ignored.disposition == synth::MidiControllerDisposition::Blacklisted,
-                "Ignore persists a Blacklisted record");
-        Require(!ignored.dormantConfig.has_value(),
-                "Ignore stores no dormant profile");
-        Require(ignored.input.identifier == "twister-in-1" &&
-                    ignored.output.identifier == "twister-out-1",
-                "Ignore records the concrete endpoint identities");
-    }
-    Require(harness.Cache().Discovery().available.empty(), "an ignored pair stops warning");
-    fixture.Click(NodeIds::ControllerRemoveBlacklist(0), "remove from blacklist");
-    Require(harness.Instrument().controllers.empty(), "Remove from blacklist deletes the record");
-    Require(harness.Cache().Discovery().available.size() == 1,
-            "Remove from blacklist restores the available candidate");
-
-    // scw-2 / sru-32: two candidates open a chooser that identifies both pairs.
-    harness.AddTwisterPair(2);
-    fixture.Tick("two candidates");
-    Require(harness.Cache().Discovery().available.size() == 2,
-            "two present pairs classify as two candidates");
-    fixture.Click(NodeIds::kWizardLaunch, "chooser opens");
-    Require(!fixture.Exists(kEncoderSlotId), "multiple candidates require a selection first");
-    const std::string secondChoiceId =
-        NodeIds::WizardChooserCandidate(harness.Cache().Discovery().available[1]);
-    Require(RequireButton(fixture.Renderer(), secondChoiceId, "chooser")
-                    .getButtonText()
-                    .toStdString()
-                    .find("twister-in-2") != std::string::npos,
-            "chooser rows expose their paired endpoint identifiers");
-    fixture.Click(secondChoiceId, "chooser selects second candidate");
-    VerifyTwisterFormDefaults(fixture, "0", "chosen candidate form");
-    fixture.Click(NodeIds::kWizardSubmit, "chosen candidate submit");
-    Require(RequireController(harness, 0, "chosen record").input.identifier == "twister-in-2",
-            "the chooser opens only the selected candidate");
-
-    // scw-4: the second record takes the smallest free numeric suffix.
-    fixture.Click(NodeIds::kWizardLaunch, "remaining candidate opens");
-    fixture.Click(NodeIds::kWizardSubmit, "remaining candidate submit");
-    Require(RequireController(harness, 1, "suffixed record").name ==
-                std::string(kTwisterDisplayName) + " 2",
-            "a duplicate display name takes the smallest free suffix");
-
-    std::cout << "ControllerWizardParitySimulation passed\n";
-}
-
-// sru-4: a manually added record carries no persisted wizard id, so the
-// registry-gated lifecycle actions are not offered even though its kind is the
-// same hardware kind the wizard installs. This is the negative control for
-// observing an installed wizard id through Reconfigure/Blacklist.
+// A manually added record carries no persisted wizard id, so it keeps the
+// row's non-registry-gated lifecycle actions (Rename, Delete) and none of the
+// wizard id it never had.
 void RunManualRecordSimulation()
 {
     namespace NodeIds = synth::runtime_ui::NodeIds;
 
     WizardParityFixture fixture;
-    fixture.TypeInto(NodeIds::kAddName, "Hand Wired", "manual add name");
-    fixture.SelectOption(NodeIds::kAddKind, 1, "manual add kind");
-    Require(RequireCombo(fixture.Renderer(), NodeIds::kAddKind, "manual add kind")
-                    .getText() == juce::String("MF Twister"),
-            "the add-controller kind selector offers the Twister hardware kind");
+    // Preset options: the library registry (MIDI Fighter Twister, Launchpad,
+    // WRLD.Bldr) then one plain Custom entry -- so Custom is index 3. There
+    // is one Custom choice, not one per kind: every Custom row is the
+    // Generic kind, so it cannot hold a grid mapping, a Launchpad pad
+    // position or model, or a Twister side-button system row -- those still
+    // need a row added from the matching descriptor.
+    fixture.SelectOption(NodeIds::kAddPreset, 3, "manual add preset");
+    Require(RequireCombo(fixture.Renderer(), NodeIds::kAddPreset, "manual add preset")
+                    .getText() == juce::String("Custom"),
+            "the add-row Preset combo offers a plain Custom entry after the registry");
     fixture.Click(NodeIds::kAddButton, "manual add commit");
 
     const synth::MidiControllerSlot& manual =
         RequireController(fixture.Harness(), 0, "manual record");
-    Require(manual.name == "Hand Wired" && manual.kind == synth::MidiProfileKind::MfTwister,
-            "the manual record keeps its name and chosen kind");
+    Require(manual.name == "Custom" && manual.kind == synth::MidiProfileKind::Generic,
+            "a Custom add is named Custom and is always the Generic kind");
     Require(!manual.wizardId.has_value(), "a manual record carries no wizard id");
     Require(fixture.Exists(NodeIds::ControllerRename(0)) &&
                 fixture.Exists(NodeIds::ControllerDelete(0)),
-            "a manual record keeps Rename and Delete");
-    Require(!fixture.Exists(NodeIds::ControllerReconfigure(0)) &&
-                !fixture.Exists(NodeIds::ControllerBlacklist(0)) &&
-                !fixture.Exists(NodeIds::ControllerConfigure(0)),
-            "a manual record is offered no registry-gated wizard action");
+            "a manual record keeps Rename (in its expanded editor) and Delete");
 
     std::cout << "ControllerWizardManualRecordSimulation passed\n";
 }
 
-// scw-4: a stored profile the form cannot represent opens the wizard defaults
-// with a destructive-replacement warning, and Submit replaces the whole profile
-// instead of merging the hand-edited shape.
-void RunIncompatibleReconfigureSimulation()
+// The device label (ControllerDeviceLabel) shows the descriptor's whole
+// display name at kControllerDeviceWidth. The portable layout system has no
+// text-measured extent (Extent::Intrinsic is a generic layout mode, not font
+// metrics -- it stays identical across the JUCE, browser and headless
+// backends), so the width is a fixed constant this test derives from real
+// measurement instead of a guess: every library device name
+// (MakeControllerWizardRegistry's own empty-catalog fallback, the ids every
+// app without a device of that kind gets) must fit at the exact font and
+// size PortableJuceBackend gives a Label node
+// (juce::Font(juce::FontOptions(pagestyle::kDefaultTextSize))). Only this
+// JUCE-linked suite can measure real glyph widths; the headless
+// controllers_page_ui_tests cannot.
+void RunDeviceLabelWidthCheck()
 {
-    namespace NodeIds = synth::runtime_ui::NodeIds;
-    constexpr synth::MidiConfigSection kSystemMessages = synth::MidiConfigSection::SystemMessages;
-
-    WizardParityFixture fixture;
-    auto& harness = fixture.Harness();
-    harness.AddTwisterPair(1);
-    fixture.Tick("incompatible fixture");
-    fixture.Click(NodeIds::kWizardLaunch, "incompatible base form");
-    fixture.Click(NodeIds::kWizardSubmit, "incompatible base submit");
-    Require(RequireController(harness, 0, "generated record").config.systemMessages.size() == 6,
-            "the generated profile carries exactly six side associations");
-
-    // The Twister's six side buttons are a closed set, so dropping one through
-    // the low-level editor is how this page produces a shape the form cannot
-    // represent.
-    fixture.Click(NodeIds::ControllerDisclosure(0), "open low-level editor");
-    fixture.Click(NodeIds::SectionToggle(0, kSystemMessages), "open system messages");
-    fixture.Click(NodeIds::MappingDelete(0, kSystemMessages, 0), "drop one side association");
-    Require(RequireController(harness, 0, "hand-edited record").config.systemMessages.size() == 5,
-            "the hand edit leaves five side associations");
-
-    fixture.Click(NodeIds::ControllerReconfigure(0), "incompatible reconfigure opens");
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::kWizardWarning, "incompatible reconfigure")
-                .find("replaces the whole profile") != std::string::npos,
-            "an unrepresentable profile warns that Submit replaces the whole profile");
-    VerifyTwisterFormDefaults(fixture, "0", "incompatible reconfigure opens defaults");
-    fixture.Click(NodeIds::kWizardSubmit, "incompatible reconfigure submit");
-    Require(RequireController(harness, 0, "replaced record").config.systemMessages.size() == 6,
-            "Submit replaces the hand-edited profile with the complete generated shape");
-
-    std::cout << "ControllerWizardIncompatibleReconfigureSimulation passed\n";
+    const juce::Font font{juce::FontOptions(synth::pagestyle::kDefaultTextSize)};
+    const std::vector<synth::ControllerWizardDescriptor> libraryRegistry =
+        synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{});
+    Require(!libraryRegistry.empty(), "the library registry has at least one device to measure");
+    for (const synth::ControllerWizardDescriptor& descriptor : libraryRegistry)
+    {
+        juce::GlyphArrangement glyphs;
+        glyphs.addLineOfText(font, juce::String(descriptor.displayName), 0.0f, 0.0f);
+        const float measured = glyphs.getBoundingBox(0, -1, true).getWidth();
+        Require(measured <= synth::runtime_ui::ControllersLayout::kControllerDeviceWidth,
+                "library device name \"" + descriptor.displayName + "\" (" + std::to_string(measured) +
+                    "px) must fit inside kControllerDeviceWidth (" +
+                    std::to_string(synth::runtime_ui::ControllersLayout::kControllerDeviceWidth) + "px)");
+    }
+    std::cout << "DeviceLabelWidthCheck passed\n";
 }
 
-// sru-32 / D5: a refused Submit keeps every entered value, commits nothing, and
-// saves nothing -- both for an invalid form and for a candidate whose endpoints
-// disappeared while the form was open.
-void RunControllerWizardRefusalSimulation()
+// The preset-diverged notice (ControllersLayout::kPresetNoticeText) is a
+// fixed sentence, not a per-device name, so this measures it once -- but
+// against the notice Label's own rendered width, read back off a real
+// diverged row's built tree, not the raw kControllerNoticeWidth constant. A
+// constant the check reads directly proves only that the constant fits
+// itself; it says nothing about the width the row-building call site at
+// ControllersPageUI.hpp actually hands the Label, so swapping that call
+// site's width argument for a narrower one would leave this check green
+// while the rendered sentence overflows. Installing the row through the same
+// InstallDescriptorProfile call Restore itself uses, diverging one of its
+// mappings, and reading the notice node's bounds is what ties the two
+// together.
+void RunPresetNoticeWidthCheck()
 {
-    namespace NodeIds = synth::runtime_ui::NodeIds;
-    constexpr const char* kOverflowArgument = "999999999999999999999999999999999999999";
+    synth_runtime::test::ControllersHarnessFixture fixture;
+    fixture.state.instrument.controllers.clear();
+    fixture.state.connection.controllers.clear();
 
-    WizardParityFixture fixture;
-    auto& harness = fixture.Harness();
-    harness.AddTwisterPair(1);
-    fixture.Tick("refusal fixture");
-    Require(!harness.NoteDeviceListChanged(),
-            "an unchanged device list never recomputes the cached classification");
+    const std::vector<synth::ControllerWizardDescriptor> registry =
+        synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{});
+    const auto descriptorIt =
+        std::find_if(registry.begin(), registry.end(), [](const synth::ControllerWizardDescriptor& d) {
+            return d.kind == synth::MidiProfileKind::MfTwister;
+        });
+    Require(descriptorIt != registry.end(), "the library registry carries a Twister descriptor");
 
-    fixture.Click(NodeIds::kWizardLaunch, "refusal form opens");
-    fixture.TypeInto(kEncoderSlotId, "4", "refusal edits slot");
-    fixture.SelectOption(TwisterButtonField(0, "message"), 8, "refusal selects Bank Select");
-    Require(RequireEditor(fixture.Renderer(), TwisterButtonField(0, "argument"), "refusal")
-                .isEnabled(),
-            "Bank Select enables its per-button argument");
-    fixture.TypeInto(TwisterButtonField(0, "argument"), "7", "refusal sets bank argument");
-    fixture.SelectOption(TwisterButtonField(1, "message"), 15, "refusal selects Scene Select");
-    fixture.TypeInto(TwisterButtonField(1, "argument"), kOverflowArgument, "refusal overflows");
+    synth::MidiControllerSlot slot;
+    slot.name = "twister";
+    slot.input = {"twister-in-id", "Midi Fighter Twister"};
+    slot.output = {"twister-out-id", "Midi Fighter Twister"};
+    std::string reason;
+    Require(synth::runtime_ui::ControllersLayout::InstallDescriptorProfile(registry, *descriptorIt, slot,
+                                                                           &reason),
+            "install the Twister preset onto the notice-check row: " + reason);
+    Require(slot.config.encoderInput.has_value(), "the installed Twister preset carries encoder input");
+    slot.config.encoderInput->turnStep += 0.1f;
 
-    fixture.Click(NodeIds::kWizardSubmit, "invalid submit");
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::kWizardStatus, "invalid submit")
-                .find("Button 2") != std::string::npos,
-            "an invalid form refusal names the offending button");
-    Require(harness.Commits() == 0 && harness.Saves() == 0,
-            "a refused Submit commits and saves nothing");
-    Require(RequireEditor(fixture.Renderer(), kEncoderSlotId, "invalid submit").getText() ==
-                    juce::String("4") &&
-                RequireEditor(fixture.Renderer(), TwisterButtonField(0, "argument"), "invalid submit")
-                        .getText() == juce::String("7") &&
-                RequireEditor(fixture.Renderer(), TwisterButtonField(1, "argument"), "invalid submit")
-                        .getText() == juce::String(kOverflowArgument),
-            "a refused Submit retains every entered value");
+    fixture.state.instrument.controllers.push_back(slot);
+    fixture.state.connection.controllers.resize(1);
 
-    fixture.TypeInto(TwisterButtonField(1, "argument"), "5", "refusal fixes argument");
-    harness.RemoveTwisterPair(1);
-    fixture.Tick("candidate disappears");
-    fixture.Click(NodeIds::kWizardSubmit, "stale submit");
-    Require(RequireLabelText(fixture.Renderer(), NodeIds::kWizardStatus, "stale submit")
-                .find("reconnect") != std::string::npos,
-            "a disappeared candidate refuses Submit with a reconnect message");
-    Require(harness.Commits() == 0 && harness.Saves() == 0,
-            "a stale Submit commits and saves nothing");
-    Require(harness.Instrument().controllers.empty(), "a stale Submit installs no record");
-    Require(RequireEditor(fixture.Renderer(), kEncoderSlotId, "stale submit").getText() ==
-                    juce::String("4") &&
-                RequireEditor(fixture.Renderer(), TwisterButtonField(0, "argument"), "stale submit")
-                        .getText() == juce::String("7"),
-            "a stale Submit retains every entered value");
+    synth::runtime_ui::ControllersPageSurface surface = fixture.MakeSurface();
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+    const synth::ui::NodeTree tree = surface.BuildTree();
+    const criteria::Index index(tree);
 
-    std::cout << "ControllerWizardRefusalSimulation passed\n";
+    const synth::ui::Node* notice = index.Find(synth::runtime_ui::NodeIds::ControllerPresetNotice(0));
+    Require(notice != nullptr, "the diverged row renders its preset notice");
+
+    const juce::Font font{juce::FontOptions(synth::pagestyle::kDefaultTextSize)};
+    juce::GlyphArrangement glyphs;
+    glyphs.addLineOfText(font, juce::String(notice->text), 0.0f, 0.0f);
+    const float measured = glyphs.getBoundingBox(0, -1, true).getWidth();
+    Require(measured <= notice->bounds.width,
+            "preset notice sentence (" + std::to_string(measured) +
+                "px) must fit inside the notice Label's own rendered width (" +
+                std::to_string(notice->bounds.width) + "px)");
+    std::cout << "PresetNoticeWidthCheck passed, measured=" << measured << "px\n";
 }
 
 }  // namespace
@@ -1421,10 +1043,9 @@ int main()
     }
 
     RunGridSimulation();
-    RunControllerWizardParitySimulation();
     RunManualRecordSimulation();
-    RunIncompatibleReconfigureSimulation();
-    RunControllerWizardRefusalSimulation();
+    RunDeviceLabelWidthCheck();
+    RunPresetNoticeWidthCheck();
 
     // The caption criterion had real subjects across the whole run, and its
     // exception list was the thing excusing them. Without these an id-convention

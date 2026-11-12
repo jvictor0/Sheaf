@@ -109,6 +109,8 @@ struct ClockDiagnostics {
     ClockSource source = ClockSource::Internal;
     bool hasActiveExternalSource = false;
     std::size_t activeExternalSourceSlot = 0;
+    // Filled by MasterClock::DiagnosticsSnapshot from MasterClock::TransportState().
+    ClockTransportState transportState = ClockTransportState::Stopped;
     // Manual or filtered-estimator tempo, without the transient PLL phase
     // correction which may be present in QuarterNotesPerSample().
     double currentBpm = 120.0;

@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -161,6 +162,238 @@ struct FakeApp
     FakeAppSurface surface;
 };
 
+// An app whose own vocabulary already uses "Audio" -- a synth with an Audio
+// parameter bank -- and so renames the runtime's Audio page through
+// RuntimeConfig::audioPageTitle. Nothing else about it differs from FakeApp.
+struct RenamedAudioPageApp
+{
+    static synth::RuntimeConfig Config()
+    {
+        synth::RuntimeConfig config{.appName = "RenamedAudioPageTest", .uiWidth = 900, .uiHeight = 560};
+        config.audioPageTitle = "Audio I/O";
+        return config;
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+
+    synth::ui::Surface& PortableSurface()
+    {
+        return surface;
+    }
+
+    FakeAppSurface surface;
+};
+
+// An app that registers one additional sidebar page. The builder
+// declares a Row with non-default padding and a non-even weight split, the
+// same nested-layout shape
+// TestAudioPageAppSectionNestedLayoutSurvivesTheSplice (portable_ui_tests.cpp)
+// uses to prove Splice(Subtree) -- not Splice(NodeTree) -- carries a nested
+// container's declared LayoutOptions through the splice instead of letting
+// them re-resolve at defaults.
+struct RegisteredPageApp
+{
+    static synth::RuntimeConfig Config()
+    {
+        return synth::RuntimeConfig{.appName = "RegisteredPageAppTest", .uiWidth = 900, .uiHeight = 560};
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+
+    synth::ui::Surface& PortableSurface()
+    {
+        return surface;
+    }
+
+    synth::RegisteredPage RegisteredPage()
+    {
+        return synth::RegisteredPage{
+            .id = "app.custom",
+            .title = "Custom",
+            .buildTree = [](synth::ui::Bounds) {
+                synth::ui::Builder appBuilder;
+                appBuilder.Rootless();
+                synth::ui::LayoutOptions rowLayout;
+                rowLayout.padding = 40.0f;  // default LayoutOptions padding is not 40
+                appBuilder.Row("app.custom.row", rowLayout, [](synth::ui::Builder& row) {
+                    synth::ui::ControlStyle heavy;
+                    heavy.layout.main = synth::ui::Extent::Weight(3.0f);
+                    row.Label("app.custom.heavy", "Heavy", heavy);
+                    synth::ui::ControlStyle light;
+                    light.layout.main = synth::ui::Extent::Weight(1.0f);
+                    row.Label("app.custom.light", "Light", light);
+                });
+                return appBuilder.BuildSubtree();
+            },
+        };
+    }
+
+    FakeAppSurface surface;
+};
+
+// A surface that additionally implements
+// ui::ExtentAwareSurface and resolves its BuildTree() root against whatever
+// extent it was last offered, instead of a compiled-in size.
+class ExtentAwareAppSurface final : public synth::ui::Surface, public synth::ui::ExtentAwareSurface
+{
+public:
+    int dispatchCount = 0;
+    int extentOffers = 0;
+    std::string lastAction;
+
+    synth::ui::NodeTree BuildTree() override
+    {
+        synth::ui::Node root;
+        root.id = "extent.app.root";
+        root.kind = synth::ui::NodeKind::Root;
+        root.bounds = extent_;
+        return synth::ui::NodeTree{{std::move(root)}};
+    }
+
+    void SetActionHandler(ActionHandler handler) override
+    {
+        observer_ = std::move(handler);
+    }
+
+    void DispatchAction(const synth::ui::Action& action) override
+    {
+        ++dispatchCount;
+        lastAction = action.name;
+        if (observer_)
+        {
+            observer_(action);
+        }
+    }
+
+    void SetContentExtent(synth::ui::Bounds extent) override
+    {
+        ++extentOffers;
+        extent_ = extent;
+    }
+
+private:
+    synth::ui::Bounds extent_{0.0f, 0.0f, 900.0f, 560.0f};
+    ActionHandler observer_;
+};
+
+struct ExtentAwareApp
+{
+    static synth::RuntimeConfig Config()
+    {
+        return synth::RuntimeConfig{.appName = "ExtentAwareAppTest", .uiWidth = 900, .uiHeight = 560};
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+
+    synth::ui::Surface& PortableSurface()
+    {
+        return surface;
+    }
+
+    ExtentAwareAppSurface surface;
+};
+
+// A surface that additionally implements ui::SelfSizedSurface (sprs-19): it
+// declares its own root bounds (independent of App::Config()) and names a
+// slot node nested two levels deep -- "selfsized.app.bottom" at (0, 500)
+// relative to the root, itself containing "selfsized.app.slot" at (363, 0)
+// relative to that -- so a test that reads the slot's composite position
+// exercises summing parent-relative offsets across more than one level, not
+// just a direct child's own bounds. `declaredRootBounds` is separate from
+// the bounds the built tree's root actually carries so a test can make them
+// disagree; `includeSlot` and `slotWidth`/`slotHeight` let a test remove the
+// slot or shrink it below the sidebar's own size.
+class SelfSizedAppSurface final : public synth::ui::Surface, public synth::ui::SelfSizedSurface
+{
+public:
+    synth::ui::Bounds rootBounds{0.0f, 0.0f, 459.0f, 700.0f};
+    synth::ui::Bounds declaredRootBounds{0.0f, 0.0f, 459.0f, 700.0f};
+    float slotWidth = 96.0f;
+    float slotHeight = 200.0f;
+    bool includeSlot = true;
+
+    synth::ui::NodeTree BuildTree() override
+    {
+        synth::ui::Node root;
+        root.id = "selfsized.app.root";
+        root.kind = synth::ui::NodeKind::Root;
+        root.bounds = rootBounds;
+        root.children = {synth::ui::NodeId("selfsized.app.top"),
+                         synth::ui::NodeId("selfsized.app.bottom")};
+
+        synth::ui::Node top;
+        top.id = "selfsized.app.top";
+        top.kind = synth::ui::NodeKind::Section;
+        top.bounds = {0.0f, 0.0f, rootBounds.width, 500.0f};
+
+        synth::ui::Node bottom;
+        bottom.id = "selfsized.app.bottom";
+        bottom.kind = synth::ui::NodeKind::Section;
+        bottom.bounds = {0.0f, 500.0f, rootBounds.width, rootBounds.height - 500.0f};
+        bottom.children = {synth::ui::NodeId("selfsized.app.slot")};
+
+        synth::ui::Node slot;
+        slot.id = "selfsized.app.slot";
+        slot.kind = synth::ui::NodeKind::Section;
+        slot.bounds = {rootBounds.width - slotWidth, 0.0f, slotWidth, slotHeight};
+
+        synth::ui::NodeTree tree;
+        tree.nodes = {std::move(root), std::move(top), std::move(bottom), std::move(slot)};
+        return tree;
+    }
+
+    void SetActionHandler(ActionHandler handler) override
+    {
+        observer_ = std::move(handler);
+    }
+
+    void DispatchAction(const synth::ui::Action& action) override
+    {
+        if (observer_)
+        {
+            observer_(action);
+        }
+    }
+
+    synth::ui::Bounds RootBounds() const override
+    {
+        return declaredRootBounds;
+    }
+
+    std::optional<synth::ui::NodeId> SidebarSlot() const override
+    {
+        if (!includeSlot)
+        {
+            return std::nullopt;
+        }
+        return synth::ui::NodeId("selfsized.app.slot");
+    }
+
+private:
+    ActionHandler observer_;
+};
+
+struct SelfSizedApp
+{
+    static synth::RuntimeConfig Config()
+    {
+        return synth::RuntimeConfig{.appName = "SelfSizedAppTest", .uiWidth = 900, .uiHeight = 560};
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+
+    synth::ui::Surface& PortableSurface()
+    {
+        return surface;
+    }
+
+    SelfSizedAppSurface surface;
+};
+
 struct FakeServices
 {
     int audioRefreshCount = 0;
@@ -178,7 +411,7 @@ struct FakeServices
     std::vector<std::string> controllerPersistenceEvents;
     std::string lastAudioAction;
     std::string lastFileAction;
-    float deadlinePercent = 12.5f;
+    float deadlinePercent = 12.4f;
     bool syncCommitSucceeds = true;
     synth::SyncConfig currentSync{};
     synth::SyncConfig lastCommittedSync{};
@@ -238,8 +471,8 @@ struct FakeServices
     {
         ++controllersRefreshCount;
         surface.SetEnumerateDevices(controllerDevices);
-        surface.SetDiscovery(
-            synth::DiscoverControllerWizards(controllerDevices, instrument, synth::ControllerWizardRegistry()));
+        surface.SetDiscovery(synth::DiscoverControllerWizards(
+            controllerDevices, instrument, synth::MakeControllerWizardRegistry(synth::MidiAppCatalog{})));
     }
 
     synth::SyncConfig SnapshotSyncConfiguration()
@@ -291,10 +524,9 @@ struct Fixture
 };
 
 // An application declaring a surface shorter than the runtime sidebar. 160 is
-// below the sidebar's five fixed 40px rows, which is the exact residual task
-// 7.1 recorded: the shell PLACES already-resolved subtree roots rather than
-// resolving them, so sru-54's overflow gate never sees this composition and
-// nothing used to catch an app that overran the window.
+// below the sidebar's five fixed 40px rows: the shell places already-resolved
+// subtree roots rather than resolving them, and nothing used to catch an app
+// that overran the window.
 struct ShortSurfaceApp
 {
     static synth::RuntimeConfig Config()
@@ -379,6 +611,203 @@ void TestCompositeBoundsPreserveAppAndAddSidebar()
                   "intrinsic bounds");
 }
 
+// A self-sized surface's root is validated against RootBounds() instead of
+// App::Config() -- 900x560 for SelfSizedApp -- so a built root that does not
+// match the surface's OWN declared bounds fails composition, the same
+// generic application-root diagnostic TestRejectsRootSizeMismatch checks for
+// a legacy app (ValidateApplicationTree has one definition of that check;
+// only what it compares against differs per sprs-19).
+void TestSelfSizedRootIsValidatedAgainstItsDeclaredBounds()
+{
+    SelfSizedApp app;
+    FakeServices services;
+    synth::runtime_ui::RuntimeMainComponent<SelfSizedApp, FakeServices> component{app, services};
+    app.surface.declaredRootBounds = {0.0f, 0.0f, 500.0f, 700.0f};  // built root stays 459 wide
+
+    bool threw = false;
+    std::string message;
+    try
+    {
+        component.BuildTree();
+    }
+    catch (const std::invalid_argument& error)
+    {
+        threw = true;
+        message = error.what();
+    }
+    Require(threw, "a self-sized root that disagrees with RootBounds() fails composition");
+    Require(message.find("configured bounds") != std::string::npos,
+            "the diagnostic names the application-root contract");
+}
+
+// A self-sized surface's declared slot receives the sidebar, at the slot's
+// composite position (summed across the two nesting levels
+// SelfSizedAppSurface builds), and the composite is exactly the declared app
+// root rather than the app root plus an additive sidebar column.
+void TestSidebarIsPlacedAtTheDeclaredSlot()
+{
+    SelfSizedApp app;
+    FakeServices services;
+    synth::runtime_ui::RuntimeMainComponent<SelfSizedApp, FakeServices> component{app, services};
+
+    const synth::ui::NodeTree tree = component.BuildTree();
+    RequireBounds(FindNode(tree, "runtime.main.root").bounds,
+                  0.0f, 0.0f, 459.0f, 700.0f, "composite equals the declared app root exactly");
+    RequireBounds(FindNode(tree, synth::runtime_ui::NodeIds::kSidebarRoot).bounds,
+                  363.0f, 500.0f, 96.0f, 200.0f,
+                  "sidebar sits at the slot's composite position: bottom's own (0, 500) plus "
+                  "the slot's (363, 0) relative to bottom");
+}
+
+// A slot smaller than the sidebar root fails composition naming the slot,
+// rather than silently overlapping or clipping it.
+void TestSidebarLargerThanItsSlotFailsComposition()
+{
+    SelfSizedApp app;
+    app.surface.slotHeight = 150.0f;  // sidebar needs 200 for its five default rows
+    FakeServices services;
+    synth::runtime_ui::RuntimeMainComponent<SelfSizedApp, FakeServices> component{app, services};
+
+    bool threw = false;
+    std::string message;
+    try
+    {
+        component.BuildTree();
+    }
+    catch (const std::invalid_argument& error)
+    {
+        threw = true;
+        message = error.what();
+    }
+    Require(threw, "a slot smaller than the sidebar fails composition");
+    Require(message.find("selfsized.app.slot") != std::string::npos,
+            "the diagnostic names the slot node");
+}
+
+// While Audio, Controllers, Sync and File are open in turn beside a slotted
+// (narrow) app, each page takes the app root's width less the sidebar and the
+// app root's height, so page plus sidebar is exactly the 459x700 app root and
+// the shell scales both screens alike. Returning to the application
+// recomposes the slotted tree.
+void TestEveryRuntimePageOpensBesideASlottedApp()
+{
+    SelfSizedApp app;
+    FakeServices services;
+    synth::runtime_ui::RuntimeMainComponent<SelfSizedApp, FakeServices> component{app, services};
+
+    const char* sidebarActions[] = {
+        "runtime.sidebar.audio",
+        "runtime.sidebar.controllers",
+        "runtime.sidebar.sync",
+        "runtime.sidebar.file",
+    };
+    const char* backActions[] = {
+        "runtime.audio.back",
+        "runtime.controllers.back",
+        "runtime.sync.back",
+        "runtime.file.back",
+    };
+    for (std::size_t index = 0; index < 4; ++index)
+    {
+        component.DispatchAction(synth::ui::Action::Named(sidebarActions[index]));
+        Require(component.CurrentPage() != synth::runtime_ui::RuntimeMainPage::Application,
+                "the sidebar action opens a runtime page");
+        const synth::ui::NodeTree tree = component.BuildTree();
+        RequireBounds(tree.nodes[1].bounds, 0.0f, 0.0f, 363.0f, 700.0f,
+                      "the page root is the app root's width less the sidebar, at its height");
+        RequireBounds(FindNode(tree, synth::runtime_ui::NodeIds::kSidebarRoot).bounds,
+                      363.0f, 0.0f, 96.0f, 200.0f,
+                      "the sidebar sits at the page root's own right edge");
+        RequireBounds(FindNode(tree, "runtime.main.root").bounds, 0.0f, 0.0f, 459.0f, 700.0f,
+                      "page plus sidebar is exactly the app root");
+        component.DispatchAction(synth::ui::Action::Named(backActions[index]));
+        Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Application,
+                "Back restores the application page");
+    }
+
+    const synth::ui::NodeTree backToApp = component.BuildTree();
+    RequireBounds(FindNode(backToApp, "runtime.main.root").bounds,
+                  0.0f, 0.0f, 459.0f, 700.0f, "the slotted composite returns");
+    RequireBounds(FindNode(backToApp, synth::runtime_ui::NodeIds::kSidebarRoot).bounds,
+                  363.0f, 500.0f, 96.0f, 200.0f, "the sidebar is back in its slot");
+}
+
+// A self-sized app that declares no slot is not laid out for a narrow window,
+// so a runtime page opened over it keeps the configured content bounds.
+void TestRuntimePageKeepsConfiguredBoundsBesideAnUnslottedApp()
+{
+    SelfSizedApp app;
+    app.surface.includeSlot = false;
+    FakeServices services;
+    synth::runtime_ui::RuntimeMainComponent<SelfSizedApp, FakeServices> component{app, services};
+
+    component.DispatchAction(synth::ui::Action::Named("runtime.sidebar.audio"));
+    const synth::ui::NodeTree tree = component.BuildTree();
+    RequireBounds(tree.nodes[1].bounds, 0.0f, 0.0f, 900.0f, 560.0f,
+                  "the page root keeps the configured content bounds");
+    RequireBounds(FindNode(tree, synth::runtime_ui::NodeIds::kSidebarRoot).bounds,
+                  900.0f, 0.0f, 96.0f, 200.0f,
+                  "the sidebar sits at the page root's own right edge");
+}
+
+// An extent-aware app surface resolves against whatever
+// live extent the shell offers, and the sidebar tracks the resolved app
+// root width rather than a compiled-in one.
+void TestExtentAwareAppTracksResizedContentExtent()
+{
+    ExtentAwareApp app;
+    FakeServices services;
+    synth::runtime_ui::RuntimeMainComponent<ExtentAwareApp, FakeServices> component{app, services};
+
+    // Never explicitly resized: the shell still offers the extent-aware
+    // surface its content extent (the hook is exercised every BuildTree()),
+    // and because that default equals config.uiWidth/uiHeight, the baseline
+    // composition matches the legacy, hook-free values exactly.
+    const synth::ui::NodeTree initial = component.BuildTree();
+    Require(app.surface.extentOffers >= 1,
+            "shell offers the extent-aware surface its content extent before BuildTree");
+    RequireBounds(FindNode(initial, "runtime.main.root").bounds,
+                  0.0f, 0.0f, 996.0f, 560.0f, "default composite bounds match legacy");
+    RequireBounds(FindNode(initial, synth::runtime_ui::NodeIds::kSidebarRoot).bounds,
+                  900.0f, 0.0f, 96.0f, 200.0f, "default sidebar placement matches legacy");
+
+    // The window resizes wider: the shell offers the new live extent, the
+    // app resolves its tree against it, and the sidebar tracks the resolved
+    // width -- no dead space between the app's new edge and the sidebar.
+    component.SetContentExtent({0.0f, 0.0f, 1200.0f, 560.0f});
+    const synth::ui::NodeTree resized = component.BuildTree();
+    RequireBounds(FindNode(resized, "extent.app.root").bounds,
+                  0.0f, 0.0f, 1200.0f, 560.0f, "app resolves against the newly offered extent");
+    RequireBounds(FindNode(resized, synth::runtime_ui::NodeIds::kSidebarRoot).bounds,
+                  1200.0f, 0.0f, 96.0f, 200.0f,
+                  "sidebar sits at the resolved root width, no dead space");
+    RequireBounds(FindNode(resized, "runtime.main.root").bounds,
+                  0.0f, 0.0f, 1296.0f, 560.0f, "composite root grows with the resolved app width");
+
+    // A vertical resize too -- the composite root's
+    // height must track the resolved app height (900x560 -> 1200x700), not
+    // stay pinned to the compiled-in config.uiHeight (560). root.bounds.height
+    // used to stay hardcoded to config.uiHeight even on this extent-aware
+    // branch, so this resize would validate (the validator checks the app
+    // root, not the composite root) and then throw inside
+    // RequireCompositionHolds because the 700-tall app root no longer fit a
+    // 560-tall composite root.
+    component.SetContentExtent({0.0f, 0.0f, 1200.0f, 700.0f});
+    const synth::ui::NodeTree resizedTaller = component.BuildTree();
+    RequireBounds(FindNode(resizedTaller, "extent.app.root").bounds,
+                  0.0f, 0.0f, 1200.0f, 700.0f, "app resolves against the newly offered taller extent");
+    RequireBounds(FindNode(resizedTaller, synth::runtime_ui::NodeIds::kSidebarRoot).bounds,
+                  1200.0f, 0.0f, 96.0f, 200.0f,
+                  "sidebar x still tracks the resolved width; the fixed 200px sidebar column "
+                  "keeps fitting under a 700-tall composite root");
+    RequireBounds(FindNode(resizedTaller, "runtime.main.root").bounds,
+                  0.0f, 0.0f, 1296.0f, 700.0f,
+                  "composite root height tracks the resolved app height (700), not the "
+                  "compiled-in config.uiHeight (560) -- BuildTree() completing without throwing "
+                  "also proves the validator accepted the resized app root and "
+                  "RequireCompositionHolds held for both children");
+}
+
 void TestSidebarOpensEachPageAndBackRestoresApp()
 {
     Fixture fixture;
@@ -418,6 +847,54 @@ void TestSidebarOpensEachPageAndBackRestoresApp()
     fixture.component.DispatchAction(synth::ui::Action::Named("runtime.sync.back"));
     Require(fixture.component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Application,
             "sync back restores app");
+}
+
+// A plugin host declares a narrower page set: the sidebar shows only the
+// declared entries, sized to match, each opens its page and Back returns, and
+// dispatching an undeclared page's sidebar action leaves the application
+// page showing.
+void TestSidebarShowsOnlyTheDeclaredPages()
+{
+    FakeApp app;
+    FakeServices services;
+    const synth::runtime_ui::RuntimeSidebarPages pages{
+        .audio = false, .controllers = true, .sync = false, .file = true, .loadReadout = false};
+    MainComponent component{app, services, pages};
+
+    const synth::ui::NodeTree tree = component.BuildTree();
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::kSidebarControllers) != nullptr,
+            "the declared Controllers entry is built");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::kSidebarFile) != nullptr,
+            "the declared File entry is built");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::kSidebarAudio) == nullptr,
+            "the undeclared Audio entry is not built");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::kSidebarSync) == nullptr,
+            "the undeclared Sync entry is not built");
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::kSidebarDeadline) == nullptr,
+            "the undeclared load readout is not built");
+    Require(FindNode(tree, synth::runtime_ui::NodeIds::kSidebarRoot).bounds.height == 80.0f,
+            "the sidebar is as tall as its two declared rows");
+
+    component.DispatchAction(synth::ui::Action::Named("runtime.sidebar.controllers"));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Controllers,
+            "the declared Controllers entry opens its page");
+    component.DispatchAction(synth::ui::Action::Named("runtime.controllers.back"));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Application,
+            "Controllers Back restores the application");
+
+    component.DispatchAction(synth::ui::Action::Named("runtime.sidebar.file"));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::File,
+            "the declared File entry opens its page");
+    component.DispatchAction(synth::ui::Action::Named("runtime.file.back"));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Application,
+            "File Back restores the application");
+
+    component.DispatchAction(synth::ui::Action::Named("runtime.sidebar.audio"));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Application,
+            "dispatching the undeclared Audio action leaves the application page showing");
+    component.DispatchAction(synth::ui::Action::Named("runtime.sidebar.sync"));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Application,
+            "dispatching the undeclared Sync action leaves the application page showing");
 }
 
 void TestAppActionsRouteOnlyToAppSurface()
@@ -462,80 +939,14 @@ void TestControllerDraftActionsReachControllerSurface()
     Fixture fixture;
 
     fixture.component.ShowPage(synth::runtime_ui::RuntimeMainPage::Controllers);
-    fixture.component.DispatchAction(
-        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddNameDraft, "webctl"));
-    fixture.component.DispatchAction(
-        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kAddKindDraft, "generic"));
+    fixture.component.DispatchAction(synth::ui::Action::WithValue(
+        synth::runtime_ui::Actions::kAddPresetDraft, "custom"));
 
     const synth::ui::NodeTree tree = fixture.component.BuildTree();
-    const synth::ui::Node* addName =
-        FindNodeById(tree, synth::runtime_ui::NodeIds::kAddName);
-    const synth::ui::Node* addKind =
-        FindNodeById(tree, synth::runtime_ui::NodeIds::kAddKind);
-    Require(addName != nullptr && addName->text == "webctl",
-            "controller add-name draft routes through runtime component");
-    Require(addKind != nullptr && addKind->selectedOption == "generic",
-            "controller add-kind draft routes through runtime component");
-
-    fixture.services.controllerDevices.inputs.push_back(
-        {.identifier = "twister-in", .name = "Midi Fighter Twister"});
-    fixture.services.controllerDevices.outputs.push_back(
-        {.identifier = "twister-out", .name = "Midi Fighter Twister"});
-    fixture.component.Refresh();
-    fixture.component.DispatchAction(
-        synth::ui::Action::Named(synth::runtime_ui::Actions::kWizardOpen));
-    Require(FindNodeById(fixture.component.BuildTree(),
-                         synth::runtime_ui::NodeIds::kWizardForm) != nullptr,
-            "wizard launch routes through runtime component to the Controllers surface");
-    fixture.component.DispatchAction(
-        synth::ui::Action::WithValue("controller-wizard.twister.encoder-slot", "5"));
-    const synth::ui::Node* encoderSlot = FindNodeById(
-        fixture.component.BuildTree(), "controller-wizard.twister.encoder-slot");
-    Require(encoderSlot != nullptr && encoderSlot->text == "5",
-            "wizard form field actions route through runtime component to the session-owned form");
-}
-
-void TestThreeClickWizardSubmitCommitsThenSaves()
-{
-    Fixture fixture;
-    fixture.services.controllerDevices.inputs.push_back(
-        {.identifier = "twister-in", .name = "Midi Fighter Twister"});
-    fixture.services.controllerDevices.outputs.push_back(
-        {.identifier = "twister-out", .name = "Midi Fighter Twister"});
-    fixture.component.Refresh();
-
-    fixture.component.DispatchAction(
-        synth::ui::Action::Named(synth::runtime_ui::Actions::kSidebarControllers));
-    fixture.component.DispatchAction(
-        synth::ui::Action::Named(synth::runtime_ui::Actions::kWizardOpen));
-    fixture.component.DispatchAction(
-        synth::ui::Action::Named(synth::runtime_ui::Actions::kWizardSubmit));
-
-    Require(fixture.services.controllerCommitCount == 1,
-            "three-click Submit performs exactly one instrument commit");
-    Require(fixture.services.saveCount == 1 &&
-                fixture.services.controllerPersistenceEvents ==
-                    std::vector<std::string>({"commit", "save"}),
-            "three-click Submit requests one runtime save after the commit");
-    Require(fixture.services.instrument.controllers.size() == 1,
-            "three-click Submit installs exactly one controller");
-    const synth::MidiControllerSlot& installed =
-        fixture.services.instrument.controllers.front();
-    Require(installed.disposition == synth::MidiControllerDisposition::Active &&
-                installed.wizardId ==
-                    std::optional<std::string>("com.sheaf.midi-fighter-twister") &&
-                installed.input.identifier == "twister-in" &&
-                installed.output.identifier == "twister-out",
-            "three-click Submit installs the generated Active record with exact identity");
-    Require(installed.config.encoderInput.has_value() &&
-                installed.config.encoderInput->turns.size() == 16 &&
-                installed.config.systemMessages.size() == 6,
-            "three-click Submit installs the complete default Twister profile");
-
-    fixture.component.Refresh();
-    Require(FindNodeById(fixture.component.BuildTree(),
-                         "runtime.sidebar.controllers.warning") == nullptr,
-            "successful Submit immediately removes the claimed candidate warning");
+    const synth::ui::Node* addPreset =
+        FindNodeById(tree, synth::runtime_ui::NodeIds::kAddPreset);
+    Require(addPreset != nullptr && addPreset->selectedOption == "custom",
+            "controller add-preset draft routes through runtime component");
 }
 
 void TestBackFromConfigurationPageSavesRuntimeConfiguration()
@@ -548,11 +959,11 @@ void TestBackFromConfigurationPageSavesRuntimeConfiguration()
 
     fixture.component.ShowPage(synth::runtime_ui::RuntimeMainPage::Controllers);
     fixture.component.DispatchAction(synth::ui::Action::Named("runtime.controllers.back"));
-    Require(fixture.services.saveCount == 2, "controllers back saves runtime configuration");
+    Require(fixture.services.saveCount == 1, "controllers back adds no save");
 
     fixture.component.ShowPage(synth::runtime_ui::RuntimeMainPage::File);
     fixture.component.DispatchAction(synth::ui::Action::Named("runtime.file.back"));
-    Require(fixture.services.saveCount == 2, "file back does not save runtime configuration");
+    Require(fixture.services.saveCount == 1, "file back does not save runtime configuration");
 }
 
 void TestSyncStagesRefreshesCommitsAndReopensFromEngineSnapshot()
@@ -655,7 +1066,7 @@ void TestRefreshUpdatesRuntimePageModelsAndRollingDeadline()
     const synth::ui::Node* deadline = FindNodeById(
         fixture.component.BuildTree(), synth::runtime_ui::NodeIds::kSidebarDeadline);
     Require(deadline != nullptr, "deadline node exists after refresh");
-    Require(deadline->text == "12.5%", "sidebar displays rolling deadline maximum");
+    Require(deadline->text == "DSP 12%", "sidebar displays rolling deadline maximum");
 }
 
 void TestSidebarWarningReflectsControllersDiscoverySnapshot()
@@ -671,6 +1082,128 @@ void TestSidebarWarningReflectsControllersDiscoverySnapshot()
     Require(FindNodeById(fixture.component.BuildTree(),
                          "runtime.sidebar.controllers.warning") != nullptr,
             "unclaimed recognized cached pair warns while application is open");
+}
+
+// An app that never defines RegisteredPage() (FakeApp) must produce
+// exactly the sidebar and routing that existed before app-registered pages -- "optional
+// means optional, assert don't assume" (design constraint), checked both as
+// a tree shape and as a dispatched-action no-op.
+void TestSidebarWithNoRegistrationHasNoAppButtonAndIgnoresItsAction()
+{
+    Fixture fixture;
+    const synth::ui::NodeTree tree = fixture.component.BuildTree();
+
+    Require(FindNodeById(tree, synth::runtime_ui::NodeIds::kSidebarApp) == nullptr,
+            "no app-page button exists without registration");
+    Require(FindNode(tree, synth::runtime_ui::NodeIds::kSidebarRoot).bounds.height == 200.0f,
+            "the sidebar stays five fixed 40px rows tall without registration");
+    Require(FindNode(tree, synth::runtime_ui::NodeIds::kSidebarRoot).children.size() == 5,
+            "the sidebar contains exactly the four built-in page entries plus the deadline readout");
+
+    fixture.component.DispatchAction(
+        synth::ui::Action::Named(synth::runtime_ui::Actions::kSidebarApp));
+    Require(fixture.component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Application,
+            "dispatching the app-page action without registration does not navigate");
+}
+
+// An app that sets nothing gets the runtime's own name. Asserted against the
+// literal rather than against another tree built the same way, so that
+// changing the default fails here instead of moving both sides together.
+void TestAudioPageButtonKeepsItsRuntimeNameWhenTheAppSetsNothing()
+{
+    Fixture fixture;
+    const synth::ui::NodeTree tree = fixture.component.BuildTree();
+
+    Require(FindNode(tree, synth::runtime_ui::NodeIds::kSidebarAudio).label == "Audio",
+            "the Audio page button reads the runtime's own name without an override");
+}
+
+// An app that sets one gets it, and gets nothing else: the override renames
+// the BUTTON, so the page's own action, position and the rest of the sidebar
+// have to come out identical to the un-renamed case.
+void TestAudioPageButtonTakesTheAppsOwnNameWhenSet()
+{
+    RenamedAudioPageApp app;
+    FakeServices services;
+    synth::runtime_ui::RuntimeMainComponent<RenamedAudioPageApp, FakeServices> component{app, services};
+
+    const synth::ui::NodeTree tree = component.BuildTree();
+    const synth::ui::Node& audioButton = FindNode(tree, synth::runtime_ui::NodeIds::kSidebarAudio);
+    Require(audioButton.label == "Audio I/O", "the Audio page button reads the app's own name");
+    Require(audioButton.action.has_value() &&
+                audioButton.action->name == synth::runtime_ui::Actions::kSidebarAudio,
+            "renaming the button does not change what it dispatches");
+
+    const synth::ui::Node& sidebarRoot = FindNode(tree, synth::runtime_ui::NodeIds::kSidebarRoot);
+    Require(sidebarRoot.children.size() == 5,
+            "renaming a page adds no entry and removes none");
+    Require(sidebarRoot.children[0] == synth::ui::NodeId(synth::runtime_ui::NodeIds::kSidebarAudio),
+            "the renamed page stays first");
+    Require(sidebarRoot.bounds.height == 200.0f,
+            "renaming a page does not resize the sidebar");
+
+    component.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kSidebarAudio));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Audio,
+            "the renamed button still opens the Audio page");
+}
+
+// An app that does define RegisteredPage() gets a button after
+// File, and selecting it shows the app-built tree spliced with its declared
+// nested layout preserved (the nested-layout assertion pattern, reused
+// against the whole registered page rather than an audio-page section).
+void TestRegisteredPageButtonRendersAfterFileAndRoutesToSplicedAppTree()
+{
+    RegisteredPageApp app;
+    FakeServices services;
+    synth::runtime_ui::RuntimeMainComponent<RegisteredPageApp, FakeServices> component{app, services};
+
+    const synth::ui::NodeTree tree = component.BuildTree();
+    const synth::ui::Node& sidebarRoot = FindNode(tree, synth::runtime_ui::NodeIds::kSidebarRoot);
+    Require(sidebarRoot.children.size() == 6,
+            "the sidebar gains exactly one more entry when a page is registered");
+    Require(sidebarRoot.children[3] == synth::ui::NodeId(synth::runtime_ui::NodeIds::kSidebarFile) &&
+                sidebarRoot.children[4] == synth::ui::NodeId(synth::runtime_ui::NodeIds::kSidebarApp),
+            "the registered page's button is placed directly after File");
+    Require(FindNode(tree, synth::runtime_ui::NodeIds::kSidebarApp).label == "Custom",
+            "the button's label is the app's registered title");
+
+    component.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kSidebarApp));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::AppPage,
+            "selecting the button navigates to the registered page");
+
+    const synth::ui::NodeTree onPage = component.BuildTree();
+    Require(onPage.nodes[1].id == synth::ui::NodeId(synth::runtime_ui::NodeIds::kAppRoot),
+            "the app page's own root replaces the app root while it is open");
+
+    const synth::ui::Node& heavy = FindNode(onPage, "app.custom.heavy");
+    const synth::ui::Node& light = FindNode(onPage, "app.custom.light");
+    Require(NearlyEqual(heavy.bounds.x, 40.0f),
+            "the row's explicit 40px padding is honored, not LayoutOptions{}'s default -- proof "
+            "the splice carried the app's declared layout rather than dropping it");
+    Require(heavy.bounds.width > 0.0f && light.bounds.width > 0.0f,
+            "both weighted children resolve to a positive width");
+    Require(NearlyEqual(heavy.bounds.width / light.bounds.width, 3.0f),
+            "the declared 3:1 weight split is honored, not an even default split");
+
+    // Built-in pages remain reachable and unaffected while the app page exists.
+    component.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kSidebarAudio));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Audio,
+            "built-in pages remain reachable once an app page is registered");
+    Require(FindNode(component.BuildTree(), synth::runtime_ui::NodeIds::kAudioRoot).id ==
+                synth::ui::NodeId(synth::runtime_ui::NodeIds::kAudioRoot),
+            "the audio page still renders exactly as it did before");
+
+    // Back returns to the application without saving runtime configuration:
+    // the app page is not one of the four RuntimePageKind values
+    // RuntimePageBackSavesConfiguration recognizes (RuntimePagePolicy.hpp),
+    // matching File's own no-save behavior.
+    component.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kSidebarApp));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::AppPage,
+            "the app page reopens");
+    component.DispatchAction(synth::ui::Action::Named(synth::runtime_ui::Actions::kAppBack));
+    Require(component.CurrentPage() == synth::runtime_ui::RuntimeMainPage::Application,
+            "the app page's Back button returns to the application");
+    Require(services.saveCount == 0, "leaving the app page does not save runtime configuration");
 }
 
 void TestWizardDiscoveryCacheRecomputesOnlyForCachedSnapshotChanges()
@@ -851,20 +1384,33 @@ void Run(const char* name, Test test)
 int main()
 {
     static_assert(synth::SynthApplication<FakeApp>);
+    static_assert(synth::SynthApplication<ExtentAwareApp>);
+    static_assert(synth::SynthApplication<SelfSizedApp>);
+    static_assert(synth::SynthApplication<RegisteredPageApp>);
+    static_assert(!synth::HasRegisteredPage<FakeApp>, "FakeApp opts out by never defining RegisteredPage()");
+    static_assert(synth::HasRegisteredPage<RegisteredPageApp>);
     static_assert(synth::runtime_ui::RuntimeMainServices<FakeServices>);
 
     Run("TestPlacingASubtreeRootPlacesEveryDescendant",
         TestPlacingASubtreeRootPlacesEveryDescendant);
     Run("TestSubtreesArriveFullyResolved", TestSubtreesArriveFullyResolved);
     Run("TestCompositeBoundsPreserveAppAndAddSidebar", TestCompositeBoundsPreserveAppAndAddSidebar);
+    Run("TestSelfSizedRootIsValidatedAgainstItsDeclaredBounds",
+        TestSelfSizedRootIsValidatedAgainstItsDeclaredBounds);
+    Run("TestSidebarIsPlacedAtTheDeclaredSlot", TestSidebarIsPlacedAtTheDeclaredSlot);
+    Run("TestSidebarLargerThanItsSlotFailsComposition",
+        TestSidebarLargerThanItsSlotFailsComposition);
+    Run("TestEveryRuntimePageOpensBesideASlottedApp", TestEveryRuntimePageOpensBesideASlottedApp);
+    Run("TestRuntimePageKeepsConfiguredBoundsBesideAnUnslottedApp",
+        TestRuntimePageKeepsConfiguredBoundsBesideAnUnslottedApp);
+    Run("TestExtentAwareAppTracksResizedContentExtent", TestExtentAwareAppTracksResizedContentExtent);
     Run("TestSidebarOpensEachPageAndBackRestoresApp", TestSidebarOpensEachPageAndBackRestoresApp);
+    Run("TestSidebarShowsOnlyTheDeclaredPages", TestSidebarShowsOnlyTheDeclaredPages);
     Run("TestAppActionsRouteOnlyToAppSurface", TestAppActionsRouteOnlyToAppSurface);
     Run("TestRuntimeActionsRouteOnlyToOwningPageOrServices",
         TestRuntimeActionsRouteOnlyToOwningPageOrServices);
     Run("TestControllerDraftActionsReachControllerSurface",
         TestControllerDraftActionsReachControllerSurface);
-    Run("TestThreeClickWizardSubmitCommitsThenSaves",
-        TestThreeClickWizardSubmitCommitsThenSaves);
     Run("TestBackFromConfigurationPageSavesRuntimeConfiguration",
         TestBackFromConfigurationPageSavesRuntimeConfiguration);
     Run("TestSyncStagesRefreshesCommitsAndReopensFromEngineSnapshot",
@@ -873,6 +1419,14 @@ int main()
         TestRefreshUpdatesRuntimePageModelsAndRollingDeadline);
     Run("TestSidebarWarningReflectsControllersDiscoverySnapshot",
         TestSidebarWarningReflectsControllersDiscoverySnapshot);
+    Run("TestSidebarWithNoRegistrationHasNoAppButtonAndIgnoresItsAction",
+        TestSidebarWithNoRegistrationHasNoAppButtonAndIgnoresItsAction);
+    Run("TestAudioPageButtonKeepsItsRuntimeNameWhenTheAppSetsNothing",
+        TestAudioPageButtonKeepsItsRuntimeNameWhenTheAppSetsNothing);
+    Run("TestAudioPageButtonTakesTheAppsOwnNameWhenSet",
+        TestAudioPageButtonTakesTheAppsOwnNameWhenSet);
+    Run("TestRegisteredPageButtonRendersAfterFileAndRoutesToSplicedAppTree",
+        TestRegisteredPageButtonRendersAfterFileAndRoutesToSplicedAppTree);
     Run("TestWizardDiscoveryCacheRecomputesOnlyForCachedSnapshotChanges",
         TestWizardDiscoveryCacheRecomputesOnlyForCachedSnapshotChanges);
     Run("TestRejectsASurfaceTooShortForTheRuntimeSidebar",
