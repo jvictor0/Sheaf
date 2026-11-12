@@ -289,3 +289,8 @@ findings to the lead; they are not chased in this change.
       - Make the test's "Nothing is written after the loop" comment name the
         cached-knob overwrite of parameter 0 in `Rig::Sample`.
       - Make `Rig::RetirementEvent` use `RefreshedEvent` for its shared body.
+
+Recorded 2026-11-12 after round 6: the lead accepts that 7.1 uses two
+parameters rather than one. A bipolar parameter in attenuverter mode reads
+only `restsAtZero`, and a one-way parameter reads only `connected`, so one
+parameter cannot show both masks.
