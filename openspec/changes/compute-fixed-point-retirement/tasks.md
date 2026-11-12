@@ -129,3 +129,71 @@ tree before the change (180 theorems, 11 sources). Paths are relative to
 - [ ] 4.1 Do not refresh the `sources` fingerprints in
       `formal/requirements.json`. Report the gate's mismatch output; the lead
       refreshes them after the after-code audit reviews the three files.
+
+## 5. After-code repairs (ruled by the lead 2026-11-12 from the after-code audit)
+
+The audit reports are in the lead's scratchpad: `after/diff-vs-proposal.md`,
+`after/attack-A.md`, `after/attack-B.md`, `after/repetition-coverage.md`. Read
+the finding named in each task before you start it. The same rules as tasks
+0–4 apply.
+
+- [ ] 5.1 Held depth-slot spans (attack-A F1). Do not change behaviour. First
+      determine, by a differential in scratch, whether the spm-96 quiescent
+      skip alone (retirement off) already misses a write through a
+      `TargetDepthSlots`/`CurrentDepthSlots` span held across samples; report
+      that result. Then document on both non-const overloads that the span is
+      valid for writing only until the next processed sample, because the
+      `Wake()` happens when the span is handed out, and that a later write
+      must reacquire the span. Remove the "every write" overclaim from the
+      `writeEpoch_` and `retireFixedPointComputes` comments, naming the held
+      span and direct `ProcessLite*` calls on a depth child as the uncovered
+      writes.
+- [ ] 5.2 Comments (diff-vs-proposal). `ComputeWouldChangeNothing` states that
+      it is a sufficient condition, not an equivalence. Correct the Froggers
+      test's "the one random input" comment and the comment above the slate's
+      default constructor so that they name the noise seed.
+- [ ] 5.3 Repetition (repetition-coverage). Make the local-only epoch bump in
+      `ReplaceCachedKnobValue` and `RestoreLastRawKnobValues` one private
+      helper. Put the depth-child head shared by `RecordComputeForRetirement`
+      and `ComputeWouldChangeNothing` into one predicate. Define
+      `kRetirementMaskBits` from `std::numeric_limits<std::uint64_t>::digits`.
+      Above `FreshActiveRouteMasks`, add a comment stating that it must read
+      exactly the metadata fields `ComputeAtDepth` reads. In the tests, build
+      the event ladders (`Rig::Event`, `RetirementEvent`, `RestsAtZeroEvent`)
+      as one table, parameterized only by what differs, and replace
+      `SameState` with `CompareParameters`. Report each count found against
+      each count changed. Show that every Rig-based test still passes, with
+      the same counters as before the repair.
+- [ ] 5.4 Source indices beyond the rig's two (attack-B F1). Give `Rig` a
+      modulator-count constructor parameter; existing callers keep 2. Add a
+      differential run at 64 modulators, interval 1, in attenuverter mode,
+      with routes on sources 9 and 63. Flip `connected` and then `restsAtZero`
+      on each of them after settling, without `Wake()`. Red controls:
+      `if (sourceIx < 8)` in either mask, and `<< (sourceIx % 2)`; each must
+      fail.
+- [ ] 5.5 Skip-off combination (attack-B F2). Add the run in which the
+      retiring group has `skipQuiescentParameters = false` and the full group
+      has both features off, and the run in which both have the skip on and
+      only the retiring group retires. Red control: attack-B's mutant that
+      skips `ProcessLitePhase1` when the skip is off must fail.
+- [ ] 5.6 Above 64 modulators (attack-B F3). On a 65-modulator rig at interval
+      1, after 48000 settling samples, `topLevelRetiredComputes` is 0. Red
+      control: `kRetirementMaskBits = 200` must fail.
+- [ ] 5.7 Retired means not computed (attack-B F4). In
+      `settled_parameters_retire_their_compute_until_written`, over the 160
+      retired samples, the delta of `localRecursiveComputeCalls` is 0. Red
+      control: attack-B's `counted_never_retires` mutant must fail this test.
+- [ ] 5.8 Voices (attack-B F7). If `ParameterGroup` supports more than one
+      voice, give `Rig` a voice-count parameter. Add a two-voice differential
+      run in which the voices' depth smoothing differs, plus a
+      `smoothTargetCenter` run. Red controls: `epoch_lite_voice0_only`, and
+      dropping the smoothing key component. If the group has one voice only,
+      report that, with the trace.
+- [ ] 5.9 Lean (attack-B L1, L2). Restate the two theorems so that their
+      pinned statements fix `step` and `frames` (for example by stating them
+      over the explicit `fun` forms), and so that L2's two definition mutants,
+      `frames` ignoring the step and `step` as the identity, fail the gate. Add
+      a `contracts` entry tying them to `ComputeAtDepth`'s retirement branch,
+      with a `boundary` stating that the partition is a ruled judgment checked
+      by the native differentials and that the lite steps between Computes are
+      not modelled. Fingerprints stay for the lead.
