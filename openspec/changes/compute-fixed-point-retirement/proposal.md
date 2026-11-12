@@ -129,7 +129,9 @@ correspondence check that carries it to the compiled path.
   `ParameterGroup::SetRetireFixedPointComputesForTests(bool)` let a test run the
   full path beside the retired one, including inside an application whose group
   config it does not construct.
-- Observer: new `topLevelRetiredComputes` counts retired compute visits.
+- Observer: new `topLevelRetiredComputes` counts retired compute visits;
+  `topLevelComputeCalls` counts top-level `ComputeAtDepth` runs (added by
+  task 6.3); `topLevelPhase2Skips` counts phase-2 quiescent skips (task 7.2).
 - `localRecursiveComputeCalls` and `scalarLeafCacheHits` count less when
   computes retire. `activeGestureVisits` is incremented in `ComputeRawCenter`,
   which the retirement check also calls, and `activeRouteVisits` only in
