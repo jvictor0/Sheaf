@@ -2964,6 +2964,23 @@ TEST_CASE(oversampled_output_stage_preserves_decimator_state_across_host_blocks)
     REQUIRE_NEAR(second[0], 4.0f, 0.0001f);
 }
 
+TEST_CASE(classic_svf_state_access_and_recovery_contract) {
+    synth::ClassicStateVariableFilter filter;
+    filter.Process({1.0f, 0.01f, 2.0f, 0.0f});
+    REQUIRE_TRUE(filter.LowPass() == filter.m_low);
+    REQUIRE_TRUE(filter.BandPass() == filter.m_band);
+    REQUIRE_TRUE(filter.HighPass() == filter.m_high);
+    REQUIRE_NEAR(filter.StateMagnitude(),
+        std::max(std::fabs(2.0f * filter.BandPass()), std::fabs(2.0f * filter.LowPass())), 0.0);
+    REQUIRE_TRUE(filter.StateFinite());
+    filter.Process({std::numeric_limits<float>::quiet_NaN(), 0.01f, 2.0f, 0.0f});
+    REQUIRE_TRUE(!filter.StateFinite());
+    filter.Reset();
+    REQUIRE_TRUE(filter.StateFinite());
+    REQUIRE_TRUE(filter.StateMagnitude() == 0.0f);
+    REQUIRE_TRUE(filter.Process({0.0f, 0.01f, 2.0f, 0.0f}) == 0.0f);
+}
+
 int main() {
     int failed = 0;
     for (const auto& test : Registry()) {
