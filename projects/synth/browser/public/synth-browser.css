@@ -68,6 +68,24 @@ body {
   font: inherit;
 }
 
+/* A select or text input sizes to its content with no explicit size (the
+   range input already gets this treatment inline, ui.ts:192). box-sizing is
+   already border-box for every #synth-root descendant (line 23 above), so
+   100% here fills the node's own resolved extent instead of spilling past
+   it. A select clips its own text natively in most engines, but text-overflow
+   only applies once overflow is not visible, so overflow: hidden is set
+   alongside it rather than assumed. */
+#synth-root select,
+#synth-root input[type="text"] {
+  width: 100%;
+  height: 100%;
+}
+
+#synth-root select {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 #synth-root button {
   /* Under `box-sizing: border-box` the used width is floored at border plus
      padding, so a flat `0 12px` made every button at least 26px wide however

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -24,6 +25,9 @@
 namespace synth {
 
 class GridManager;
+// Defined in Engine.hpp, which includes this file; forward-declared here so
+// AppContext can hold a pointer to one without a header cycle.
+class ClockDiagnosticsPublication;
 
 // Static configuration supplied by the application (sar-2). Audio fields are
 // a request: the host negotiates actual values with the device and reports
@@ -37,6 +41,15 @@ struct RuntimeConfig {
     int uiWidth = 900;
     int uiHeight = 560;
     int uiFrameHz = 30;
+    // Renames the runtime's own Audio page in the sidebar. It exists because
+    // an application's vocabulary can already use a runtime page's name for
+    // something else -- a synth whose first parameter bank is called Audio
+    // renders two "Audio" buttons that mean different things -- and nothing
+    // else here lets the application say so. Unset means the runtime's own
+    // name, so an application that never sets it renders the sidebar exactly
+    // as before. Only the page's BUTTON is renamed; its contents are the
+    // runtime's.
+    std::optional<std::string> audioPageTitle;
 };
 
 // Shared JUCE-free validation for RuntimeConfig requests. Throws
@@ -200,6 +213,60 @@ struct AudioBlock {
     }
 };
 
+// External-input-routed signal (sar-33): true only while a user-chosen
+// external input source is open and delivering -- an identical semantic on
+// both backends. JUCE: the user-selected input device (never the
+// platform-default device auto-opened at startup before any selection) is
+// non-empty and IS the input device currently open (see
+// runtime/Runtime.hpp's RefreshInputRoutedState, next to
+// ApplyAudioDeviceInputSelection/OnEngineAudioDeviceChanged). Browser:
+// user-gesture-granted input capture is currently live (see
+// synth/browser/BrowserRuntime.hpp's RefreshInputRoutedState, hung off
+// SetAudioInputSource/ClearAudioInputSource).
+//
+// One instance is owned by the host for the app's whole lifetime and
+// referenced through AppContext::inputRoutingSignal below -- the same
+// non-owning-pointer-to-host-owned-object convention every other AppContext
+// member uses. Unlike those, this state cannot live directly on AppContext
+// itself: AppContext is copied by value at several call sites (e.g.
+// engine_tests.cpp / miniapp_system_tests.cpp's
+// `AppContext context = rig.Engine().Context();`), and neither a
+// std::atomic (non-copyable) nor a callback registration that must reach one
+// canonical listener would survive being duplicated that way. Routing every
+// copy through one shared pointee keeps both properties.
+class InputRoutingSignal {
+public:
+    // Wait-free: a plain atomic load, no locks, no allocation -- safe to call
+    // from any thread, including the audio thread.
+    bool Routed() const noexcept { return routed_.load(std::memory_order_relaxed); }
+
+    // Message-thread only: registers (or, with an empty std::function,
+    // clears) the callback invoked on the message thread whenever Routed()
+    // actually changes value. Mirrors Engine::SetAudioDeviceChangedCallback /
+    // SetMidiProcessorsRebuiltCallback's Set<X>Callback(std::function<...>)
+    // idiom (Engine.hpp) for host -> app change notification.
+    void SetChangedCallback(std::function<void(bool)> callback) {
+        changedCallback_ = std::move(callback);
+    }
+
+    // Host-only (the JUCE and browser derivations above): publishes a freshly
+    // derived value. Message-thread only -- the atomic store by itself would
+    // be audio-thread-safe, but this method also synchronously invokes the
+    // registered callback when the value actually changed, and that callback
+    // must run on the message thread (see SetChangedCallback), so Publish
+    // itself must never be called from the audio thread.
+    void Publish(bool routed) {
+        const bool previous = routed_.exchange(routed, std::memory_order_relaxed);
+        if (previous != routed && changedCallback_) {
+            changedCallback_(routed);
+        }
+    }
+
+private:
+    std::atomic<bool> routed_{false};
+    std::function<void(bool)> changedCallback_;
+};
+
 // Non-owning pointers to every framework object an application may touch
 // (sar-3). The host owns all pointees; addresses are stable for the
 // application's lifetime. Thread roles below are binding (sar-7); a member
@@ -223,6 +290,22 @@ struct AppContext {
     // Message thread during Init only.
     GridManager* gridManager = nullptr;
 
+    // Read-only publication of the master clock's diagnostics (tempo,
+    // transport state, etc.), refreshed once per audio block by
+    // Engine::PublishClockDiagnostics. Any thread: Snapshot() is a wait-free
+    // seqlock read, safe everywhere including the audio thread. Null in a
+    // context that never constructs a real Engine, such as a test fixture's
+    // hand-built AppContext or a layout build.
+    const ClockDiagnosticsPublication* clockDiagnostics = nullptr;
+
+    // Returns the sync configuration currently requested through
+    // Engine::RequestSyncConfiguration (bound to the owning Engine's own
+    // Engine::SyncConfigurationSnapshot()). Any thread: the wrapped read is a
+    // wait-free atomic load. Empty in a context that never constructs a real
+    // Engine, such as a test fixture's hand-built AppContext or a layout
+    // build.
+    std::function<SyncConfig()> syncConfiguration;
+
     // Shared monotonic timestamp source, the same one passed to the owning
     // synth::Engine<App>'s constructor (Runtime.hpp's NowMicros() under the
     // JUCE shell, SynthRig's NextTimestamp() under the headless test rig).
@@ -232,6 +315,31 @@ struct AppContext {
     // construct a real Engine (there are none today); UI code should treat a
     // null now as "unavailable" rather than crash.
     std::function<std::uint64_t()> now;
+
+    // sar-33 external-input-routed signal; see InputRoutingSignal's class doc
+    // comment above for the exact per-backend derivation. Host-owned,
+    // non-owning, stable for the application's lifetime; null only in
+    // contexts that never construct a real Engine (there are none today).
+    // Apps should use InputRouted()/SetInputRoutedChangedCallback() below
+    // rather than this pointer directly.
+    InputRoutingSignal* inputRoutingSignal = nullptr;
+
+    // The getter (sar-33): wait-free, safe from any thread including the
+    // audio thread. Reads false when inputRoutingSignal is unset.
+    bool InputRouted() const noexcept {
+        return inputRoutingSignal != nullptr && inputRoutingSignal->Routed();
+    }
+
+    // Message-thread only: registers (or, with an empty std::function,
+    // clears) the callback the host invokes on the message thread whenever
+    // InputRouted() actually changes value. See InputRoutingSignal::
+    // SetChangedCallback for the idiom this matches. A no-op when
+    // inputRoutingSignal is unset.
+    void SetInputRoutedChangedCallback(std::function<void(bool)> callback) {
+        if (inputRoutingSignal != nullptr) {
+            inputRoutingSignal->SetChangedCallback(std::move(callback));
+        }
+    }
 };
 
 }  // namespace synth

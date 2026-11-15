@@ -12,11 +12,13 @@
 
 #include <cstddef>
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -122,6 +124,15 @@ public:
         ++dispatchCount;
         lastAction = action.name;
         lastValue = action.value;
+        if (action.name == "valid.export")
+        {
+            pendingExports.push_back(synth::FileExport{
+                .fileName = "probe.txt",
+                .mediaType = "text/plain",
+                .bytes = std::vector<std::uint8_t>{'h', 'e', 'l', 'l', 'o'},
+                .note = "",
+            });
+        }
         if (handler_)
         {
             handler_(action);
@@ -131,9 +142,64 @@ public:
     int dispatchCount = 0;
     std::string lastAction;
     std::string lastValue;
+    std::deque<synth::FileExport> pendingExports;
 
 private:
     ActionHandler handler_;
+};
+
+// Browser-backend parity for the extent-aware hook. The
+// browser Runtime shares synth::runtime_ui::RuntimeMainComponent verbatim
+// (it constructs RuntimeMainComponent<App, BrowserRuntimeMainServices<App>>),
+// so exercising the same class directly under this (non-JUCE) browser
+// translation unit proves the identical resolved-width rule applies here too.
+class ExtentAwareContractSurface final : public synth::ui::Surface,
+                                         public synth::ui::ExtentAwareSurface
+{
+public:
+    synth::ui::NodeTree BuildTree() override
+    {
+        synth::ui::Node root;
+        root.id = "extent.contract.app.root";
+        root.kind = synth::ui::NodeKind::Root;
+        root.bounds = extent_;
+        return synth::ui::NodeTree{{std::move(root)}};
+    }
+
+    void SetActionHandler(ActionHandler handler) override
+    {
+        handler_ = std::move(handler);
+    }
+
+    void DispatchAction(const synth::ui::Action&) override {}
+
+    void SetContentExtent(synth::ui::Bounds extent) override
+    {
+        extent_ = extent;
+    }
+
+private:
+    synth::ui::Bounds extent_{0.0f, 0.0f, 640.0f, 480.0f};
+    ActionHandler handler_;
+};
+
+class ExtentAwareContractApp
+{
+public:
+    static synth::RuntimeConfig Config()
+    {
+        synth::RuntimeConfig config;
+        config.appName = "ExtentAwareContractApp";
+        config.uiWidth = 640;
+        config.uiHeight = 480;
+        return config;
+    }
+
+    void Init(synth::AppContext*) {}
+    void ProcessBlock(synth::AudioBlock&) {}
+    synth::ui::Surface& PortableSurface() { return surface; }
+
+    ExtentAwareContractSurface surface;
 };
 
 class ValidApp
@@ -183,6 +249,17 @@ public:
         preparedBlockSize = blockSize;
     }
     synth::ui::Surface& PortableSurface() { return surface; }
+
+    std::optional<synth::FileExport> TakePendingFileExport()
+    {
+        if (surface.pendingExports.empty())
+        {
+            return std::nullopt;
+        }
+        synth::FileExport fileExport = std::move(surface.pendingExports.front());
+        surface.pendingExports.pop_front();
+        return fileExport;
+    }
 
     ContractSurface surface;
     synth::ParameterId probeId = 0;
@@ -463,13 +540,79 @@ void TestBrowserRuntimeUsesSharedFrameAndActionRouting()
     Require(surface.lastValue == "17", "application receives action value");
 }
 
+void TestBrowserRuntimeMainComponentSidebarTracksResolvedAppWidth()
+{
+    synth::Engine<ExtentAwareContractApp> engine([] { return std::uint64_t{0}; });
+    engine.Initialize();
+    synth_browser::BrowserMidiBridge<synth::Engine<ExtentAwareContractApp>> bridge(engine);
+    bridge.Start();
+    std::vector<synth_browser::BrowserAudioDevice> audioDevices;
+    synth_browser::BrowserRuntimeMainServices<ExtentAwareContractApp> services(engine, bridge, audioDevices);
+    synth::runtime_ui::RuntimeMainComponent<ExtentAwareContractApp,
+                                            synth_browser::BrowserRuntimeMainServices<ExtentAwareContractApp>>
+        mainComponent(engine.Application(), services);
+
+    // Default (never offered anything beyond compiled-in size): the browser
+    // composition path places the sidebar at the resolved app width, same
+    // as the pinned-width legacy rule (640 == config.uiWidth). The tree is
+    // captured in a named local (not passed as a temporary) because
+    // FindPortableNode returns a pointer into it that must outlive this
+    // Require pair.
+    const synth::ui::NodeTree initial = mainComponent.BuildTree();
+    const synth::ui::Node* sidebarDefault = FindPortableNode(initial, "runtime.sidebar.root");
+    Require(sidebarDefault != nullptr, "sidebar renders through the browser composition path");
+    Require(NearlyEqual(sidebarDefault->bounds.x, 640.0f),
+            "browser composition places the sidebar at the resolved app width");
+
+    // The browser host offers a new live extent through the same
+    // RuntimeMainComponent::SetContentExtent hook the JUCE renderer would
+    // use; the resolved app width and sidebar placement track it identically
+    // (backend parity -- same class, same composition arithmetic).
+    mainComponent.SetContentExtent({0.0f, 0.0f, 800.0f, 480.0f});
+    const synth::ui::NodeTree resized = mainComponent.BuildTree();
+    const synth::ui::Node* appRoot = FindPortableNode(resized, "extent.contract.app.root");
+    const synth::ui::Node* sidebarResized = FindPortableNode(resized, "runtime.sidebar.root");
+    Require(appRoot != nullptr, "app root renders after the browser offers a new extent");
+    Require(NearlyEqual(appRoot->bounds.width, 800.0f), "app resolves against the offered extent");
+    Require(sidebarResized != nullptr, "sidebar renders after the browser offers a new extent");
+    Require(NearlyEqual(sidebarResized->bounds.x, 800.0f),
+            "browser composition tracks the resized extent identically to JUCE");
+
+    // A vertical resize too -- the composite root
+    // (runtime.main.root) height must track the resolved app height rather
+    // than staying pinned to config.uiHeight (480). The composite root's
+    // height used to stay hardcoded to config.uiHeight even on this
+    // extent-aware branch, so this resize would validate (the validator only
+    // checks the app root) and then throw inside RequireCompositionHolds,
+    // because the taller app root no longer fit inside a 480-tall composite
+    // root.
+    mainComponent.SetContentExtent({0.0f, 0.0f, 800.0f, 600.0f});
+    const synth::ui::NodeTree resizedTaller = mainComponent.BuildTree();
+    const synth::ui::Node* appRootTaller = FindPortableNode(resizedTaller, "extent.contract.app.root");
+    const synth::ui::Node* sidebarTaller = FindPortableNode(resizedTaller, "runtime.sidebar.root");
+    const synth::ui::Node* compositeRootTaller = FindPortableNode(resizedTaller, "runtime.main.root");
+    Require(appRootTaller != nullptr, "app root renders after the browser offers a taller extent");
+    Require(NearlyEqual(appRootTaller->bounds.height, 600.0f),
+            "app resolves against the taller offered extent");
+    Require(sidebarTaller != nullptr, "sidebar renders after the browser offers a taller extent");
+    Require(NearlyEqual(sidebarTaller->bounds.x, 800.0f),
+            "sidebar x still tracks the resolved width, unaffected by the height-only change");
+    Require(compositeRootTaller != nullptr,
+            "composite root renders after the browser offers a taller extent");
+    Require(NearlyEqual(compositeRootTaller->bounds.height, 600.0f),
+            "composite root height tracks the resolved app height (600), not config.uiHeight "
+            "(480) -- BuildTree() completing without throwing also proves the validator accepted "
+            "the taller app root and RequireCompositionHolds held for both children");
+}
+
 void TestBrowserControllerDiscoveryCacheUsesSignalsAndSuccessfulCommits()
 {
     synth::Engine<ValidApp> engine([] { return std::uint64_t{0}; });
     engine.Initialize();
     synth_browser::BrowserMidiBridge<synth::Engine<ValidApp>> bridge(engine);
     bridge.Start();
-    synth_browser::BrowserRuntimeMainServices<ValidApp> services(engine, bridge);
+    std::vector<synth_browser::BrowserAudioDevice> audioDevices;
+    synth_browser::BrowserRuntimeMainServices<ValidApp> services(engine, bridge, audioDevices);
     synth::runtime_ui::RuntimeMainComponent<ValidApp,
                                             synth_browser::BrowserRuntimeMainServices<ValidApp>>
         mainComponent(engine.Application(), services);
@@ -560,40 +703,55 @@ void TestBrowserControllerDiscoveryCacheUsesSignalsAndSuccessfulCommits()
     bridge.Stop();
 }
 
-void TestWizardSubmitRefusesACandidateRemovedSinceTheLastFrame()
+// sru-70, through the real host wiring instead of MidiConfigViewModel's own
+// SetGestureCount: BrowserRuntimeMainServices::MakeControllersCallbacks
+// (BrowserRuntimeMainServices.hpp) reads callbacks.gestureCount from
+// engine_.Manager().GestureCount(), and ControllersPageSurface's
+// constructor (ControllersPageUI.hpp) only calls the view model's
+// SetGestureCount when that optional carries a value. Nothing else in this
+// suite builds a page through that production path, so a break in either
+// link -- the host forgetting to read the manager's count, or the surface
+// forgetting to forward it -- passed every other test unnoticed (C-6).
+void TestBrowserGestureFieldPastTheHostsGestureCountIsRefusedThroughRealWiring()
 {
-    RuntimeFixture fixture;
-    using Bridge = synth_browser::BrowserMidiBridge<synth::Engine<ValidApp>>;
-    const std::vector<Bridge::Endpoint> twisterPair = {
-        {.identifier = "twister-in", .name = "Midi Fighter Twister", .kind = Bridge::EndpointKind::Input},
-        {.identifier = "twister-out", .name = "Midi Fighter Twister", .kind = Bridge::EndpointKind::Output},
-    };
-    fixture.runtime.SubmitMidiEndpoints(twisterPair);
-    fixture.runtime.MessageTick(2);
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kSidebarControllers, "");
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardOpen, "");
-    const synth_browser::DecodedCommandBuffer openFrame = fixture.Frame();
-    Require(FindNode(openFrame, "controller-wizard.twister.encoder-slot") != nullptr,
-            "the unique candidate opens its wizard form");
+    synth::Engine<ValidApp> engine([] { return std::uint64_t{0}; });
+    // Before Initialize(): SetGestureCount refuses once any group exists
+    // (ValidApp::Init() creates one), matching braid4_system_tests.cpp's
+    // own MeasureBraid4Work.
+    Require(engine.Manager().SetGestureCount(8), "set the real count MakeControllersCallbacks reads");
+    engine.Initialize();
+    synth_browser::BrowserMidiBridge<synth::Engine<ValidApp>> bridge(engine);
+    bridge.Start();
+    std::vector<synth_browser::BrowserAudioDevice> audioDevices;
+    synth_browser::BrowserRuntimeMainServices<ValidApp> services(engine, bridge, audioDevices);
+    auto callbacks = services.MakeControllersCallbacks([] {});
+    Require(callbacks.gestureCount.has_value() && *callbacks.gestureCount == 8,
+            "the real host callback carries the manager's own gesture count");
 
-    // The controller is unplugged and Submit is activated before the host
-    // builds another frame. D5 requires Submit to recheck that the candidate is
-    // still present, so the cached classification has to follow the device-list
-    // change itself rather than the next frame build.
-    fixture.runtime.SubmitMidiEndpoints({});
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
+    synth::MidiControllerSlot wrldbldr;
+    wrldbldr.name = "wrld";
+    wrldbldr.kind = synth::MidiProfileKind::WrldBldr;
+    wrldbldr.config = synth::WrldBldrDefaultProfileConfig();
+    wrldbldr.input = {.identifier = "wrldbldr-in-id", .name = "WRLD.Bldr In"};
+    wrldbldr.output = {.identifier = "wrldbldr-out-id", .name = "WRLD.Bldr Out"};
+    wrldbldr.config.analogInput->gestures.resize(1);
+    wrldbldr.config.analogInput->gestures[0].gestureIx = 0;
+    synth::MidiInstrumentConfig instrument;
+    instrument.controllers.push_back(wrldbldr);
+    Require(callbacks.commitInstrument(instrument), "seed the one WRLD.Bldr controller");
 
-    const synth_browser::DecodedCommandBuffer refusedFrame = fixture.Frame();
-    const synth_browser::DecodedNode* status =
-        FindNode(refusedFrame, synth::runtime_ui::NodeIds::kWizardStatus);
-    Require(status != nullptr && status->text.find("reconnect") != std::string::npos,
-            "Submit refuses a candidate removed since the last frame with a reconnect message");
-    Require(FindNode(refusedFrame, "controller-wizard.twister.encoder-slot") != nullptr,
-            "the refused wizard session stays open");
-    Require(fixture.runtime.Engine().InstrumentSnapshot().FindController("MIDI Fighter Twister") == nullptr,
-            "a refused stale Submit commits no controller");
-    Require(!fixture.runtime.ConsumePersistenceDirty(),
-            "a refused stale Submit saves no runtime configuration");
+    synth::runtime_ui::ControllersPageSurface surface(std::move(callbacks));
+    surface.MarkDirty();
+    surface.RefreshOnTick();
+
+    const std::string editAction = "0:analogs:0:" +
+        synth::runtime_ui::ControllersLayout::FieldToken(synth::MidiMappingRowVM::Field::GestureIx) + ":8";
+    surface.DispatchAction(
+        synth::ui::Action::WithValue(synth::runtime_ui::Actions::kMappingFieldCommit, editAction));
+
+    Require(surface.StatusText() == "Refused: gesture must be an integer 0-7",
+            "a gesture past the real host's own gesture count is refused, not a Warning");
+    bridge.Stop();
 }
 
 void TestBrowserPrepareFeedsNegotiatedAudioPageAndRejectsOversizedBlocks()
@@ -762,7 +920,7 @@ void TestBrowserSyncUsesSharedStagingPersistsAndResolvesSourceNames()
             "browser uses deterministic out-of-range source fallback");
 }
 
-void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
+void TestControllersUseLatestBridgeSnapshotCommitEditsSaveImmediatelyBackAddsNoSave()
 {
     RuntimeFixture fixture;
     using Bridge = synth_browser::BrowserMidiBridge<synth::Engine<ValidApp>>;
@@ -811,18 +969,19 @@ void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
         {.identifier = "twister-out", .name = "Midi Fighter Twister", .kind = Bridge::EndpointKind::Output},
     });
     fixture.runtime.MessageTick(4);
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardOpen, "");
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
+    fixture.runtime.DispatchAction(
+        synth::runtime_ui::Actions::kAddPresetDraft, "com.sheaf.midi-fighter-twister");
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kAddController, "");
     Require(fixture.runtime.ConsumePersistenceDirty(),
-            "successful browser wizard Submit immediately marks persisted runtime configuration dirty");
-    synth::MidiInstrumentConfig wizardSavedInstrument;
-    synth::AudioDeviceState wizardSavedAudio;
-    synth::SyncConfig wizardSavedSync;
+            "successful browser Add immediately marks persisted runtime configuration dirty");
+    synth::MidiInstrumentConfig addSavedInstrument;
+    synth::AudioDeviceState addSavedAudio;
+    synth::SyncConfig addSavedSync;
     Require(synth::LoadRuntimeConfigFile(
-                fixture.Paths().configFile, wizardSavedInstrument, wizardSavedAudio, wizardSavedSync) ==
+                fixture.Paths().configFile, addSavedInstrument, addSavedAudio, addSavedSync) ==
                 synth::RuntimeConfigFileStatus::Ok &&
-                wizardSavedInstrument.FindController("MIDI Fighter Twister") != nullptr,
-            "browser wizard Submit saves the committed Twister profile through the real runtime path");
+                addSavedInstrument.FindController("MIDI Fighter Twister") != nullptr,
+            "browser Add saves the installed Twister profile through the real runtime path");
 
     std::string lastLifecycleAction;
     const auto dispatchNode = [&](const std::string& id, std::string suffix = {}) {
@@ -846,6 +1005,8 @@ void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
                 label);
     };
 
+    // The row an Add just installed opens with its editor already expanded
+    // (task 2.1), so its Rename draft is already reachable here.
     dispatchNode(synth::runtime_ui::NodeIds::ControllerRenameDraft(2), ":Browser Twister");
     const synth_browser::DecodedCommandBuffer renamedDraftFrame = fixture.Frame();
     if (FindNode(renamedDraftFrame, synth::runtime_ui::NodeIds::ControllerRenameDraft(2).c_str())->text !=
@@ -863,77 +1024,173 @@ void TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack()
             "browser Rename immediately reports a real runtime-configuration save");
     requirePersisted(3, "browser Rename persists the renamed controller record");
 
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerReconfigure(2));
-    fixture.runtime.DispatchAction("controller-wizard.twister.encoder-slot", "7");
-    fixture.runtime.Engine().EditInstrument([](synth::MidiInstrumentConfig& instrument) {
-        instrument.controllers[2].output.identifier = "stale-output";
-    });
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
-    Require(!fixture.runtime.ConsumePersistenceDirty(),
-            "refused browser reconfigure does not report a runtime-configuration save");
-    synth::MidiInstrumentConfig refusedPersisted;
-    synth::AudioDeviceState refusedAudio;
-    synth::SyncConfig refusedSync;
-    Require(synth::LoadRuntimeConfigFile(
-                fixture.Paths().configFile, refusedPersisted, refusedAudio, refusedSync) ==
-                synth::RuntimeConfigFileStatus::Ok &&
-                refusedPersisted.controllers[2].output.identifier == "twister-out",
-            "refused browser reconfigure leaves the previously persisted configuration authoritative");
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardCancel, "");
-
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerReconfigure(2));
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "browser Reconfigure immediately reports a real runtime-configuration save");
-    requirePersisted(3, "browser Reconfigure persists the replacement profile");
-
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerBlacklist(2));
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "browser Blacklist immediately reports a real runtime-configuration save");
-    requirePersisted(3, "browser Blacklist persists the inert record");
-
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerConfigure(2));
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "browser blacklisted Configure immediately reports a real runtime-configuration save");
-    requirePersisted(3, "browser blacklisted Configure persists its active replacement");
-
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerBlacklist(2));
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "second browser Blacklist saves before removal");
-    dispatchNode(synth::runtime_ui::NodeIds::ControllerRemoveBlacklist(2));
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "browser Remove from blacklist immediately reports a real runtime-configuration save");
-    requirePersisted(2, "browser Remove from blacklist persists record deletion");
-
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardOpen, "");
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardSubmit, "");
-    Require(fixture.runtime.ConsumePersistenceDirty(), "second browser wizard Submit saves before Delete");
     dispatchNode(synth::runtime_ui::NodeIds::ControllerDelete(2));
     Require(fixture.runtime.ConsumePersistenceDirty(),
             "browser Delete immediately reports a real runtime-configuration save");
     requirePersisted(2, "browser Delete persists record deletion");
 
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardOpen, "");
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kWizardIgnore, "");
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "browser Ignore immediately reports a real runtime-configuration save");
-    requirePersisted(3, "browser Ignore persists the blacklisted record");
-
     fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kBack, "");
-    Require(fixture.runtime.ConsumePersistenceDirty(),
-            "controllers Back marks browser persistence dirty after saving runtime configuration");
+    Require(!fixture.runtime.ConsumePersistenceDirty(),
+            "controllers Back adds no further browser persistence save; every edit already saved on commit");
     synth::MidiInstrumentConfig loadedInstrument;
     synth::AudioDeviceState loadedAudio;
     synth::SyncConfig loadedSync;
     Require(synth::LoadRuntimeConfigFile(
                 fixture.Paths().configFile, loadedInstrument, loadedAudio, loadedSync) ==
                 synth::RuntimeConfigFileStatus::Ok,
-            "controllers Back persists runtime configuration");
-    Require(loadedInstrument.controllers.size() == 3,
+            "the already-saved runtime configuration is still on disk after Back");
+    Require(loadedInstrument.controllers.size() == 2,
             "saved browser configuration retains every controller");
     Require(loadedInstrument.controllers[0].input.identifier == "in-b",
             "saved browser configuration contains the committed endpoint edit");
+}
+
+void TestControllersPageSavesEachCommittedEdit()
+{
+    RuntimeFixture fixture;
+    using Bridge = synth_browser::BrowserMidiBridge<synth::Engine<ValidApp>>;
+    fixture.runtime.SubmitMidiEndpoints({
+        {.identifier = "custom-in", .name = "Custom Input", .kind = Bridge::EndpointKind::Input},
+        {.identifier = "custom-out", .name = "Custom Output", .kind = Bridge::EndpointKind::Output},
+    });
+    fixture.runtime.MessageTick(2);
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kSidebarControllers, "");
+
+    const auto dispatchNode = [&](const std::string& id, std::string suffix = {}) {
+        const synth_browser::DecodedCommandBuffer frame = fixture.Frame();
+        const synth_browser::DecodedNode* node = FindNode(frame, id.c_str());
+        Require(node != nullptr && node->action.has_value(), "controller-save node has a portable action");
+        fixture.runtime.DispatchAction(node->action->name, node->action->value + suffix);
+    };
+    const auto loadPersisted = [&](synth::MidiInstrumentConfig& instrument) {
+        synth::AudioDeviceState audio;
+        synth::SyncConfig sync;
+        return synth::LoadRuntimeConfigFile(fixture.Paths().configFile, instrument, audio, sync) ==
+               synth::RuntimeConfigFileStatus::Ok;
+    };
+
+    const std::size_t presetIx = fixture.runtime.Engine().InstrumentSnapshot().controllers.size();
+    const std::size_t customIx = presetIx + 1;
+
+    // Add a preset (the library Twister descriptor, which every app catalog carries).
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kAddPresetDraft,
+                                   "com.sheaf.midi-fighter-twister");
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kAddController, "");
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) && persisted.controllers.size() == presetIx + 1,
+                "adding a preset is saved without Back");
+    }
+
+    // Add Custom.
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kAddPresetDraft, "custom");
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kAddController, "");
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) && persisted.controllers.size() == customIx + 1,
+                "adding Custom is saved without Back");
+    }
+
+    // Choose Custom's input port.
+    fixture.runtime.DispatchAction(
+        synth::runtime_ui::Actions::kEndpointSelect,
+        std::to_string(customIx) + ":input:custom-in");
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) && persisted.controllers[customIx].input.identifier == "custom-in",
+                "choosing an input port is saved without Back");
+    }
+
+    // Add a mapping entry to Custom's Encoders section.
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kAddSingle,
+                                   std::to_string(customIx) + ":encoders:encoder_turn");
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) &&
+                    persisted.controllers[customIx].config.encoderInput.has_value() &&
+                    !persisted.controllers[customIx].config.encoderInput->turns.empty(),
+                "adding a mapping entry is saved without Back");
+    }
+
+    // Edit that mapping entry's field.
+    dispatchNode(synth::runtime_ui::NodeIds::MappingField(customIx, synth::MidiConfigSection::Encoders, 0,
+                                                          synth::MidiMappingRowVM::Field::Channel),
+                ":3");
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) &&
+                    persisted.controllers[customIx].config.encoderInput->turns.front().control.channel == 3,
+                "editing a mapping field is saved without Back");
+    }
+
+    // Add, edit, and delete a connect message on the Custom row.
+    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kConnectMessageAdd,
+                                   std::to_string(customIx));
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) && persisted.controllers[customIx].config.openSysEx.size() == 1,
+                "adding a connect message is saved without Back");
+    }
+    dispatchNode(synth::runtime_ui::NodeIds::ConnectMessageField(customIx, 0), ":F0 01 F7");
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) &&
+                    persisted.controllers[customIx].config.openSysEx.front() ==
+                        (std::vector<std::uint8_t>{0xF0, 0x01, 0xF7}),
+                "editing a connect message is saved without Back");
+    }
+    dispatchNode(synth::runtime_ui::NodeIds::ConnectMessageDelete(customIx, 0));
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) && persisted.controllers[customIx].config.openSysEx.empty(),
+                "deleting a connect message is saved without Back");
+    }
+
+    // Rename Custom's row.
+    dispatchNode(synth::runtime_ui::NodeIds::ControllerRenameDraft(customIx), ":Renamed Custom");
+    dispatchNode(synth::runtime_ui::NodeIds::ControllerRename(customIx));
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) && persisted.controllers[customIx].name == "Renamed Custom",
+                "renaming a row is saved without Back");
+    }
+
+    // Diverge the preset row from its generated profile, then restore it.
+    const synth_browser::DecodedCommandBuffer beforeDivergeFrame = fixture.Frame();
+    const synth_browser::DecodedNode* presetChannelField = FindNode(
+        beforeDivergeFrame,
+        synth::runtime_ui::NodeIds::MappingField(presetIx, synth::MidiConfigSection::Encoders, 0,
+                                                 synth::MidiMappingRowVM::Field::Channel)
+            .c_str());
+    Require(presetChannelField != nullptr, "the installed preset shows an editable encoder channel field");
+    const int currentChannel = std::atoi(presetChannelField->text.c_str());
+    const int divergedChannel = (currentChannel + 1) % 16;
+    dispatchNode(synth::runtime_ui::NodeIds::MappingField(presetIx, synth::MidiConfigSection::Encoders, 0,
+                                                          synth::MidiMappingRowVM::Field::Channel),
+                ":" + std::to_string(divergedChannel));
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) &&
+                    persisted.controllers[presetIx].config.encoderInput->turns.front().control.channel ==
+                        divergedChannel,
+                "diverging the preset row's mapping field is saved without Back");
+    }
+    dispatchNode(synth::runtime_ui::NodeIds::ControllerRestore(presetIx));
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) &&
+                    persisted.controllers[presetIx].config.encoderInput->turns.front().control.channel !=
+                        divergedChannel,
+                "restoring a diverged row is saved without Back");
+    }
+
+    // Delete a row.
+    dispatchNode(synth::runtime_ui::NodeIds::ControllerDelete(customIx));
+    {
+        synth::MidiInstrumentConfig persisted;
+        Require(loadPersisted(persisted) && persisted.controllers.size() == customIx,
+                "deleting a row is saved without Back");
+    }
 }
 
 void TestFilePageDispatchesPatchLifecycleThroughBrowserRuntime()
@@ -988,11 +1245,6 @@ void TestFilePageDispatchesPatchLifecycleThroughBrowserRuntime()
             "Load selects the requested patch directory");
     Require(fixture.ProbeCenter() == 0.5f, "Load applies the latest saved patch state");
 
-    fixture.SetProbeCenter(0.8f);
-    fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kFileRevert, "");
-    fixture.PumpOnce();
-    Require(fixture.ProbeCenter() == 0.5f, "Revert restores the current patch state");
-
     fixture.SetProbeCenter(0.7f);
     fixture.runtime.DispatchAction(synth::runtime_ui::Actions::kFileNew, "");
     fixture.PumpOnce();
@@ -1008,7 +1260,7 @@ void TestFilePageDispatchesPatchLifecycleThroughBrowserRuntime()
             "file refresh reports the New patch state through the portable tree");
 }
 
-void TestPersistenceDirtyConsumesRuntimeAndServicesSourcesTogether()
+void TestPersistenceDirtyConsumesPatchAndConfigSourcesTogether()
 {
     RuntimeFixture fixture;
     fixture.Prepare();
@@ -1044,8 +1296,8 @@ void TestAudioWorkletDeadlineMeterAveragesQuantizedTimerSamples()
 
 void TestBrowserContractVersionsAreReadableBeforeRuntimeCreation()
 {
-    Require(synth_browser_abi_version() == 4,
-            "browser ABI v4 version is available before runtime creation");
+    Require(synth_browser_abi_version() == 6,
+            "browser ABI v6 version is available before runtime creation");
     Require(synth_browser_ui_protocol_version() == 2,
             "browser UI protocol version is available before runtime creation");
     Require(synth_browser_ui_protocol_version() == synth_browser::kCommandBufferVersion,
@@ -1140,9 +1392,12 @@ public:
         observedClears.push_back(statusCode);
         return 0;
     }
-    int ConsumeAudioInputRetry() override
+    int ConsumePendingAudioRequest(std::uint32_t* outControl) override
     {
         ++retryConsumeCount;
+        if (outControl != nullptr) {
+            *outControl = static_cast<std::uint32_t>(synth_browser::BrowserAudioDeviceKind::Input);
+        }
         return 1;
     }
     int SetTimestampEpochOffsetMicros(std::int64_t) override { return 0; }
@@ -1151,7 +1406,9 @@ public:
     int DispatchAction(const char*, const char*) override { return 0; }
     bool ConsumePersistenceDirty() override { return false; }
     int SubmitMidiEndpoints(const synth_browser::MidiEndpointDescriptor*, std::uint32_t) override { return 0; }
+    int SubmitAudioDevices(const synth_browser::AudioDeviceDescriptor*, std::uint32_t) override { return 0; }
     int DequeueMidiAction(synth_browser::MidiActionDescriptor*) override { return 0; }
+    int DequeueFileExport(synth_browser::FileExportDescriptor*) override { return 0; }
     int DeliverMidi(std::uint32_t, const std::uint8_t*, std::uint32_t, std::uint64_t) override { return 0; }
     const std::uint8_t* DequeueMidiOutput(synth_browser::MidiOutputDescriptor*) override { return nullptr; }
     int MidiDiagnostics(synth_browser::MidiDiagnosticsDescriptor*) override { return 0; }
@@ -1605,6 +1862,57 @@ void TestBrowserRuntimeSuccessfulDeferredAttachStaysConnectedUntilClear()
             "clearing disconnects the successful deferred source exactly once");
 }
 
+// External-input-routed signal (sar-33): the browser derivation. No granted
+// capture is not routed (including a fresh, just-started runtime); a granted
+// source (SetAudioInputSource, the grant point BrowserRuntimeAbi.cpp's
+// synth_browser_set_audio_input_source calls through to,
+// BrowserRuntime.hpp's SetAudioInputSource) routes it with a callback;
+// clearing that source (the revoke point, ClearAudioInputSource) un-routes it
+// with another callback. Identical semantic to the JUCE side
+// (RuntimeShellSessionTests.cpp's CheckInputRoutedSignal): "a user-chosen
+// input source is open and delivering." The browser host has no ThreadId
+// tagging to assert against (unlike the JUCE side), so this instead pins the
+// weaker but still load-bearing contract directly: the callback runs
+// synchronously on the calling thread (this test's thread, standing in for
+// the browser message/main thread that SetAudioInputSource/
+// ClearAudioInputSource are always invoked from), by comparing
+// std::this_thread::get_id() captured at test start against the id observed
+// inside the callback.
+void TestBrowserRuntimeInputRoutedSignalTracksCaptureGrantAndRevoke()
+{
+    using synth_browser::BrowserAudioInputStatus;
+    const auto online = static_cast<std::uint32_t>(BrowserAudioInputStatus::Online);
+    const auto streamEnded = static_cast<std::uint32_t>(BrowserAudioInputStatus::StreamEnded);
+    const std::thread::id callingThreadId = std::this_thread::get_id();
+
+    synth_browser::Runtime<InputCountApp<4>> runtime;
+    runtime.Start();
+
+    synth::AppContext& context = runtime.Engine().Context();
+    Require(!context.InputRouted(), "a freshly started runtime with no granted capture is not routed");
+
+    std::vector<bool> notifications;
+    std::vector<std::thread::id> notificationThreadIds;
+    context.SetInputRoutedChangedCallback([&](bool routed) {
+        notifications.push_back(routed);
+        notificationThreadIds.push_back(std::this_thread::get_id());
+    });
+
+    Require(runtime.SetAudioInputSource(91, 4, online), "a granted capture source publishes");
+    Require(context.InputRouted(), "a granted capture routes the signal");
+    Require(notifications.size() == 1 && notifications[0] == true,
+            "the change callback fires exactly once on the granting edge");
+    Require(notificationThreadIds[0] == callingThreadId,
+            "the granting-edge callback runs synchronously on the calling thread");
+
+    Require(runtime.ClearAudioInputSource(streamEnded), "revoking the granted capture clears it");
+    Require(!context.InputRouted(), "revoking capture un-routes the signal");
+    Require(notifications.size() == 2 && notifications[1] == false,
+            "the change callback fires exactly once on the revoking edge");
+    Require(notificationThreadIds[1] == callingThreadId,
+            "the revoking-edge callback runs synchronously on the calling thread");
+}
+
 // The rule the runtime path depends on, asserted directly: a source that was
 // only ever pending is never handed to `disconnect`.
 void TestBrowserAudioInputPublicationNeverDisconnectsANeverAttachedSource()
@@ -1714,9 +2022,11 @@ void TestBrowserAbiCarriesAudioInputSourceLifecycle()
                 runtime,
                 static_cast<std::uint32_t>(synth_browser::BrowserAudioInputStatus::StreamEnded)) == 0,
             "browser ABI forwards input source clear status");
-    Require(synth_browser_consume_audio_input_retry(runtime) == 1 &&
-                capture.retryConsumeCount == 1,
-            "browser ABI forwards audio input retry consumption");
+    std::uint32_t consumedControl = 7;  // poisoned: only a real write proves the ABI touched it
+    Require(synth_browser_consume_pending_audio_request(runtime, &consumedControl) == 1 &&
+                capture.retryConsumeCount == 1 &&
+                consumedControl == static_cast<std::uint32_t>(synth_browser::BrowserAudioDeviceKind::Input),
+            "browser ABI forwards pending audio request consumption and its control");
     Require(capture.observedSources.size() == 1 &&
                 capture.observedSources[0].handle == 91 &&
                 capture.observedSources[0].physicalChannels == 4 &&
@@ -2035,6 +2345,32 @@ void TestMidiDiagnosticsDescriptorAndTimestampEpochOffsetContract()
             "runtime retains the signed document-to-worker epoch offset before startup");
 }
 
+void TestBrowserRuntimeDequeuesQueuedFileExportsInOrder()
+{
+    RuntimeFixture fixture;
+
+    Require(!fixture.runtime.DequeueFileExport().has_value(),
+            "no file export is queued right after start");
+
+    fixture.runtime.DispatchAction("valid.export", "");
+    fixture.runtime.DispatchAction("valid.export", "");
+    fixture.runtime.MessageTick(2);
+
+    const std::optional<synth::FileExport> first = fixture.runtime.DequeueFileExport();
+    Require(first.has_value(), "the first queued export is dequeued");
+    Require(first->fileName == "probe.txt", "the dequeued export carries its file name");
+    Require(first->mediaType == "text/plain", "the dequeued export carries its media type");
+    Require(first->bytes == std::vector<std::uint8_t>({'h', 'e', 'l', 'l', 'o'}),
+            "the dequeued export carries its bytes");
+
+    const std::optional<synth::FileExport> second = fixture.runtime.DequeueFileExport();
+    Require(second.has_value(), "the second queued export is dequeued");
+    Require(second->fileName == "probe.txt", "the second dequeued export carries its file name");
+
+    Require(!fixture.runtime.DequeueFileExport().has_value(),
+            "the queue is empty once both exports have been dequeued");
+}
+
 }  // namespace
 
 int main()
@@ -2042,6 +2378,7 @@ int main()
     static_assert(synth::SynthApplication<ValidApp>);
     static_assert(synth::SynthApplication<InputCountApp<4>>);
     static_assert(synth::SynthApplication<BrowserCallbackProbeApp>);
+    static_assert(synth::SynthApplication<ExtentAwareContractApp>);
     static_assert(synth_browser::BrowserApplication<ValidApp>);
     static_assert(!synth_browser::BrowserApplication<MissingSurface>);
     static_assert(!synth::SynthApplication<MissingSurface>);
@@ -2054,6 +2391,7 @@ int main()
     TestBrowserAudioInputPublicationBlocksNewConnectionsUntilTheOldSourceIsGone();
     TestBrowserAudioInputPublicationRollsBackAFailedConnectWithoutBlocking();
     TestBrowserAudioInputPublicationNeverDisconnectsANeverAttachedSource();
+    TestBrowserRuntimeInputRoutedSignalTracksCaptureGrantAndRevoke();
     TestBrowserRuntimeDefersPreWorkletInputConnectionAndRecoversFromItsFailure();
     TestBrowserRuntimeDeferredAttachFailureKeepsOutputUiAndMidiLive();
     TestBrowserRuntimeSuccessfulDeferredAttachStaysConnectedUntilClear();
@@ -2068,17 +2406,20 @@ int main()
     TestBrowserRuntimeAdapterRejectsIncompatibleRuntimeConfigVersion();
     TestBrowserPersistenceIdentityDerivesSharedAndIsolatedRoots();
     TestBrowserRuntimeUsesSharedFrameAndActionRouting();
+    TestBrowserRuntimeMainComponentSidebarTracksResolvedAppWidth();
     TestBrowserPrepareFeedsNegotiatedAudioPageAndRejectsOversizedBlocks();
     TestNativeBuildRejectsBrowserAudioWorkletStart();
     TestSharedBrowserNavigationReplacesAndRestoresEveryRuntimePage();
     TestBrowserSyncUsesSharedStagingPersistsAndResolvesSourceNames();
-    TestControllersUseLatestBridgeSnapshotCommitEditsAndSaveOnBack();
+    TestControllersUseLatestBridgeSnapshotCommitEditsSaveImmediatelyBackAddsNoSave();
+    TestControllersPageSavesEachCommittedEdit();
     TestBrowserControllerDiscoveryCacheUsesSignalsAndSuccessfulCommits();
-    TestWizardSubmitRefusesACandidateRemovedSinceTheLastFrame();
+    TestBrowserGestureFieldPastTheHostsGestureCountIsRefusedThroughRealWiring();
     TestFilePageDispatchesPatchLifecycleThroughBrowserRuntime();
-    TestPersistenceDirtyConsumesRuntimeAndServicesSourcesTogether();
+    TestPersistenceDirtyConsumesPatchAndConfigSourcesTogether();
     TestAudioWorkletDeadlineMeterAveragesQuantizedTimerSamples();
     TestMidiOutputDescriptorHasStableWasmLayout();
     TestMidiDiagnosticsDescriptorAndTimestampEpochOffsetContract();
+    TestBrowserRuntimeDequeuesQueuedFileExportsInOrder();
     return 0;
 }

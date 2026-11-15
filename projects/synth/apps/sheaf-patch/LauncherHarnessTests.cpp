@@ -1,6 +1,7 @@
 #include "Launcher.hpp"
 
 #include "Braid4Registration.hpp"
+#include "FakeAudioDeviceType.hpp"
 #include "MiniAppRegistration.hpp"
 #include "Shell.hpp"
 #include "synth/AppRegistry.hpp"
@@ -54,7 +55,12 @@ int main() {
 
         std::function<std::unique_ptr<synth_runtime::RuntimeSessionOwner>(synth::RuntimeDataPaths)>
             miniappOwnerFactory = [](synth::RuntimeDataPaths paths) {
-                return synth_runtime::MakeRuntimeSessionOwner<synth_miniapp::MiniApp>(std::move(paths));
+                // A real device type would otherwise be created here (JUCE
+                // only creates the real platform types when its list is
+                // still empty), so a fake one is registered before Start()
+                // via MakeRuntimeSessionOwner's beforeStart hook.
+                return synth_runtime::MakeRuntimeSessionOwner<synth_miniapp::MiniApp>(
+                    std::move(paths), &synth_juce::RegisterFakeAudioDeviceType<synth_miniapp::MiniApp>);
             };
 
         auto owner = miniappOwnerFactory(synth::RuntimeDataPaths::FromDataRoot(
@@ -63,6 +69,16 @@ int main() {
                 "miniapp registration can construct through the generic runtime session owner factory");
         Require(dynamic_cast<synth_runtime::ShellComponent<synth_miniapp::MiniApp>*>(&owner->Component()) != nullptr,
                 "miniapp registration owner exposes a component through the generic interface");
+
+        // This launcher path must never reach a real platform audio device
+        // type -- the same guard RuntimeShellSessionTests.cpp applies to its
+        // own session construction.
+        auto* miniappOwner = dynamic_cast<synth_runtime::RuntimeSessionOwnerFor<synth_miniapp::MiniApp>*>(owner.get());
+        Require(miniappOwner != nullptr, "miniapp owner is the concrete RuntimeSessionOwnerFor");
+        juce::AudioIODeviceType* miniappDeviceType = miniappOwner->GetRuntime().DeviceManager().getCurrentDeviceTypeObject();
+        Require(miniappDeviceType != nullptr, "the miniapp launcher owner has a current audio device type");
+        Require(miniappDeviceType->getTypeName() == synth_juce::FakeAudioDeviceType::kTypeName,
+                "the miniapp launcher owner's current audio device type is the fake one, not a real platform type");
     }
 
     {
@@ -83,7 +99,8 @@ int main() {
 
         std::function<std::unique_ptr<synth_runtime::RuntimeSessionOwner>(synth::RuntimeDataPaths)>
             braidOwnerFactory = [](synth::RuntimeDataPaths paths) {
-                return synth_runtime::MakeRuntimeSessionOwner<synth_braid4::Braid4>(std::move(paths));
+                return synth_runtime::MakeRuntimeSessionOwner<synth_braid4::Braid4>(
+                    std::move(paths), &synth_juce::RegisterFakeAudioDeviceType<synth_braid4::Braid4>);
             };
 
         auto owner = braidOwnerFactory(synth::RuntimeDataPaths::FromDataRoot(
@@ -92,6 +109,13 @@ int main() {
                 "braid registration can construct through the generic runtime session owner factory");
         Require(dynamic_cast<synth_runtime::ShellComponent<synth_braid4::Braid4>*>(&owner->Component()) != nullptr,
                 "braid registration owner exposes a component through the generic interface");
+
+        auto* braidOwner = dynamic_cast<synth_runtime::RuntimeSessionOwnerFor<synth_braid4::Braid4>*>(owner.get());
+        Require(braidOwner != nullptr, "braid owner is the concrete RuntimeSessionOwnerFor");
+        juce::AudioIODeviceType* braidDeviceType = braidOwner->GetRuntime().DeviceManager().getCurrentDeviceTypeObject();
+        Require(braidDeviceType != nullptr, "the braid launcher owner has a current audio device type");
+        Require(braidDeviceType->getTypeName() == synth_juce::FakeAudioDeviceType::kTypeName,
+                "the braid launcher owner's current audio device type is the fake one, not a real platform type");
     }
 
     {
@@ -161,6 +185,23 @@ int main() {
                 "launcher passes shared Sheaf Patch config path for braid");
         Require(braidPaths.patchesRoot == std::filesystem::path("data/synth/sheaf-patch/patches/braid-4"),
                 "launcher passes braid app patch root");
+    }
+
+    {
+        std::vector<synth::SynthAppRegistration> apps;
+        apps.push_back(TestRegistration("alpha", "Alpha", "tools"));
+        apps.push_back(TestRegistration("zeta", "Zeta", "test"));
+
+        const auto* known = synth_sheaf_patch::ResolveDirectLaunchApp(apps, "zeta");
+        Require(known != nullptr, "known appId resolves to a registration");
+        Require(known == &apps[1], "known appId resolves to the matching registration, not a copy");
+        Require(known->manifest.appId == "zeta", "resolved registration has the requested appId");
+
+        const auto* unknown = synth_sheaf_patch::ResolveDirectLaunchApp(apps, "not-a-registered-app");
+        Require(unknown == nullptr, "unknown appId falls back to the picker sentinel");
+
+        const auto* empty = synth_sheaf_patch::ResolveDirectLaunchApp(apps, "");
+        Require(empty == nullptr, "empty argument falls back to the picker sentinel");
     }
 
     std::cout << "LauncherHarnessTests passed\n";

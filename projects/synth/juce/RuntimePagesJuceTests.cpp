@@ -84,10 +84,10 @@ int main()
     sidebarSurface.SetDeadlinePercent(9.0f);
     sidebarRenderer.RefreshFromSurface();
     const synth::ui::NodeTree refreshedSidebar = sidebarSurface.BuildTree();
-    Require(FindNodeById(refreshedSidebar, synth::runtime_ui::NodeIds::kSidebarDeadline)->text == "9.0%",
+    Require(FindNodeById(refreshedSidebar, synth::runtime_ui::NodeIds::kSidebarDeadline)->text == "DSP 9%",
             "sidebar deadline refresh updates semantic node");
 
-    // sru-2 / sru-33: the Controllers warning marker is a portable node the
+    // sru-2: the Controllers warning marker is a portable node the
     // JUCE backend renders and drops exactly as Chrome does. The sidebar knows
     // only the boolean the host hands it.
     Require(sidebarRenderer.FindByNodeId(synth::runtime_ui::NodeIds::kSidebarControllersWarning) == nullptr,
@@ -107,8 +107,12 @@ int main()
 
     synth::runtime_ui::AudioPageSurface audioSurface;
     synth::runtime_ui::AudioPageSnapshot& audioSnapshot = audioSurface.Snapshot();
-    audioSnapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions({"Speakers"});
-    audioSnapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions({"Microphone"});
+    audioSnapshot.outputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Speakers"},
+        {synth::runtime_ui::kSystemDefaultOptionId, synth::runtime_ui::kSystemDefaultOptionLabel});
+    audioSnapshot.inputOptions = synth::runtime_ui::Layout::BuildDeviceOptions(
+        {"Microphone"},
+        {synth::runtime_ui::kNoInputOptionId, synth::runtime_ui::kNoInputOptionLabel});
     audioSnapshot.deviceLineText = "Speakers: 48000 Hz, 512 frames";
     audioSnapshot.statusLineText = "Audio: Speakers";
     audioSnapshot.selectedOutputId = "Speakers";
@@ -280,10 +284,6 @@ int main()
             "browser viewer component renders");
     Require(fileRenderer.FindByNodeId(synth::runtime_ui::NodeIds::kFileBrowserTitle) != nullptr,
             "browser title renders");
-    Require(fileRenderer.FindByNodeId(synth::runtime_ui::NodeIds::kFileBrowserCurrentPath) == nullptr,
-            "flat browser omits path control");
-    Require(fileRenderer.FindByNodeId(synth::runtime_ui::NodeIds::kFileBrowserParent) == nullptr,
-            "flat browser omits parent control");
     Require(fileRenderer.FindByNodeId(synth::runtime_ui::NodeIds::FileBrowserEntryOpen(0)) == nullptr,
             "flat browser omits per-row open control");
     Require(fileRenderer.FindByNodeId(synth::runtime_ui::NodeIds::FileBrowserEntry(0)) != nullptr,

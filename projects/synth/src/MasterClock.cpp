@@ -1199,6 +1199,7 @@ ClockDiagnostics MasterClock::DiagnosticsSnapshot() const noexcept {
         .source = source_,
         .hasActiveExternalSource = hasActiveExternalSource_,
         .activeExternalSourceSlot = activeExternalSourceSlot_,
+        .transportState = TransportState(),
         .currentBpm = activeBpm_,
         .outputLatencyMicros = outputLatencyMicros_,
         .ignoredInputCount = ignoredInputCount_,

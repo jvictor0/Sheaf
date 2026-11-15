@@ -59,7 +59,35 @@ inline JuceScheduledMidiSubmission PrepareScheduledMidiSubmission(
     return submission;
 }
 
-class MidiInHandler final : private juce::MidiInputCallback {
+}  // namespace synth_juce
+
+namespace synth_runtime {
+
+// Injectable seam over the concrete JUCE device handlers below.
+// MidiConnectionManager<App> holds every controller slot's devices through
+// these two interfaces (see runtime/MidiConnectionManager.hpp's
+// MidiDeviceAccess), so a test can substitute fakes for Open/Close/Send
+// without touching real hardware; synth_juce::MidiInHandler and
+// synth_juce::MidiOutputHandler below are what the manager builds by default.
+class MidiInputEndpoint {
+public:
+    virtual ~MidiInputEndpoint() = default;
+    virtual bool Open(const juce::String& identifier) = 0;
+    virtual void Close() = 0;
+    virtual void SetProcessor(std::unique_ptr<synth::MidiInProcessor> processor) = 0;
+};
+
+class MidiOutputEndpoint : public synth::IMidiOutputSink {
+public:
+    virtual bool Open(const juce::String& identifier) = 0;
+    virtual void Close() = 0;
+};
+
+}  // namespace synth_runtime
+
+namespace synth_juce {
+
+class MidiInHandler final : private juce::MidiInputCallback, public synth_runtime::MidiInputEndpoint {
 public:
     explicit MidiInHandler(RuntimeMidiEpoch epoch = {}) : epoch_(epoch) {}
     explicit MidiInHandler(std::unique_ptr<synth::MidiInProcessor> processor,
@@ -74,7 +102,7 @@ public:
         return juce::MidiInput::getAvailableDevices();
     }
 
-    void SetProcessor(std::unique_ptr<synth::MidiInProcessor> processor) {
+    void SetProcessor(std::unique_ptr<synth::MidiInProcessor> processor) override {
         std::lock_guard lock(processorMutex_);
         processor_ = std::move(processor);
     }
@@ -84,7 +112,7 @@ public:
         return processor_.get();
     }
 
-    bool Open(const juce::String& identifier) {
+    bool Open(const juce::String& identifier) override {
         Close();
         lastError_.clear();
         const auto devices = juce::MidiInput::getAvailableDevices();
@@ -115,7 +143,7 @@ public:
         return true;
     }
 
-    void Close() {
+    void Close() override {
         if (input_ != nullptr) {
             input_->stop();
             input_.reset();
@@ -167,7 +195,7 @@ private:
     juce::String lastError_;
 };
 
-class MidiOutputHandler final : public synth::IMidiOutputSink {
+class MidiOutputHandler final : public synth_runtime::MidiOutputEndpoint {
 public:
     explicit MidiOutputHandler(RuntimeMidiEpoch epoch = {}) : epoch_(epoch) {}
     ~MidiOutputHandler() override { Close(); }
@@ -179,7 +207,7 @@ public:
         return juce::MidiOutput::getAvailableDevices();
     }
 
-    bool Open(const juce::String& identifier) {
+    bool Open(const juce::String& identifier) override {
         Close();
         lastError_.clear();
         const auto devices = juce::MidiOutput::getAvailableDevices();
@@ -211,7 +239,7 @@ public:
         return true;
     }
 
-    void Close() {
+    void Close() override {
         std::lock_guard lock(mutex_);
         if (output_ != nullptr) {
             output_->clearAllPendingMessages();

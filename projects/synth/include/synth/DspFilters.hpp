@@ -255,6 +255,25 @@ struct ClassicStateVariableFilter {
         return m_output;
     }
 
+    float LowPass() const { return m_low; }
+    float BandPass() const { return m_band; }
+    float HighPass() const { return m_high; }
+
+    void Reset() {
+        m_ic1eq = m_ic2eq = 0.0f;
+        m_low = m_band = m_high = m_output = 0.0f;
+    }
+
+    bool StateFinite() const {
+        return std::isfinite(m_ic1eq) && std::isfinite(m_ic2eq)
+            && std::isfinite(m_low) && std::isfinite(m_band)
+            && std::isfinite(m_high) && std::isfinite(m_output);
+    }
+
+    float StateMagnitude() const {
+        return std::max(std::fabs(m_ic1eq), std::fabs(m_ic2eq));
+    }
+
     void PopulateUIState(UIState& state) const {
         state.cutoff.store(m_cutoff);
         state.resonance.store(m_resonance);
@@ -415,7 +434,12 @@ struct ButterworthFilter {
 
     float Process(const Input& input) {
         SetCutoff(input.cutoff);
-        const float stage1 = m_biquad1.Process(input.value);
+        return Process(input.value);
+    }
+
+    // Fixed-coefficient processing for rate converters; configure once.
+    float Process(float value) {
+        const float stage1 = m_biquad1.Process(value);
         const float stage2 = m_biquad2.Process(stage1);
         const float stage3 = m_biquad3.Process(stage2);
         return m_biquad4.Process(stage3);

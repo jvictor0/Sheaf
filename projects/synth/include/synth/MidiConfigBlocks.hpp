@@ -72,7 +72,8 @@ std::vector<SystemAddressField> SystemAddressSchema(MidiProfileKind kind);
 // (NormalizeMidiProfileConfig uses std::stable_sort for exactly this
 // reason).
 struct SystemMessageSortKey {
-    // MessageIn::Type's declaration order (ParamIncDec=0 .. PrevParamBank=21).
+    // MessageIn::Type's declaration order (ParamIncDec=0 .. HoldDrill=24, Shift=25, SceneBlendIncDec=26,
+    // TempoBpmIncDec=27, SetTempoBpmNormalized=28, 29 kinds).
     int typeOrder = 0;
     // Per-type semantic arguments (see the table in design.md D2):
     //   SceneSelect:                   arg1 = sceneIx
@@ -242,6 +243,24 @@ struct GridMappingReconstruction {
     // Unmatched pressure data stays in caller order and is never rewritten.
     std::vector<PolyphonicPressureMapping> orphanPressureMappings;
 };
+
+// --- D3: last-control translation -------------------------------------------
+//
+// The block model keeps every range's stored end exclusive (sru-10); the page
+// shows and accepts the last control the range covers instead (sru-67), and
+// these two functions are the one definition of the translation both
+// directions go through. The corner pre-check's widened arithmetic
+// (RectangleLastCorner) computes the same "last" through this same core,
+// widened to int64_t, rather than a second copy of the formula. "Last" means
+// the covered control farthest from the range's start. On a range that only
+// ever runs upward (every CC range, every x range) that is `end - 1`. On a y
+// range, which may run either way, it is `end - d`, where `d` is +1 when
+// `end` is above `start` and -1 when it is below; reading the other way, a
+// last y at or above the start stores `last + 1`, and one below the start
+// stores `last - 1`. `mayRunDownward` selects the y-range rule; every other
+// range passes false.
+int BlockLastFromEnd(int start, int end, bool mayRunDownward);
+int BlockEndFromLast(int start, int last, bool mayRunDownward);
 
 // --- D3: expansion (block -> exact individual configs) ---------------------
 //

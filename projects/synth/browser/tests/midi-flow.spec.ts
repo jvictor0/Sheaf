@@ -1,5 +1,184 @@
 import { expect, test } from "@playwright/test";
 import type { MidiOutput } from "../src/protocol.js";
+import { makeCommandBuffer, NodeKind } from "./fixtures/command-buffer.js";
+
+// Shared by the two tests below that install a real `SynthBrowserApp` (through
+// `main.ts`'s own dispatch wiring, not a directly constructed
+// `BrowserMidiManager`) against a fake runtime module: one non-Controllers
+// button and one Controllers-sidebar button, so a click can be dispatched by
+// name.
+function genericAndControllersFrameBytes(): number[] {
+  const frame = makeCommandBuffer([
+    { id: "root", kind: NodeKind.Root, bounds: [0, 0, 200, 80], children: ["generic", "controllers"] },
+    { id: "generic", kind: NodeKind.Button, bounds: [0, 0, 200, 40], label: "Generic", action: { name: "generic.trigger", value: "pressed" } },
+    { id: "controllers", kind: NodeKind.Button, bounds: [0, 40, 200, 40], label: "Controllers", action: { name: "runtime.sidebar.controllers", value: "" } },
+  ]);
+  return Array.from(new Uint8Array(frame));
+}
+
+test("requests MIDI only when the Controllers sidebar action dispatches", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  const result = await page.evaluate(async (bytes) => {
+    const { installSynthBrowserApp } = await (new Function("return import('/dist/src/main.js')")() as Promise<any>);
+    const midiRequests: unknown[] = [];
+    (navigator as any).requestMIDIAccess = async (options: unknown) => {
+      midiRequests.push(options);
+      return { inputs: new Map(), outputs: new Map(), onstatechange: null };
+    };
+    let audioStarted = false;
+    const app = await installSynthBrowserApp(document.querySelector("#synth-root")!, {
+      module: { entryUrl: "blob:test-app", locateFile: {}, mainScriptUrlOrBlob: "blob:test-app" },
+      frameIntervalMs: 100000,
+      runtimeModuleLoader: async () => ({
+        abiVersion: 6,
+        uiProtocolVersion: 2,
+        runtimeConfigVersion: 1,
+        filesystem: {
+          filesystems: { IDBFS: "idbfs" },
+          mkdir() {},
+          mount() {},
+          syncfs(_populate: boolean, complete: () => void) { complete(); },
+        },
+        create() { return 11; },
+        audioOutputChannels() { return 1; },
+        audioInputChannels() { return 0; },
+        initialize() { return 0; },
+        prepare() { return 0; },
+        process() { return 0; },
+        // `worker.ts`'s `startAudioWorklet` polls `audioWorkletStats().blocks`
+        // for an increase over its pre-call reading before it resolves "ok";
+        // `blocks` must actually move from 0 to 1 once started; a stub that
+        // reports 1 unconditionally never satisfies that poll and stalls for
+        // its whole 5s deadline instead of resolving on the first tick.
+        startAudioWorklet() { audioStarted = true; return 0; },
+        audioWorkletStats() { return { blocks: audioStarted ? 1 : 0, peakMicrounits: 0, deadlineMicrounits: 1 }; },
+        messageTick() { return 0; },
+        buildUiFrame() { return Uint8Array.from(bytes).buffer; },
+        dispatchAction() { return 0; },
+        submitMidiEndpoints() { return 0; },
+        dequeueMidiAction() { return undefined; },
+        deliverMidi() { return 0; },
+        dequeueMidiOutput() { return undefined; },
+        destroy() {},
+      }),
+      audioOptions: {
+        audioContextFactory: () => ({
+          sampleRate: 48000,
+          destination: {},
+          audioWorklet: { addModule: async () => {} },
+          resume: async () => {},
+        }),
+        audioWorkletNodeFactory: () => ({ connect() {}, disconnect() {} }),
+      },
+    });
+    document.querySelector<HTMLElement>('[data-synth-node-id="generic"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const afterGeneric = {
+      midiRequests: midiRequests.length,
+      status: (document.querySelector("#synth-root") as HTMLElement).dataset.synthStatus,
+    };
+    document.querySelector<HTMLElement>('[data-synth-node-id="controllers"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const afterControllers = { midiRequests: midiRequests.length };
+    app.stop();
+    return { afterGeneric, afterControllers };
+  }, genericAndControllersFrameBytes());
+
+  expect(result.afterGeneric).toEqual({ midiRequests: 0, status: "audio:online; midi:offline" });
+  expect(result.afterControllers).toEqual({ midiRequests: 1 });
+});
+
+test("starts MIDI at load only when the Permissions API already reports it granted", async ({ page }) => {
+  const bytes = genericAndControllersFrameBytes();
+
+  async function runWithPermissionState(state: "granted" | "prompt" | "throws") {
+    await page.goto("http://127.0.0.1:4173/public/index.html");
+    return page.evaluate(async ({ bytes, state }) => {
+      const { installSynthBrowserApp } = await (new Function("return import('/dist/src/main.js')")() as Promise<any>);
+      const midiRequests: unknown[] = [];
+      (navigator as any).requestMIDIAccess = async (options: unknown) => {
+        midiRequests.push(options);
+        return { inputs: new Map(), outputs: new Map(), onstatechange: null };
+      };
+      // `navigator.permissions` is a getter-only accessor on the real
+      // Navigator prototype; a plain assignment silently no-ops instead of
+      // replacing it, so the stub is installed with `defineProperty`.
+      Object.defineProperty(navigator, "permissions", {
+        configurable: true,
+        value: {
+          query: async () => {
+            if (state === "throws") throw new Error("permissions query unavailable");
+            return { state };
+          },
+        },
+      });
+      let audioStarted = false;
+      const app = await installSynthBrowserApp(document.querySelector("#synth-root")!, {
+        module: { entryUrl: "blob:test-app", locateFile: {}, mainScriptUrlOrBlob: "blob:test-app" },
+        frameIntervalMs: 100000,
+        runtimeModuleLoader: async () => ({
+          abiVersion: 6,
+          uiProtocolVersion: 2,
+          runtimeConfigVersion: 1,
+          filesystem: {
+            filesystems: { IDBFS: "idbfs" },
+            mkdir() {},
+            mount() {},
+            syncfs(_populate: boolean, complete: () => void) { complete(); },
+          },
+          create() { return 11; },
+          audioOutputChannels() { return 1; },
+          audioInputChannels() { return 0; },
+          initialize() { return 0; },
+          prepare() { return 0; },
+          process() { return 0; },
+          startAudioWorklet() { audioStarted = true; return 0; },
+          audioWorkletStats() { return { blocks: audioStarted ? 1 : 0, peakMicrounits: 0, deadlineMicrounits: 1 }; },
+          messageTick() { return 0; },
+          buildUiFrame() { return Uint8Array.from(bytes).buffer; },
+          dispatchAction() { return 0; },
+          submitMidiEndpoints() { return 0; },
+          dequeueMidiAction() { return undefined; },
+          deliverMidi() { return 0; },
+          dequeueMidiOutput() { return undefined; },
+          destroy() {},
+        }),
+        audioOptions: {
+          audioContextFactory: () => ({
+            sampleRate: 48000,
+            destination: {},
+            audioWorklet: { addModule: async () => {} },
+            resume: async () => {},
+          }),
+          audioWorkletNodeFactory: () => ({ connect() {}, disconnect() {} }),
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const root = document.querySelector("#synth-root") as HTMLElement;
+      const afterLoad = { midiRequests: midiRequests.length, status: root.dataset.synthStatus };
+      let afterControllers: { midiRequests: number } | undefined;
+      if (state === "prompt") {
+        document.querySelector<HTMLElement>('[data-synth-node-id="controllers"]')!.click();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        afterControllers = { midiRequests: midiRequests.length };
+      }
+      app.stop();
+      return { afterLoad, afterControllers };
+    }, { bytes, state });
+  }
+
+  const granted = await runWithPermissionState("granted");
+  const prompt = await runWithPermissionState("prompt");
+  const throws = await runWithPermissionState("throws");
+
+  expect(granted.afterLoad).toEqual({ midiRequests: 1, status: "midi:online" });
+  expect(prompt.afterLoad).toEqual({ midiRequests: 0, status: "running" });
+  expect(prompt.afterControllers).toEqual({ midiRequests: 1 });
+  // A rejected query must not stall or fail boot: `start()`'s own final
+  // render is reached and remains "running" (a throw would leave it either
+  // unset or holding an error status instead).
+  expect(throws.afterLoad).toEqual({ midiRequests: 0, status: "running" });
+});
 
 const scheduledOutputContract = {
   controllerIx: 1,
@@ -17,7 +196,7 @@ test("forwards generic MIDI commands through the runtime worker", async ({ page 
     const calls: unknown[] = [];
     const actions = [{ type: "open-input", controllerIx: 1, identifier: "in-b", name: "Input B" }];
     const worker = new BrowserRuntimeWorker(async () => ({
-      abiVersion: 4,
+      abiVersion: 6,
       uiProtocolVersion: 2,
       runtimeConfigVersion: 1,
       create: () => 7,
@@ -175,6 +354,40 @@ test("requests Web MIDI sysex permission and remains offline when it is denied",
   expect(result.start).toEqual({ status: "offline", reason: "sysex denied" });
   expect(result.status).toBe("offline");
   expect(result.uiAndAudioRemainRunning).toEqual({ ui: true, audio: true });
+});
+
+test("overlapping activation calls share one MIDI request and report the same outcome", async ({ page }) => {
+  await page.goto("http://127.0.0.1:4173/public/index.html");
+  const result = await page.evaluate(async () => {
+    const { BrowserMidiManager } = await (new Function("return import('/dist/src/midi.js')")() as Promise<{
+      BrowserMidiManager: new (runtime: unknown, options: unknown) => { startFromUserActivation(): Promise<{ status: string }>; status(): string };
+    }>);
+    const requests: unknown[] = [];
+    let resolveAccess: (access: unknown) => void;
+    const access = new Promise((resolve) => { resolveAccess = resolve; });
+    const runtime = { submitEndpoints: async () => [], deliverMidi: async () => {}, dequeueMidiOutput: async () => undefined };
+    const manager = new BrowserMidiManager(runtime, {
+      requestMIDIAccess: async (options: unknown) => {
+        requests.push(options);
+        return access;
+      },
+      setInterval: () => 1,
+      clearInterval: () => {},
+    });
+    // Both calls fire before either has a `MIDIAccess` to guard re-entry on,
+    // the same race a second Controllers click (or the load-time saved-grant
+    // start) produces against a still-open permission prompt.
+    const first = manager.startFromUserActivation();
+    const second = manager.startFromUserActivation();
+    resolveAccess!({ inputs: new Map(), outputs: new Map(), onstatechange: null });
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    return { requestCount: requests.length, firstResult, secondResult, status: manager.status() };
+  });
+
+  expect(result.requestCount).toBe(1);
+  expect(result.firstResult).toEqual({ status: "online" });
+  expect(result.secondResult).toEqual({ status: "online" });
+  expect(result.status).toBe("online");
 });
 
 test("reconciles leased MIDI access without requesting permission a second time", async ({ page }) => {
@@ -450,8 +663,13 @@ test("real miniapp WASM keeps two Web MIDI controller slots independent through 
     ];
     await request({ type: "midi-endpoints", endpoints });
     await request({ type: "message-tick", timestampMicros: 1_000 });
-    // The shared controller page starts with slot 0; add slot 1 for the second device pair.
-    await request({ type: "dispatch-action", name: "runtime.controllers.add_controller", value: "peer:wrldbldr" });
+    // The shared controller page starts with slot 0; add slot 1 for the second
+    // device pair. `add_controller` reads the page's own preset draft rather
+    // than the value it is dispatched with, so the preset is selected first
+    // through `add_preset_draft`; WRLD.Bldr is the preset whose feedback
+    // includes a SysEx frame, which this test needs from slot 1 below.
+    await request({ type: "dispatch-action", name: "runtime.controllers.add_preset_draft", value: "library.wrldbldr" });
+    await request({ type: "dispatch-action", name: "runtime.controllers.add_controller", value: "" });
     for (const [controllerIx, input, output] of [[0, "in-a", "out-a"], [1, "in-b", "out-b"]] as const) {
       await request({ type: "dispatch-action", name: "runtime.controllers.endpoint_select", value: `${controllerIx}:input:${input}` });
       await request({ type: "dispatch-action", name: "runtime.controllers.endpoint_select", value: `${controllerIx}:output:${output}` });

@@ -229,7 +229,15 @@ public:
         ResolveTree();
         RebuildControls();
         LayoutControls();
-        repaint();
+        // paint() draws only the root's own appearance (every container and
+        // draw node is its own child component and repaints itself), so this
+        // component repaints only when that appearance changed.
+        const RootAppearance appearance = CurrentRootAppearance();
+        if (!(appearance == m_lastRootAppearance))
+        {
+            m_lastRootAppearance = appearance;
+            repaint();
+        }
     }
 
     juce::Component* FindByNodeId(const std::string& id)
@@ -258,12 +266,40 @@ public:
         LayoutControls();
     }
 
+    // What paint() below draws, so RefreshFromSurface() can tell whether it
+    // changed.
+    struct RootAppearance
+    {
+        bool hasRoot = false;
+        std::optional<juce::Colour> fill;
+        std::optional<juce::Colour> border;
+        std::optional<float> borderWidth;
+        float cornerRadius = 0.0f;
+        bool operator==(const RootAppearance&) const = default;
+    };
+
+    RootAppearance CurrentRootAppearance() const
+    {
+        const synth::ui::Node* root = RootNode();
+        if (root == nullptr)
+        {
+            return {};
+        }
+        return {true,
+                root->color.has_value()
+                    ? std::optional<juce::Colour>(StateColourFor(*root->color, root->selected, root->enabled))
+                    : std::optional<juce::Colour>(UiToJuceColour(synth::kSurfaceBackground)),
+                BorderColourForNode(*root),
+                BorderWidthForNode(*root),
+                CornerRadiusForNode(*root)};
+    }
+
     void paint(juce::Graphics& graphics) override
     {
         const synth::ui::Node* root = RootNode();
         if (root == nullptr)
         {
-            graphics.fillAll(juce::Colour(18, 20, 22));
+            graphics.fillAll(UiToJuceColour(synth::kSurfaceBackground));
             return;
         }
 
@@ -272,7 +308,7 @@ public:
                                  root->color.has_value()
                                      ? std::optional<juce::Colour>(
                                            StateColourFor(*root->color, root->selected, root->enabled))
-                                     : std::optional<juce::Colour>(juce::Colour(18, 20, 22)),
+                                     : std::optional<juce::Colour>(UiToJuceColour(synth::kSurfaceBackground)),
                                  BorderColourForNode(*root),
                                  BorderWidthForNode(*root),
                                  CornerRadiusForNode(*root));
@@ -385,6 +421,12 @@ private:
                            std::optional<float> borderWidth,
                            float cornerRadius)
         {
+            // Called for every panel on every UI tick; repaint only when the
+            // appearance actually changed.
+            if (fill == fill_ && border == border_ && borderWidth == borderWidth_ && cornerRadius == cornerRadius_)
+            {
+                return;
+            }
             fill_ = fill;
             border_ = border;
             borderWidth_ = borderWidth;
@@ -434,6 +476,13 @@ private:
                            std::optional<float> borderWidth,
                            float cornerRadius)
         {
+            // Called for every scroll panel on every UI tick; content_'s
+            // appearance derives from these same inputs, so an unchanged call
+            // changes nothing to repaint.
+            if (fill == fill_ && border == border_ && borderWidth == borderWidth_ && cornerRadius == cornerRadius_)
+            {
+                return;
+            }
             fill_ = fill;
             border_ = border;
             borderWidth_ = borderWidth;
@@ -535,6 +584,10 @@ private:
                      bool acceptsDrag,
                      bool acceptsDoubleClick)
         {
+            // Called for every draw node on every UI tick; repaint only when
+            // what this node draws actually changed (a move repaints through
+            // setBounds on its own).
+            const bool changed = id != id_ || commands != commands_ || nodeBounds != nodeBounds_;
             id_ = std::move(id);
             commands_ = std::move(commands);
             nodeBounds_ = nodeBounds;
@@ -546,7 +599,17 @@ private:
             // nothing, so sru-25's translucent visualizer underlays keep passing
             // clicks through to the encoders beneath them.
             setInterceptsMouseClicks(acceptsClick_ || acceptsDrag_ || acceptsDoubleClick_, false);
-            repaint();
+            // sprs-20: a host that wraps its shell in a scrolling
+            // juce::Viewport (Shell.hpp's ShellComponent) enables scroll-on-
+            // drag for every input source, so a plain drag anywhere would
+            // otherwise also scroll the view out from under a node that is
+            // itself being dragged (an encoder). This node takes drags iff
+            // acceptsDrag_, so it -- and only it -- opts out.
+            setViewportIgnoreDragFlag(acceptsDrag_);
+            if (changed)
+            {
+                repaint();
+            }
         }
 
         void paint(juce::Graphics& graphics) override
@@ -942,6 +1005,12 @@ private:
         m_controls = std::move(nextControls);
         m_controlIndexById = std::move(newIndexById);
 
+        // Each host's controls, in tree order: they must end up as that host's
+        // last children in this order. toFront() moves a child and repaints
+        // its host, so it runs only for a host whose order is wrong; an
+        // unchanged tick then invalidates nothing.
+        std::vector<std::pair<juce::Component*, std::vector<juce::Component*>>> orderByHost;
+        std::vector<juce::Component::SafePointer<juce::Component>> hadKeyboardFocus;
         for (const synth::ui::NodeId& nodeId : m_renderedNodeIds)
         {
             const auto controlIt = m_controlIndexById.find(nodeId.value);
@@ -957,18 +1026,43 @@ private:
             {
                 host = this;
             }
-            const bool hadKeyboardFocus = component.hasKeyboardFocus(true);
-            juce::Component::SafePointer<juce::Component> safeComponent(&component);
+            if (component.hasKeyboardFocus(true))
+            {
+                hadKeyboardFocus.emplace_back(&component);
+            }
             if (component.getParentComponent() != host)
             {
                 host->addAndMakeVisible(component);
             }
             component.setBounds(HostLocalBounds(resolvedIt->second));
-            component.toFront(false);
-            if (hadKeyboardFocus && safeComponent != nullptr
-                && !safeComponent->hasKeyboardFocus(true))
+            auto hostIt = std::find_if(orderByHost.begin(), orderByHost.end(),
+                                       [host](const auto& entry) { return entry.first == host; });
+            if (hostIt == orderByHost.end())
             {
-                safeComponent->grabKeyboardFocus();
+                hostIt = orderByHost.insert(orderByHost.end(), {host, {}});
+            }
+            hostIt->second.push_back(&component);
+        }
+
+        for (const auto& [host, ordered] : orderByHost)
+        {
+            const auto& children = host->getChildren();
+            const bool inOrder = static_cast<std::size_t>(children.size()) >= ordered.size()
+                && std::equal(ordered.begin(), ordered.end(), children.end() - static_cast<int>(ordered.size()));
+            if (!inOrder)
+            {
+                for (juce::Component* component : ordered)
+                {
+                    component->toFront(false);
+                }
+            }
+        }
+
+        for (const auto& component : hadKeyboardFocus)
+        {
+            if (component != nullptr && !component->hasKeyboardFocus(true))
+            {
+                component->grabKeyboardFocus();
             }
         }
     }
@@ -1440,6 +1534,7 @@ private:
 
     synth::ui::Surface& m_surface;
     synth::ui::NodeTree m_tree;
+    RootAppearance m_lastRootAppearance{};
     std::vector<PortableControlEntry> m_controls;
     std::unordered_map<std::string, std::size_t> m_controlIndexById;
     std::unordered_map<std::string, synth::ui::NodeId> m_parentByNodeId;

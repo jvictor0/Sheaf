@@ -224,11 +224,31 @@ struct MidiControlAddress {
     bool operator==(const MidiControlAddress& other) const = default;
 };
 
+// A turn's second job while its profile's Shift is held (smi-17). None is a
+// turn's only valid job while unshifted or on a push mapping.
+enum class EncoderShiftedJob {
+    None,
+    SceneBlend,
+    // Appended after SceneBlend so every existing enumerator keeps its
+    // ordinal.
+    TempoBpm,
+};
+
 struct EncoderMidiMapping {
     MidiControlAddress control;
     std::size_t slotIx = 0;
     std::size_t position = 0;
+    EncoderShiftedJob shiftedJob = EncoderShiftedJob::None;
 };
+
+// The tempo step one encoder detent is worth, in BPM: 1.0 BPM per detent,
+// linear. Tempo is named by musicians in whole numbers, so a linear law
+// lands a detent on an integer where a logarithmic one would land on a
+// fraction the one-decimal readout would show; 1.0 also matches the
+// on-screen BPM slider's own step, already what JUCE's setRange interval and
+// the browser input's step use, so the knob and the slider agree on the
+// finest move either can make.
+inline constexpr float kTempoBpmPerEncoderDetent = 1.0f;
 
 struct EncoderMidiInConfig {
     EncoderMode mode = EncoderMode::Signed7Bit;
@@ -241,11 +261,29 @@ struct EncoderMidiInConfig {
     void KeepFirstPositions(std::size_t count);
 };
 
+// While its held button is down, a knob turn drills that knob once instead
+// of moving its value: the first turn on a mapping pushes a ParamPush and
+// marks the mapping drilled, and every further turn on that mapping while
+// still held is dropped. Release clears held and drilled so each knob is a
+// plain knob again and the next hold starts fresh.
+struct HoldDrillState {
+    bool held = false;
+    std::vector<bool> drilled;  // one flag per encoder-turn mapping
+};
+
+// Per-profile: set by a Shift button's press, cleared by its release, read
+// by that profile's system-button processor (a shifted press in place of the
+// ordinary one) and its encoder processor (a shifted job on a held turn).
+struct ShiftState {
+    bool held = false;
+};
+
 class EncoderMidiInProcessor final : public MidiInProcessor {
 public:
     EncoderMidiInProcessor(EncoderMidiInConfig config, MessageInBus* bus = nullptr,
                            AbsoluteFeedbackCoordinator* absoluteFeedback = nullptr,
-                           std::size_t controllerSlot = 0);
+                           std::size_t controllerSlot = 0,
+                           HoldDrillState* holdDrill = nullptr, ShiftState* shift = nullptr);
 
     void SetConfig(EncoderMidiInConfig config);
     const EncoderMidiInConfig& Config() const { return config_; }
@@ -255,12 +293,19 @@ private:
     const EncoderMidiMapping* FindTurn(const BasicMidi& midi) const;
     const EncoderMidiMapping* FindPush(const BasicMidi& midi) const;
     std::optional<float> DecodeDelta(std::uint8_t value) const;
+    // The signed detent count a relative mode's raw value decodes to;
+    // nothing for Absolute. DecodeDelta is that count times turnStep; the
+    // tempo branch needs detents, not a fraction of a parameter's
+    // normalized range.
+    std::optional<int> DecodeTicks(std::uint8_t value) const;
     void ReserveAbsoluteRoutes();
 
     EncoderMidiInConfig config_;
     AbsoluteFeedbackCoordinator* absoluteFeedback_ = nullptr;
     std::size_t controllerSlot_ = 0;
     std::vector<AbsoluteFeedbackCoordinator::RouteReservation> absoluteTurnRoutes_;
+    HoldDrillState* holdDrill_ = nullptr;
+    ShiftState* shift_ = nullptr;
 };
 
 struct AnalogMidiMapping {
@@ -268,9 +313,17 @@ struct AnalogMidiMapping {
     std::size_t gestureIx = 0;
 };
 
+struct AnalogAppActionMapping {
+    MidiControlAddress control;
+    std::string appAction;
+    std::string appActionValue;
+    std::size_t appActionIx = 0;
+};
+
 struct AnalogMidiInConfig {
     std::vector<AnalogMidiMapping> gestures;
     std::optional<MidiControlAddress> sceneBlend;
+    std::vector<AnalogAppActionMapping> appActions;
 };
 
 class AnalogMidiInProcessor final : public MidiInProcessor {
@@ -283,6 +336,7 @@ public:
 
 private:
     const AnalogMidiMapping* FindGesture(const BasicMidi& midi) const;
+    const AnalogAppActionMapping* FindAppAction(const BasicMidi& midi) const;
 
     AnalogMidiInConfig config_;
 };
@@ -350,6 +404,7 @@ struct SystemButtonMidiAssociation {
     std::optional<LaunchpadGridPosition> launchpadPosition;
     MessageIn press;
     std::optional<MessageIn> release;
+    std::optional<MessageIn> shiftedPress;
 };
 
 struct SystemButtonMidiInConfig {
@@ -358,7 +413,8 @@ struct SystemButtonMidiInConfig {
 
 class SystemButtonMidiInProcessor final : public MidiInProcessor {
 public:
-    SystemButtonMidiInProcessor(SystemButtonMidiInConfig config, MessageInBus* bus = nullptr);
+    SystemButtonMidiInProcessor(SystemButtonMidiInConfig config, MessageInBus* bus = nullptr,
+                                HoldDrillState* holdDrill = nullptr, ShiftState* shift = nullptr);
 
     void SetConfig(SystemButtonMidiInConfig config);
     const SystemButtonMidiInConfig& Config() const { return config_; }
@@ -369,6 +425,8 @@ private:
     void PushStamped(MessageIn message);
 
     SystemButtonMidiInConfig config_;
+    HoldDrillState* holdDrill_ = nullptr;
+    ShiftState* shift_ = nullptr;
 };
 
 enum class MidiSchedulingCapability : std::uint8_t {
@@ -603,9 +661,13 @@ protected:
     };
 
     std::optional<CellSnapshot> LoadCellSnapshot(const EncoderMidiOutMapping& mapping) const;
-    void ProcessPosition(std::size_t mappingIx, MidiControlAddress outputAddress,
-                         const CellSnapshot& snapshot, bool blank,
-                         bool& cacheValid, std::uint8_t& cachedValue);
+    // Returns false only when this call attempted an Enqueue and it was
+    // declined; the cache is left unchanged in that case, so a later pass
+    // retries it. Returns true when nothing needed sending or the send
+    // succeeded.
+    bool ProcessPosition(std::size_t mappingIx, MidiControlAddress outputAddress,
+                        const CellSnapshot& snapshot, bool blank,
+                        bool& cacheValid, std::uint8_t& cachedValue);
     bool Enqueue(const BasicMidi& midi);
     static float NormalizeForDisplay(float value, bool bipolar);
     void ReserveAbsoluteRoutes();
@@ -673,8 +735,13 @@ public:
     void Process() override;
 
 private:
+    // One sent flag per value, since each is its own Enqueue and each can be
+    // accepted or declined independently; the entry is up to date only when
+    // every flag is set.
     struct CacheEntry {
-        bool valid = false;
+        bool colorValid = false;
+        bool brightnessValid = false;
+        bool ringBrightnessValid = false;
         bool encoderRingValueValid = false;
         std::uint8_t encoderRingValue = 0;
         std::uint8_t rgbColor = 0;
@@ -862,6 +929,28 @@ private:
     std::size_t sinkIx_ = 0;
 };
 
+// Sends each configured message once after construction and once after
+// every Reset(); further Process() calls between resets send nothing.
+class OpenSysExMidiOutProcessor final : public MidiOutputProcessor {
+public:
+    OpenSysExMidiOutProcessor(std::vector<std::vector<std::uint8_t>> messages, MidiSender* sender,
+                              std::size_t sinkIx = 0);
+
+    void Reset() override;
+    void Process() override;
+
+private:
+    bool Enqueue(const BasicMidi& midi);
+
+    std::vector<std::vector<std::uint8_t>> messages_;
+    MidiSender* sender_ = nullptr;
+    std::size_t sinkIx_ = 0;
+    bool pending_ = true;
+    // The first message not yet accepted; Process() resumes here so a
+    // decline part-way through never re-sends a message already accepted.
+    std::size_t nextMessageIx_ = 0;
+};
+
 struct MidiControllerSystemMessageAssociation {
     std::optional<MidiControlAddress> control;
     std::optional<WrldBldrSystemPosition> wrldBldrPosition;
@@ -870,6 +959,16 @@ struct MidiControllerSystemMessageAssociation {
     std::optional<MessageIn> release;
     MessageIn feedback;
     bool outputFeedback = true;
+    std::string appAction;
+    std::string appActionValue;
+    // A second press for this button, pushed instead of `press` while a
+    // Shift button on the same profile is held. Absent means the button
+    // does its ordinary job shifted or not. When it is AppAction, the
+    // shifted name/value pair below identifies the action, resolved on
+    // rebuild the way appAction/appActionValue are.
+    std::optional<MessageIn> shiftedPress;
+    std::string shiftedAppAction;
+    std::string shiftedAppActionValue;
 };
 
 struct MidiControllerProfileConfig {
@@ -878,12 +977,66 @@ struct MidiControllerProfileConfig {
     std::optional<AnalogMidiInConfig> analogInput;
     std::optional<PolyphonicPressureMidiInConfig> pressureInput;
     std::vector<MidiControllerSystemMessageAssociation> systemMessages;
+
+    // Complete MIDI messages (each F0 ... F7) sent once whenever this
+    // controller's output opens or reopens. Not tied to any control or
+    // system message; a device that needs a mode message on connect uses
+    // this field regardless of what else the profile maps.
+    std::vector<std::vector<std::uint8_t>> openSysEx;
+
+    // Launchpad profiles only: which model this profile addresses. Every
+    // association carries its own model too -- that is what the runtime
+    // routes on -- but a profile with no associations has none to be read
+    // off, which is why the choice is recorded here rather than derived.
+    // New rows, blocks and grid cells are stamped from this, so the two
+    // agree by construction. Ignored by every other kind.
+    LaunchpadController launchpadModel = LaunchpadController::LaunchpadX;
 };
+
+// The one hex encoder/parser every caller that turns bytes into hex text (or
+// back) shares: FormatSysExHex/ParseSysExHex below, and the Controllers
+// page's opaque node-id/action tokens (ControllerActionToken and its
+// FromToken counterpart).
+//
+// HexEncodeBytes: two hex digits per byte, `uppercase` selecting the digit
+// case. `separator`, when non-'\0', is inserted between adjacent bytes (a
+// human-editable byte sequence, e.g. FormatSysExHex's "F0 00 ... F7");
+// '\0' (the default) packs bytes with no separator (an opaque token
+// embedded in a node id or action value, which decodes with
+// `separatedByWhitespace=false` below).
+std::string HexEncodeBytes(std::string_view bytes, bool uppercase, char separator = '\0');
+
+// The inverse of HexEncodeBytes. `separatedByWhitespace=true` requires each
+// byte's two hex digits to be its own whitespace-delimited token (refusing
+// a token that is not exactly two digits, or text with no tokens at all --
+// FormatSysExHex's form); `false` requires one contiguous run of hex digit
+// pairs with no separator (an opaque token; an even-length empty run
+// decodes to empty successfully). Accepts either digit case either way.
+// Returns false, leaving `out` unspecified, on any other malformed byte.
+bool HexDecodeBytes(std::string_view text, std::string& out, bool separatedByWhitespace);
+
+// Renders one openSysEx message as space-separated, uppercase two-digit hex
+// bytes ("F0 00 20 29 02 0D 05 F7"), for display and for round-tripping back
+// through ParseSysExHex.
+std::string FormatSysExHex(const std::vector<std::uint8_t>& message);
+
+// Parses FormatSysExHex's format (whitespace-separated hex byte pairs, case
+// insensitive) into raw bytes. Returns false, leaving `out` unspecified, on
+// any token that is not exactly two hex digits; does not itself check the
+// F0 ... F7 message shape -- see IsValidSysExMessage.
+bool ParseSysExHex(std::string_view text, std::vector<std::uint8_t>& out);
+
+// A connect-time openSysEx entry is exactly one complete SysEx message: at
+// least F0 and F7 with nothing between (2 bytes), first byte 0xF0, last byte
+// 0xF7, and every byte strictly between those two a data byte (0x00-0x7F).
+bool IsValidSysExMessage(const std::vector<std::uint8_t>& message);
 
 struct MidiControllerProfileResult {
     std::unique_ptr<MidiInProcessor> input;
     std::vector<std::unique_ptr<MidiInProcessor>> inputThru;
     std::vector<std::unique_ptr<MidiOutputProcessor>> outputs;
+    std::unique_ptr<HoldDrillState> holdDrill;
+    std::unique_ptr<ShiftState> shift;
 };
 
 MidiControllerProfileResult CreateBlacklistedMidiControllerProfile();
@@ -891,6 +1044,11 @@ MidiControllerProfileResult CreateBlacklistedMidiControllerProfile();
 enum class MidiProfileKind { WrldBldr, MfTwister, Launchpad, Generic };
 
 const char* MidiProfileKindName(MidiProfileKind kind);
+const char* MidiProfileKindDisplayName(MidiProfileKind kind);
+// What an operator reads for a Launchpad model: the product name, as
+// Novation prints it. Used by the Controllers page's Variant selector and by
+// the refusal it renders when a model has no room for a pad the row holds.
+const char* LaunchpadControllerDisplayName(LaunchpadController controller);
 bool MidiProfileKindFromName(std::string_view name, MidiProfileKind& out);
 
 struct MidiKindSupport {
@@ -1006,6 +1164,14 @@ MidiControllerProfileResult CreateLaunchpadDefaultProfile(
     LaunchpadDefaultProfileOptions options, MessageInBus* bus, MidiSender* sender,
     ParameterManager::UIState* uiState, MidiInProcessor::TimestampProvider timestampProvider = {});
 
+// The one place a kind picks its own default profile with no other input --
+// each of WrldBldr/MfTwister/Launchpad's own Default profile config function
+// above, called with its default options, or an empty config for Generic.
+// Shared by MidiConfigViewModel::AddController and by
+// MakeControllerWizardRegistry's library descriptors, so a new kind's
+// default is written once.
+MidiControllerProfileConfig DefaultProfileConfigForKind(MidiProfileKind kind);
+
 JSON ToJSON(JsonArena& arena, EncoderMode value);
 bool FromJSON(JSON json, EncoderMode& value);
 JSON ToJSON(JsonArena& arena, const MidiControlAddress& value);
@@ -1022,6 +1188,8 @@ JSON ToJSON(JsonArena& arena, const EncoderMidiInConfig& value);
 bool FromJSON(JSON json, EncoderMidiInConfig& value);
 JSON ToJSON(JsonArena& arena, const AnalogMidiMapping& value);
 bool FromJSON(JSON json, AnalogMidiMapping& value);
+JSON ToJSON(JsonArena& arena, const AnalogAppActionMapping& value);
+bool FromJSON(JSON json, AnalogAppActionMapping& value);
 JSON ToJSON(JsonArena& arena, const AnalogMidiInConfig& value);
 bool FromJSON(JSON json, AnalogMidiInConfig& value);
 JSON ToJSON(JsonArena& arena, const EncoderMidiOutMapping& value);

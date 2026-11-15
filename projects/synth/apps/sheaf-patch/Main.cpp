@@ -1,9 +1,9 @@
 #include "Launcher.hpp"
 #include "Braid4Registration.hpp"
 #include "HostDataPaths.hpp"
+#include "LauncherWindow.hpp"
 #include "MiniAppRegistration.hpp"
 #include "OneSecondDelayRegistration.hpp"
-#include "Shell.hpp"
 #include "synth/ThreadId.hpp"
 
 // Optional out-of-tree application supplied by the EXTRA_APP_* build variables.
@@ -26,33 +26,42 @@ public:
     const juce::String getApplicationVersion() override { return "0.1"; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
-    void initialise(const juce::String&) override {
+    void initialise(const juce::String& commandLine) override {
         synth::SetCurrentThreadId(synth::ThreadId::Message);
 
         try {
             dataRoot_ = synth_runtime::SheafUserApplicationDataRoot();
 
-            window_ = std::make_unique<MainWindow>("Sheaf Patch");
+            window_ = std::make_unique<synth_runtime::MainWindow>("Sheaf Patch");
 
             std::vector<synth::SynthAppRegistration> apps;
             apps.push_back(synth_miniapp::MakeMiniAppRegistration([this](synth::RuntimeDataPaths paths) {
-                LaunchRegisteredApp<synth_miniapp::MiniApp>(std::move(paths));
+                synth_runtime::LaunchRegisteredApp<synth_miniapp::MiniApp>(
+                    *window_, activeSession_, std::move(paths));
             }));
             apps.push_back(synth_braid4::MakeBraid4Registration([this](synth::RuntimeDataPaths paths) {
-                LaunchRegisteredApp<synth_braid4::Braid4>(std::move(paths));
+                synth_runtime::LaunchRegisteredApp<synth_braid4::Braid4>(
+                    *window_, activeSession_, std::move(paths));
             }));
             apps.push_back(synth_one_second_delay::MakeOneSecondDelayRegistration(
                 [this](synth::RuntimeDataPaths paths) {
-                    LaunchRegisteredApp<synth_one_second_delay::OneSecondDelay>(std::move(paths));
+                    synth_runtime::LaunchRegisteredApp<synth_one_second_delay::OneSecondDelay>(
+                        *window_, activeSession_, std::move(paths));
                 }));
 #ifdef SHEAF_PATCH_EXTRA_APP_TYPE
             apps.push_back(SHEAF_PATCH_EXTRA_APP_REGISTRAR([this](synth::RuntimeDataPaths paths) {
-                LaunchRegisteredApp<SHEAF_PATCH_EXTRA_APP_TYPE>(std::move(paths));
+                synth_runtime::LaunchRegisteredApp<SHEAF_PATCH_EXTRA_APP_TYPE>(
+                    *window_, activeSession_, std::move(paths));
             }));
 #endif
 
-            launcher_ = std::make_unique<LauncherComponent>(std::move(apps), dataRoot_);
-            window_->ShowContent(*launcher_, 720, 420);
+            if (const auto* directLaunch = ResolveDirectLaunchApp(apps, commandLine.trim().toStdString());
+                directLaunch != nullptr) {
+                directLaunch->launch(synth::SheafPatchDataPathsForApp(dataRoot_, directLaunch->manifest.appId));
+            } else {
+                launcher_ = std::make_unique<LauncherComponent>(std::move(apps), dataRoot_);
+                window_->ShowContent(*launcher_, 720, 420);
+            }
         } catch (const std::exception& e) {
             INFO("SheafPatchApplication::initialise failed: %s", e.what());
             setApplicationReturnValue(1);
@@ -70,41 +79,8 @@ public:
     void anotherInstanceStarted(const juce::String&) override {}
 
 private:
-    class MainWindow final : public juce::DocumentWindow {
-    public:
-        explicit MainWindow(juce::String name)
-            : DocumentWindow(std::move(name), juce::Colours::black, DocumentWindow::allButtons) {
-            setUsingNativeTitleBar(true);
-            setResizable(true, true);
-            setVisible(true);
-        }
-
-        void ShowContent(juce::Component& component, int width, int height) {
-            setContentNonOwned(&component, false);
-            setSize(width, height);
-            centreWithSize(width, height);
-            setVisible(true);
-        }
-
-        void closeButtonPressed() override { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
-    };
-
-    template <synth::SynthApplication App>
-    void LaunchRegisteredApp(synth::RuntimeDataPaths paths) {
-        try {
-            auto session = synth_runtime::MakeRuntimeSessionOwner<App>(std::move(paths));
-            const synth::RuntimeConfig config = App::Config();
-
-            window_->setName(juce::String(config.appName));
-            window_->ShowContent(session->Component(), config.uiWidth, config.uiHeight);
-            activeSession_ = std::move(session);
-        } catch (const std::exception& e) {
-            INFO("SheafPatchApplication::LaunchRegisteredApp failed: %s", e.what());
-        }
-    }
-
     std::filesystem::path dataRoot_;
-    std::unique_ptr<MainWindow> window_;
+    std::unique_ptr<synth_runtime::MainWindow> window_;
     std::unique_ptr<LauncherComponent> launcher_;
     std::unique_ptr<synth_runtime::RuntimeSessionOwner> activeSession_;
 };

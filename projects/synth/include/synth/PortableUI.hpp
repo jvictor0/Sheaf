@@ -24,6 +24,8 @@ struct NodeId {
 struct Point {
     float x = 0.0f;
     float y = 0.0f;
+
+    bool operator==(const Point&) const = default;
 };
 
 // Coordinate contract (sru-46, command buffer version 2).
@@ -49,6 +51,8 @@ struct Bounds {
     float y = 0.0f;
     float width = 0.0f;
     float height = 0.0f;
+
+    bool operator==(const Bounds&) const = default;
 };
 
 enum class TextAlign {
@@ -61,6 +65,8 @@ struct TextStyle {
     float size = 14.0f;
     Color color = Color::Rgb(255, 255, 255);
     TextAlign align = TextAlign::Left;
+
+    bool operator==(const TextStyle&) const = default;
 };
 
 struct Action {
@@ -105,6 +111,8 @@ struct DrawCommand {
     std::string text;
     TextStyle textStyle{};
     std::vector<Point> points{};
+
+    bool operator==(const DrawCommand&) const = default;
 
     static DrawCommand Fill(Color color);
     static DrawCommand Fill(Bounds bounds, Color color);
@@ -287,6 +295,43 @@ public:
     // not duplicate the surface's own action routing.
     virtual void SetActionHandler(ActionHandler handler) = 0;
     virtual void DispatchAction(const Action& action) = 0;
+};
+
+// Optional capability (sprs-13): a Surface that resolves its BuildTree()
+// output against a caller-supplied live content extent rather than a
+// compiled-in size. Base Surface stays extent-free -- accessors like
+// SynthApplication::PortableSurface() are constrained to return exactly
+// `Surface&`, erasing the concrete type, so a compile-time trait on that
+// accessor's result can never see anything beyond the base interface. A
+// runtime check against this separate, polymorphic interface is the
+// detection idiom that still works through that erasure: the shell
+// dynamic_casts the Surface& it already holds, and a surface that doesn't
+// additionally derive from ExtentAwareSurface simply resolves BuildTree()
+// at its own compiled-in size (composition unchanged).
+class ExtentAwareSurface {
+public:
+    virtual ~ExtentAwareSurface() = default;
+    virtual void SetContentExtent(Bounds extent) = 0;
+};
+
+// Optional capability (sprs-19): a Surface that declares its own root
+// bounds for the next BuildTree() call, instead of resolving against the
+// configured or offered size, and may name a node of that same tree where
+// the runtime sidebar should be placed. Detected the same dynamic_cast idiom
+// as ExtentAwareSurface, for the same erasure reason (SynthApplication's
+// PortableSurface() accessor returns exactly `Surface&`).
+class SelfSizedSurface {
+public:
+    virtual ~SelfSizedSurface() = default;
+    // The bounds the next BuildTree() call's root will carry. The shared
+    // main component validates the built root against this instead of the
+    // configured or offered size.
+    virtual Bounds RootBounds() const = 0;
+    // The id of a node in the next BuildTree() call's output where the
+    // runtime sidebar root should be placed, or nullopt to place the
+    // sidebar at the app root's right edge as for a surface that does not
+    // implement this interface.
+    virtual std::optional<NodeId> SidebarSlot() const = 0;
 };
 
 inline DrawCommand DrawCommand::Fill(Color color) {

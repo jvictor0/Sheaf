@@ -179,6 +179,38 @@ inline std::vector<std::string> ContainmentViolations(const NodeTree& tree,
     return violations;
 }
 
+// controllers-page-fits-its-host: every node's rectangle lies inside a
+// caller-supplied horizontal extent, folded over the ACCUMULATED ORIGINS of
+// its ancestor chain (the coordinate contract at the top of PortableUI.hpp),
+// not just against its immediate parent's own box the way `ContainmentViolations`
+// checks. A row nested inside a `ScrollArea` whose declared scroll content is
+// wider than the surface passes `ContainmentViolations` (it is inside its
+// parent) while still running off the actual application window -- this is
+// the check that catches that case. Vertical extent and any runtime scroll
+// offset are out of scope: the tree carries no scroll position, only the
+// resolver's static layout, and the bug this exists to catch is horizontal.
+inline std::vector<std::string> FitsWithinViolations(const NodeTree& tree, Bounds bounds)
+{
+    const Index index(tree);
+    std::vector<std::string> violations;
+    for (const Node& node : tree.nodes)
+    {
+        float left = 0.0f;
+        for (const Node* current = &node; current != nullptr; current = index.Parent(current->id.value))
+        {
+            left += current->bounds.x;
+        }
+        const float right = left + node.bounds.width;
+        if (left < bounds.x - kTolerance || right > bounds.x + bounds.width + kTolerance)
+        {
+            violations.push_back(node.id.value + " left=" + Format(left) + " right=" + Format(right) +
+                                 " leaves bound " + Format(bounds.x) + ".." +
+                                 Format(bounds.x + bounds.width));
+        }
+    }
+    return violations;
+}
+
 // sru-25's visualizer underlay is the one overlay a first-party tree declares
 // through `overlayOf`, and the resolver gives it exactly its target's bounds.
 // So rather than exempting it from the overlap check, this pins what it is:
@@ -416,11 +448,14 @@ inline SpacingReport SpacingConformance(const NodeTree& tree,
 }
 
 // sru-48: like-type controls share column positions. A form grid aligns the
-// label and control columns of its participating rows to shared x-offsets, so
-// the check is that every row of `containerId` puts its n-th child at the same
-// x and gives it the same width. Rows with a different child count are not
-// part of the same column set and are skipped, which is why the caller gets
-// told how many rows were actually compared.
+// label and control columns of its participating rows to a shared left edge,
+// so the check is that every row of `containerId` puts its n-th child at the
+// same x. Width is NOT compared: it is a per-control declaration -- a button
+// sized to its own caption instead of stretching across the column is
+// intended, not a violation, as long as it still starts where the rest of the
+// column starts. Rows with a different child count are not part of the same
+// column set and are skipped, which is why the caller gets told how many rows
+// were actually compared.
 struct ColumnReport {
     std::vector<std::string> violations;
     std::size_t comparedRows = 0;
@@ -474,13 +509,6 @@ inline ColumnReport ColumnAlignment(const NodeTree& tree, const std::string& con
                 report.violations.push_back(cells[ix]->id.value + " x=" + Format(cells[ix]->bounds.x) +
                                             " leaves column " + std::to_string(column) + " held by " +
                                             cells[0]->id.value + " at x=" + Format(cells[0]->bounds.x));
-            }
-            if (std::abs(cells[ix]->bounds.width - cells[0]->bounds.width) > kTolerance)
-            {
-                report.violations.push_back(cells[ix]->id.value + " width=" +
-                                            Format(cells[ix]->bounds.width) + " leaves column " +
-                                            std::to_string(column) + " width " +
-                                            Format(cells[0]->bounds.width));
             }
         }
     }

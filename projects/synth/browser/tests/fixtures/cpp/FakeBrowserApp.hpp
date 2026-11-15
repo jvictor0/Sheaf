@@ -1,12 +1,17 @@
 #pragma once
 
+#include "synth/AppConcepts.hpp"
 #include "synth/AppContext.hpp"
 #include "synth/PortableUI.hpp"
 #include "synth/PortableUIBuilders.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <functional>
+#include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace synth_browser::test {
 
@@ -36,7 +41,8 @@ public:
                 synth::ui::Action::Named("fake.double_click"),
                 {})
             .StatusText("fake-browser-action-status",
-                        "Actions: " + std::to_string(actionCount_) + " " + lastActionName_, {});
+                        "Actions: " + std::to_string(actionCount_) + " " + lastActionName_, {})
+            .Button("fake-browser-export", "Export", synth::ui::Action::Named("fake.export"), {});
         return builder.Build({0.0f, 0.0f, 640.0f, height_});
     }
 
@@ -49,10 +55,27 @@ public:
     {
         ++actionCount_;
         lastActionName_ = action.name;
+        if (action.name == "fake.export")
+        {
+            pendingExport_ = synth::FileExport{
+                .fileName = "fixture-export.txt",
+                .mediaType = "text/plain",
+                .bytes = std::vector<std::uint8_t>{'f', 'i', 'x', 't', 'u', 'r', 'e', ' ', 'e', 'x', 'p',
+                                                    'o', 'r', 't', '\n'},
+                .note = "",
+            };
+        }
         if (handler_)
         {
             handler_(action);
         }
+    }
+
+    std::optional<synth::FileExport> TakePendingFileExport()
+    {
+        std::optional<synth::FileExport> fileExport = std::move(pendingExport_);
+        pendingExport_.reset();
+        return fileExport;
     }
 
 private:
@@ -60,6 +83,7 @@ private:
     std::size_t actionCount_ = 0;
     std::string lastActionName_;
     ActionHandler handler_;
+    std::optional<synth::FileExport> pendingExport_;
 };
 
 class FakeBrowserApp {
@@ -107,6 +131,11 @@ public:
     synth::ui::Surface& PortableSurface()
     {
         return surface_;
+    }
+
+    std::optional<synth::FileExport> TakePendingFileExport()
+    {
+        return surface_.TakePendingFileExport();
     }
 
 protected:

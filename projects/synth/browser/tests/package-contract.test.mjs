@@ -86,7 +86,7 @@ test("assembles identical emitted files into byte-for-byte stable immutable pack
       abiVersion: one.browser.abiVersion,
       uiProtocolVersion: one.browser.uiProtocolVersion,
       runtimeConfigVersion: one.browser.runtimeConfigVersion,
-    }, { abiVersion: 4, uiProtocolVersion: 2, runtimeConfigVersion: 1 });
+    }, { abiVersion: 6, uiProtocolVersion: 2, runtimeConfigVersion: 1 });
     assert.equal(one.browser.entry, `packages/test-app/${one.buildId}/app.js`);
     assert.deepEqual(one.browser.files.map(({ path: filePath }) => filePath), [
       `packages/test-app/${one.buildId}/app.js`,
@@ -287,9 +287,9 @@ test("package-app command assembles aliased Emscripten roles and prints the cata
 // rejects every package it loads. Both real first-party packages compile the
 // one shared ABI source, so pinning that source against the shell constant is
 // what keeps a stale package from reaching publication.
-test("both first-party packages export the shell's UI protocol version", async () => {
+test("every first-party package exports the shell's UI protocol version", async () => {
   const manifest = await readAppBuildManifest({ browserRoot });
-  assert.deepEqual(manifest.apps.map(({ appId }) => appId), ["braid-4", "miniapp"]);
+  assert.deepEqual(manifest.apps.map(({ appId }) => appId), ["braid-4", "miniapp", "one-second-delay"]);
 
   const builder = await readFile(path.join(browserRoot, "src", "build-browser-apps.mjs"), "utf8");
   assert.match(builder, /path\.join\(browserRoot, "cpp", "BrowserRuntimeAbi\.cpp"\)/,

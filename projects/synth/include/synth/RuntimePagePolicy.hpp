@@ -11,8 +11,10 @@ enum class RuntimePageKind {
 };
 
 inline bool RuntimePageBackSavesConfiguration(RuntimePageKind page) {
-    return page == RuntimePageKind::Audio || page == RuntimePageKind::Controllers ||
-           page == RuntimePageKind::Sync;
+    // Controllers saves every committed edit as it is made, so leaving that
+    // page by Back has nothing left to save. Audio and Sync do not commit
+    // through that same path, so Back still saves for them.
+    return page == RuntimePageKind::Audio || page == RuntimePageKind::Sync;
 }
 
 }  // namespace synth
